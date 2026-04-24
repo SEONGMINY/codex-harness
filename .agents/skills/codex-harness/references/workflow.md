@@ -50,23 +50,37 @@ One failed checklist item rejects the proposal unless the gate says otherwise.
 
 After approval, create concise agent-facing documents.
 
-Recommended docs:
+Mandatory docs:
 
-- `docs/prd.md`
-- `docs/flow.md`
-- `docs/data-schema.md`
-- `docs/code-architecture.md`
-- `docs/adr.md`
+Common docs:
 
-Recommended task context:
+- `docs/harness/runner-contract.md`
+- `docs/harness/testing.md`
+- `docs/harness/document-scope.md`
 
+Task docs:
+
+- `tasks/<task-dir>/docs/prd.md`
+- `tasks/<task-dir>/docs/flow.md`
+- `tasks/<task-dir>/docs/data-schema.md`
+- `tasks/<task-dir>/docs/code-architecture.md`
+- `tasks/<task-dir>/docs/adr.md`
+
+Mandatory task context:
+
+- `tasks/<task-dir>/context-pack/static/original-prompt.md`
 - `tasks/<task-dir>/context-pack/static/product.md`
 - `tasks/<task-dir>/context-pack/static/decisions.md`
 - `tasks/<task-dir>/context-pack/static/rejected-options.md`
 - `tasks/<task-dir>/context-pack/static/constraints.md`
 - `tasks/<task-dir>/context-pack/static/test-policy.md`
+- `tasks/<task-dir>/context-pack/static/clarify-review.md`
+- `tasks/<task-dir>/context-pack/static/docs-approval.md`
+- `tasks/<task-dir>/context-pack/static/context-gathering.md`
+- `tasks/<task-dir>/context-pack/static/docs-index.md`
 
 Docs should be compact. Preserve intent, tradeoffs, and rejected options.
+Do not leave placeholders in mandatory docs or context files before Generate.
 
 ## Context Gathering
 
@@ -93,6 +107,17 @@ Rules:
 - Each phase must have executable AC commands.
 - Each phase must write a handoff file.
 - Status is owned by the runner, not Codex.
+- Phase files must be self-contained.
+- Phase files must not contain `TODO` placeholders before Generate.
+
+Before stopping after Plan, run:
+
+```bash
+python3 scripts/harness/verify-task.py <task-dir>
+python3 scripts/harness/run-phases.py <task-dir> --dry-run
+```
+
+Fix any preflight failure.
 
 ## Generate
 
@@ -100,10 +125,24 @@ Run each phase in a fresh `codex exec` session.
 
 Do not use subagents for implementation phases.
 Do not use long conversation resume as the default.
+Do not implement phase work directly in the orchestrator session.
+The orchestrator runs the runner; the phase agent launched by the runner edits implementation files.
 
 Allowed exception:
 
 - A runner may retry the same phase with fresh context and the latest failure summary.
+
+Generate completion requires runtime proof:
+
+- `context-pack/runtime/phase<N>-prompt.md`
+- `context-pack/runtime/phase<N>-output-attempt<M>.jsonl`
+- `context-pack/runtime/phase<N>-stderr-attempt<M>.txt`
+- `context-pack/runtime/docs-diff.md` after phase 0
+- `context-pack/handoffs/phase<N>.md`
+
+If runtime proof is absent, the orchestrator must report failure or blocked status.
+It must not manually mark phases complete.
+Use `scripts/harness/verify-task.py <task-dir>` as the source of truth for artifact validity.
 
 ## Evaluate
 
@@ -118,3 +157,13 @@ Minimum checks:
 - check that scope did not expand
 
 Evaluation should not trust a phase agent's success claim.
+
+When Generate completes, run `scripts/harness/evaluate-task.py` with the task's evaluation commands unless the user explicitly asks not to.
+
+Evaluate completion requires runtime proof:
+
+- `context-pack/runtime/evaluation-command-results.json`
+- `context-pack/runtime/evaluation-prompt.md`
+- `context-pack/runtime/evaluation-output.jsonl`
+
+Use `scripts/harness/verify-task.py <task-dir> --require-evaluation` after evaluation.

@@ -14,6 +14,24 @@ from typing import Iterable
 
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
+TERMINAL_RESET_STATUSES = {"completed", "error"}
+MANDATORY_STATIC_FILES = [
+    "original-prompt.md",
+    "product.md",
+    "decisions.md",
+    "rejected-options.md",
+    "constraints.md",
+    "test-policy.md",
+    "clarify-review.md",
+    "docs-approval.md",
+    "context-gathering.md",
+    "docs-index.md",
+]
+PLACEHOLDER_PATTERNS = [
+    re.compile(r"^\s*TODO\b", re.MULTILINE),
+    re.compile(r"\[TODO", re.IGNORECASE),
+    re.compile(r"PLACEHOLDER", re.IGNORECASE),
+]
 
 
 def now() -> str:
@@ -29,6 +47,13 @@ def write_json(path: Path, data: dict) -> None:
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def non_negative_int(value: str) -> int:
+    phase_number = int(value)
+    if phase_number < 0:
+        raise argparse.ArgumentTypeError("phase number must be non-negative")
+    return phase_number
 
 
 def run_capture(args: list[str], cwd: Path) -> str:
@@ -107,6 +132,14 @@ def runtime_context_files(task_path: Path, phase_number: int) -> list[Path]:
     ]
 
 
+def task_doc_files(root: Path, task_index: dict) -> list[Path]:
+    return [root / raw_path for raw_path in task_index.get("docs") or []]
+
+
+def common_doc_files(root: Path, task_index: dict) -> list[Path]:
+    return [root / raw_path for raw_path in task_index.get("common_docs") or []]
+
+
 def git_summary(root: Path) -> str:
     status = run_capture(["git", "status", "--short"], root)
     diff_stat = run_capture(["git", "diff", "--stat"], root)
@@ -141,6 +174,8 @@ def build_prompt(root: Path, task_path: Path, task_index: dict, phase: dict) -> 
     phase_path = phase_file(task_path, phase_number)
     phase_markdown = phase_path.read_text(encoding="utf-8")
 
+    common_docs_context = collect_files(root, common_doc_files(root, task_index), 60_000)
+    docs_context = collect_files(root, task_doc_files(root, task_index), 80_000)
     static_context = collect_files(root, static_context_files(task_path), 80_000)
     handoffs = collect_files(root, previous_handoff_files(task_path, phase_number), 60_000)
     runtime = collect_files(root, runtime_context_files(task_path, phase_number), 60_000)
@@ -169,6 +204,8 @@ The runner will decide success by process exit code, required outputs, and AC co
 
     parts = [
         contract,
+        "# Common Docs\n\n" + (common_docs_context or "(none)"),
+        "# Mandatory Docs\n\n" + (docs_context or "(none)"),
         "# Static Context\n\n" + (static_context or "(none)"),
         "# Previous Handoffs\n\n" + (handoffs or "(none)"),
         "# Runtime Context\n\n" + (runtime or "(none)"),
@@ -182,6 +219,60 @@ def phase_ac_commands(phase: dict, phase_markdown: str) -> list[str]:
     commands = list(phase.get("ac_commands") or [])
     commands.extend(parse_ac_commands(phase_markdown))
     return [cmd for cmd in commands if cmd and cmd != "TODO"]
+
+
+def has_placeholder(text: str) -> bool:
+    return any(pattern.search(text) for pattern in PLACEHOLDER_PATTERNS)
+
+
+def require_real_file(root: Path, path: Path, label: str) -> list[str]:
+    if not path.exists():
+        return [f"Missing {label}: {path.relative_to(root)}"]
+    if not path.is_file():
+        return [f"Not a file: {path.relative_to(root)}"]
+
+    errors = []
+    text = path.read_text(encoding="utf-8", errors="replace").strip()
+    if not text:
+        errors.append(f"Empty {label}: {path.relative_to(root)}")
+    if has_placeholder(text):
+        errors.append(f"Placeholder remains in {label}: {path.relative_to(root)}")
+    return errors
+
+
+def preflight_phase(root: Path, task_path: Path, task_index: dict, phase: dict) -> list[str]:
+    errors = []
+    phase_number = int(phase["phase"])
+    phase_path = phase_file(task_path, phase_number)
+    phase_markdown = phase_path.read_text(encoding="utf-8")
+
+    if has_placeholder(phase_markdown):
+        errors.append(f"Placeholder remains in phase file: {phase_path.relative_to(root)}")
+
+    if not phase_ac_commands(phase, phase_markdown):
+        errors.append(f"Missing AC commands for phase {phase_number}.")
+
+    if not phase.get("required_outputs"):
+        errors.append(f"Missing required_outputs for phase {phase_number}.")
+
+    docs = task_doc_files(root, task_index)
+    if len(docs) < 5:
+        errors.append("Task index must list mandatory docs.")
+    for path in common_doc_files(root, task_index):
+        errors.extend(require_real_file(root, path, "common doc"))
+    for path in docs:
+        errors.extend(require_real_file(root, path, "doc"))
+
+    static_dir = task_path / "context-pack" / "static"
+    for filename in MANDATORY_STATIC_FILES:
+        errors.extend(require_real_file(root, static_dir / filename, "static context"))
+
+    for prior_phase in range(phase_number):
+        handoff = task_path / "context-pack" / "handoffs" / f"phase{prior_phase}.md"
+        if not handoff.exists():
+            errors.append(f"Missing previous handoff: {handoff.relative_to(root)}")
+
+    return errors
 
 
 def run_shell(command: str, cwd: Path, timeout: int) -> tuple[int, str]:
@@ -207,6 +298,45 @@ def set_phase_status(task_index: dict, phase_number: int, status: str, **fields:
     raise KeyError(f"Unknown phase: {phase_number}")
 
 
+def reset_phase_statuses(task_index: dict, from_phase: int, reset_at: str) -> list[dict]:
+    reset_results = []
+    for phase in task_index.get("phases", []):
+        phase_number = int(phase["phase"])
+        old_status = phase.get("status")
+        if phase_number < from_phase or old_status not in TERMINAL_RESET_STATUSES:
+            continue
+
+        phase["status"] = "pending"
+        phase["reset_at"] = reset_at
+        phase["attempts"] = 0
+        for field in ["started_at", "completed_at", "failed_at", "error_message"]:
+            phase.pop(field, None)
+        reset_results.append(
+            {
+                "phase": phase_number,
+                "name": phase.get("name"),
+                "from_status": old_status,
+                "to_status": "pending",
+            }
+        )
+    return reset_results
+
+
+def print_reset_summary(from_phase: int, reset_results: list[dict], dry_run: bool) -> None:
+    label = "Dry-run reset" if dry_run else "Reset"
+    print(f"{label} from phase {from_phase}:")
+    if not reset_results:
+        print("- No phases reset.")
+        return
+
+    for item in reset_results:
+        name = f" {item['name']}" if item.get("name") else ""
+        print(
+            f"- phase {item['phase']}{name}: "
+            f"{item['from_status']} -> {item['to_status']}"
+        )
+
+
 def update_top_index(root: Path, task_dir: str, status: str) -> None:
     top_index_path = root / "tasks" / "index.json"
     if not top_index_path.exists():
@@ -217,8 +347,13 @@ def update_top_index(root: Path, task_dir: str, status: str) -> None:
             task["status"] = status
             if status == "completed":
                 task["completed_at"] = now()
+                task.pop("failed_at", None)
             if status == "error":
                 task["failed_at"] = now()
+                task.pop("completed_at", None)
+            if status == "pending":
+                task.pop("completed_at", None)
+                task.pop("failed_at", None)
             write_json(top_index_path, top_index)
             return
 
@@ -270,16 +405,112 @@ def verify_required_outputs(task_path: Path, phase: dict) -> list[str]:
     return missing
 
 
-def execute_phase(root: Path, task_path: Path, args: argparse.Namespace) -> bool:
+def generate_docs_diff(root: Path, task_path: Path, baseline: str | None) -> None:
+    output_path = task_path / "context-pack" / "runtime" / "docs-diff.md"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if not baseline:
+        diff = "(no baseline recorded)"
+    else:
+        result = subprocess.run(
+            ["git", "diff", baseline, "--", "docs/", str((task_path / "docs").relative_to(root))],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        diff = result.stdout.strip() or "(no docs diff)"
+
+    output_path.write_text(
+        f"# docs-diff: {task_path.name}\n\n"
+        f"Baseline: `{baseline or 'none'}`\n\n"
+        "```diff\n"
+        f"{diff}\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+
+def run_evaluation(root: Path, task_path: Path, args: argparse.Namespace) -> int:
+    command = [
+        sys.executable,
+        str(root / "scripts" / "harness" / "evaluate-task.py"),
+        task_path.name,
+        "--root",
+        str(root),
+    ]
+    for eval_command in args.eval_command or []:
+        command.extend(["--command", eval_command])
+    if args.full_auto:
+        command.append("--full-auto")
+    if args.yolo:
+        command.append("--yolo")
+    return subprocess.run(command, cwd=root, check=False).returncode
+
+
+def verify_task(root: Path, task_path: Path, require_evaluation: bool = False) -> int:
+    command = [
+        sys.executable,
+        str(root / "scripts" / "harness" / "verify-task.py"),
+        task_path.name,
+        "--root",
+        str(root),
+    ]
+    if require_evaluation:
+        command.append("--require-evaluation")
+    return subprocess.run(command, cwd=root, check=False).returncode
+
+
+def apply_phase_reset(
+    root: Path,
+    task_path: Path,
+    from_phase: int | None,
+    dry_run: bool,
+) -> dict | None:
+    if from_phase is None:
+        return None
+
     index_path = task_path / "index.json"
     task_index = read_json(index_path)
+    reset_results = reset_phase_statuses(task_index, from_phase, now())
+    print_reset_summary(from_phase, reset_results, dry_run)
+
+    if dry_run:
+        return task_index
+
+    if reset_results:
+        write_json(index_path, task_index)
+        update_top_index(root, task_path.name, "pending")
+    return None
+
+
+def execute_phase(
+    root: Path,
+    task_path: Path,
+    args: argparse.Namespace,
+    task_index_override: dict | None = None,
+) -> bool:
+    index_path = task_path / "index.json"
+    task_index = task_index_override or read_json(index_path)
     phase = pending_phase(task_index)
     if not phase:
-        update_top_index(root, task_path.name, "completed")
+        if not args.dry_run:
+            if verify_task(root, task_path) != 0:
+                args.failed = True
+                update_top_index(root, task_path.name, "error")
+                return False
+            update_top_index(root, task_path.name, "completed")
         print("No pending phases.")
         return False
 
     phase_number = int(phase["phase"])
+    preflight_errors = preflight_phase(root, task_path, task_index, phase)
+    if preflight_errors:
+        message = "Preflight failed:\n" + "\n".join(f"- {error}" for error in preflight_errors)
+        write_last_error(task_path, phase_number, message)
+        print(message, file=sys.stderr)
+        args.failed = True
+        return False
+
     prompt = build_prompt(root, task_path, task_index, phase)
     prompt_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-prompt.md"
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -323,6 +554,7 @@ def execute_phase(root: Path, task_path: Path, args: argparse.Namespace) -> bool
             write_json(index_path, task_index)
             update_top_index(root, task_path.name, "error")
             print(message, file=sys.stderr)
+            args.failed = True
             return False
 
         phase_markdown = phase_file(task_path, phase_number).read_text(encoding="utf-8")
@@ -339,6 +571,7 @@ def execute_phase(root: Path, task_path: Path, args: argparse.Namespace) -> bool
                 write_json(index_path, task_index)
                 update_top_index(root, task_path.name, "error")
                 print(message, file=sys.stderr)
+                args.failed = True
                 return False
         else:
             missing_outputs = verify_required_outputs(task_path, phase)
@@ -353,6 +586,7 @@ def execute_phase(root: Path, task_path: Path, args: argparse.Namespace) -> bool
                 write_json(index_path, task_index)
                 update_top_index(root, task_path.name, "error")
                 print(message, file=sys.stderr)
+                args.failed = True
                 return False
 
             task_index = read_json(index_path)
@@ -364,6 +598,8 @@ def execute_phase(root: Path, task_path: Path, args: argparse.Namespace) -> bool
                 error_message=None,
             )
             write_json(index_path, task_index)
+            if phase_number == 0:
+                generate_docs_diff(root, task_path, task_index.get("baseline"))
             print(f"Completed phase {phase_number}: {phase.get('name')}")
             return True
 
@@ -379,6 +615,14 @@ def main() -> int:
     parser.add_argument("--ac-timeout", type=int, default=600)
     parser.add_argument("--dry-run", action="store_true", help="Only build the next prompt.")
     parser.add_argument("--one", action="store_true", help="Run only one pending phase.")
+    parser.add_argument(
+        "--from",
+        dest="from_phase",
+        type=non_negative_int,
+        help="Reset terminal phases from this phase number before running.",
+    )
+    parser.add_argument("--evaluate", action="store_true", help="Run fresh evaluation after all phases complete.")
+    parser.add_argument("--eval-command", action="append", default=[], help="Evaluation command.")
     parser.add_argument("--full-auto", action="store_true", help="Pass --full-auto to codex exec.")
     parser.add_argument(
         "--yolo",
@@ -386,19 +630,32 @@ def main() -> int:
         help="Pass --dangerously-bypass-approvals-and-sandbox to codex exec.",
     )
     args = parser.parse_args()
+    args.failed = False
 
     root = Path(args.root).resolve()
     task_path = resolve_task_path(root, args.task)
+    task_index_override = apply_phase_reset(root, task_path, args.from_phase, args.dry_run)
 
     while True:
-        progressed = execute_phase(root, task_path, args)
+        progressed = execute_phase(root, task_path, args, task_index_override)
+        task_index_override = None
         if args.dry_run or args.one or not progressed:
             break
 
     task_index = read_json(task_path / "index.json")
-    if all(phase.get("status") == "completed" for phase in task_index.get("phases", [])):
+    if not args.dry_run and all(phase.get("status") == "completed" for phase in task_index.get("phases", [])):
+        if verify_task(root, task_path) != 0:
+            update_top_index(root, task_path.name, "error")
+            args.failed = True
+            return 1
         update_top_index(root, task_path.name, "completed")
-    return 0
+        if args.evaluate:
+            eval_returncode = run_evaluation(root, task_path, args)
+            if eval_returncode != 0:
+                args.failed = True
+            elif verify_task(root, task_path, require_evaluation=True) != 0:
+                args.failed = True
+    return 1 if args.failed else 0
 
 
 if __name__ == "__main__":

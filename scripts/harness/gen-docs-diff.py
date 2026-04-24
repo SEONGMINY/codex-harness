@@ -33,7 +33,7 @@ def main() -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     result = subprocess.run(
-        ["git", "diff", args.baseline, "--", "docs/"],
+        ["git", "diff", args.baseline, "--", "docs/", str((task_path / "docs").relative_to(root))],
         cwd=root,
         text=True,
         capture_output=True,

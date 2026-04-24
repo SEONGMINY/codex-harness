@@ -31,6 +31,18 @@ The runner updates `status`, `completed_at`, and `failed_at`.
   "prompt": "original prompt",
   "created_at": "2026-04-24T10:00:00+09:00",
   "totalPhases": 3,
+  "common_docs": [
+    "docs/harness/runner-contract.md",
+    "docs/harness/testing.md",
+    "docs/harness/document-scope.md"
+  ],
+  "docs": [
+    "tasks/0-harness-mvp/docs/prd.md",
+    "tasks/0-harness-mvp/docs/flow.md",
+    "tasks/0-harness-mvp/docs/data-schema.md",
+    "tasks/0-harness-mvp/docs/code-architecture.md",
+    "tasks/0-harness-mvp/docs/adr.md"
+  ],
   "phases": [
     {
       "phase": 0,
@@ -51,6 +63,11 @@ Allowed phase statuses:
 - `error`
 
 Only runner scripts update phase status.
+
+The runner must fail before Generate if mandatory docs, static context, AC commands, or phase files are missing or contain placeholders.
+The orchestrator must treat status JSON as insufficient proof.
+Completed phases also require matching runtime output and handoff files.
+Use `scripts/harness/verify-task.py` to enforce this.
 
 ## Phase Files
 
@@ -108,3 +125,15 @@ Phase agents must not:
 - decide next phase
 - spawn subagents for Generate
 - commit unless the phase explicitly requires it
+
+## Completion Proof
+
+Before reporting success, verify:
+
+```bash
+find tasks/<task-dir>/context-pack/runtime -maxdepth 1 -type f | sort
+find tasks/<task-dir>/context-pack/handoffs -maxdepth 1 -type f | sort
+```
+
+The runtime directory must include runner output files.
+If it does not, report failure even if `tasks/<task-dir>/index.json` says `completed`.

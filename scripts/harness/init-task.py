@@ -11,6 +11,153 @@ from datetime import datetime
 from pathlib import Path
 
 
+COMMON_DOC_TEMPLATES = {
+    "runner-contract.md": """# Runner Contract
+
+## State Ownership
+
+- Runner scripts own task and phase status.
+- Phase agents must not edit `tasks/*/index.json`.
+- Runtime proof is required before a task can be considered complete.
+
+## Runtime Proof
+
+Completed phases require:
+
+- `context-pack/runtime/phase<N>-prompt.md`
+- `context-pack/runtime/phase<N>-output-attempt<M>.jsonl`
+- `context-pack/runtime/phase<N>-stderr-attempt<M>.txt`
+- `context-pack/handoffs/phase<N>.md`
+
+Phase 0 also requires `context-pack/runtime/docs-diff.md`.
+""",
+    "testing.md": """# Harness Testing
+
+## Principles
+
+- Prefer executable commands over claims.
+- Test runner-owned state transitions with temporary task directories.
+- Keep tests standard-library only unless the target repository already provides a test stack.
+
+## Required Evidence
+
+- command
+- exit code
+- relevant stdout or stderr summary
+- file outputs that prove the behavior
+""",
+    "document-scope.md": """# Document Scope
+
+## Common Docs
+
+Repository-level docs under `docs/harness/` describe reusable harness policy and runner contracts.
+
+## Task Docs
+
+Task-specific docs live under `tasks/<task-dir>/docs/`.
+
+Use task docs for PRD, flow, data schema, architecture, and ADR for a single task.
+""",
+}
+
+DOC_TEMPLATES = {
+    "prd.md": """# PRD
+
+## Problem
+
+TODO: Define the concrete user or operator problem.
+
+## Goal
+
+TODO: Define the smallest valuable outcome.
+
+## Non-Goals
+
+TODO: List what this task will not build.
+
+## Completion Criteria
+
+TODO: List observable completion criteria.
+""",
+    "flow.md": """# Flow
+
+## Primary Flow
+
+TODO: Describe the user or operator flow.
+
+## Edge Cases
+
+TODO: List meaningful edge cases.
+""",
+    "data-schema.md": """# Data Schema
+
+## Data Model
+
+TODO: Describe data structures, files, or persistence.
+
+## Compatibility
+
+TODO: Describe migration or compatibility constraints.
+""",
+    "code-architecture.md": """# Code Architecture
+
+## Relevant Files
+
+TODO: List files and responsibilities.
+
+## Design
+
+TODO: Describe the implementation shape and boundaries.
+""",
+    "adr.md": """# ADR
+
+## Decision
+
+TODO: Record the accepted technical decision.
+
+## Rationale
+
+TODO: Explain why this decision is better than alternatives.
+
+## Rejected Options
+
+TODO: List rejected options and reasons.
+""",
+}
+
+STATIC_TEMPLATES = {
+    "product.md": "# Product Context\n\nTODO: Summarize the approved product or tooling intent.\n",
+    "decisions.md": "# Decisions\n\nTODO: List final decisions that guide implementation.\n",
+    "rejected-options.md": "# Rejected Options\n\nTODO: List options rejected during Clarify and why.\n",
+    "constraints.md": "# Constraints\n\nTODO: List hard constraints and non-negotiables.\n",
+    "test-policy.md": "# Test Policy\n\nTODO: Describe the test strategy and required commands.\n",
+    "clarify-review.md": "# Clarify Review\n\nTODO: Paste the final review gate result.\n",
+    "docs-approval.md": "# Docs Approval\n\nTODO: Record who approved docs creation and when.\n",
+    "context-gathering.md": """# Context Gathering
+
+## Relevant Files
+
+TODO: List relevant files and why they matter.
+
+## Relevant Commands
+
+TODO: List commands used to inspect or validate the repo.
+
+## Examples To Follow
+
+TODO: List local examples and patterns.
+
+## Risks
+
+TODO: List implementation risks.
+
+## Ignored Context
+
+TODO: List intentionally ignored files or areas and why.
+""",
+}
+
+
 def now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -49,7 +196,33 @@ def git_head(root: Path) -> str | None:
     return result.stdout.strip() or None
 
 
-def phase_template(phase: int, name: str) -> str:
+def write_text_if_missing(path: Path, content: str) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def docs_index(task_dir: str, common_docs: list[str], docs: list[str]) -> str:
+    lines = ["# Docs Index", ""]
+    lines.append("## Common Docs")
+    lines.append("")
+    for doc in common_docs:
+        lines.append(f"- `{doc}`")
+    lines.append("")
+    lines.append("## Task Docs")
+    lines.append("")
+    for doc in docs:
+        lines.append(f"- `{doc}`")
+    lines.append("")
+    lines.append("Keep these docs aligned with phase files and implementation.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def phase_template(phase: int, name: str, common_docs: list[str], docs: list[str]) -> str:
+    common_doc_lines = "\n".join(f"- `{doc}`" for doc in common_docs)
+    doc_lines = "\n".join(f"- `{doc}`" for doc in docs)
     return f"""# Phase {phase}: {name}
 
 ## Purpose
@@ -58,9 +231,14 @@ TODO: Describe the single outcome for this phase.
 
 ## Read First
 
+{common_doc_lines}
+{doc_lines}
 - `context-pack/static/original-prompt.md`
+- `context-pack/static/product.md`
 - `context-pack/static/decisions.md`
+- `context-pack/static/rejected-options.md`
 - `context-pack/static/constraints.md`
+- `context-pack/static/context-gathering.md`
 
 ## Work
 
@@ -97,6 +275,12 @@ def main() -> int:
         help="Phase slug. Repeat for each phase, in order.",
     )
     parser.add_argument(
+        "--evaluation-command",
+        action="append",
+        default=[],
+        help="Evaluation command. Repeat for each command.",
+    )
+    parser.add_argument(
         "--root",
         default=".",
         help="Repository root. Defaults to current directory.",
@@ -120,34 +304,47 @@ def main() -> int:
     task_path = tasks_root / task_dir
     phases_path = task_path / "phases"
     context_path = task_path / "context-pack"
+    common_docs_path = root / "docs" / "harness"
+    docs_path = task_path / "docs"
 
     for directory in [
         phases_path,
         context_path / "static",
         context_path / "runtime",
         context_path / "handoffs",
+        common_docs_path,
+        docs_path,
     ]:
         directory.mkdir(parents=True, exist_ok=True)
+
+    common_docs = []
+    for filename, template in COMMON_DOC_TEMPLATES.items():
+        target = common_docs_path / filename
+        write_text_if_missing(target, template)
+        common_docs.append(str(target.relative_to(root)))
+
+    docs = []
+    for filename, template in DOC_TEMPLATES.items():
+        target = docs_path / filename
+        write_text_if_missing(target, template)
+        docs.append(str(target.relative_to(root)))
 
     (context_path / "static" / "original-prompt.md").write_text(
         prompt.rstrip() + "\n",
         encoding="utf-8",
     )
-    for filename, title in [
-        ("decisions.md", "Decisions"),
-        ("rejected-options.md", "Rejected Options"),
-        ("constraints.md", "Constraints"),
-        ("test-policy.md", "Test Policy"),
-    ]:
-        target = context_path / "static" / filename
-        if not target.exists():
-            target.write_text(f"# {title}\n\nTODO\n", encoding="utf-8")
+    for filename, template in STATIC_TEMPLATES.items():
+        write_text_if_missing(context_path / "static" / filename, template)
+    write_text_if_missing(
+        context_path / "static" / "docs-index.md",
+        docs_index(task_dir, common_docs, docs),
+    )
 
     phase_entries = []
     for phase_number, raw_name in enumerate(args.phase):
         phase_name = slugify(raw_name)
         (phases_path / f"phase{phase_number}.md").write_text(
-            phase_template(phase_number, phase_name),
+            phase_template(phase_number, phase_name, common_docs, docs),
             encoding="utf-8",
         )
         phase_entries.append(
@@ -169,6 +366,9 @@ def main() -> int:
         "baseline": git_head(root),
         "created_at": now(),
         "totalPhases": len(phase_entries),
+        "common_docs": common_docs,
+        "docs": docs,
+        "evaluation_commands": args.evaluation_command,
         "phases": phase_entries,
     }
     write_json(task_path / "index.json", task_index)

@@ -13,26 +13,82 @@ The harness does not chain long Codex conversations. It captures decisions as fi
 
 ## Workflow
 
-1. Clarify the request.
-2. Review the request with the correct gate:
+1. Read `references/workflow.md`, `references/review-gates.md`, `references/context-pack.md`, and `references/task-format.md`.
+2. Clarify the request.
+3. Review the request with the correct gate:
    - product feature gate for customer-facing features
    - internal tooling gate for automation and developer workflow tools
-3. Ask for approval before writing Clarify docs.
-4. Create concise docs and `context-pack/static/*`.
-5. Gather code and project context.
-6. Plan work into task/phase files.
-7. Run phases with `scripts/harness/run-phases.py`.
-8. Evaluate from fresh context.
+4. Ask for approval before writing Clarify docs.
+5. After approval, create all mandatory docs, context-pack files, task indexes, and phase files.
+6. Gather code and project context into the context-pack.
+7. Plan work into self-contained task/phase files.
+8. Validate the task with `scripts/harness/verify-task.py <task-dir>` and `scripts/harness/run-phases.py <task-dir> --dry-run`.
+9. Run phases with `scripts/harness/run-phases.py`.
+10. Evaluate from fresh context.
 
 ## Hard Rules
 
 - Do not create Clarify docs until the user explicitly approves.
 - Do not flatter the proposal. Challenge weak evidence, unclear value, vague urgency, and bloated scope.
 - Do not use subagents for Generate phases.
+- Do not implement Generate work directly in the orchestrator session.
+- Generate means running `scripts/harness/run-phases.py`; direct edits are only allowed while acting as a phase agent launched by the runner.
 - Do not let phase agents update task status.
 - Let the runner decide phase success, retry, failure, and next phase.
 - Treat conversation as source material, not execution state.
 - Store durable decisions in files under the task context-pack.
+- Do not stop after approval until mandatory docs, context-pack files, task indexes, and phase files exist.
+- Do not run Generate when phase files still contain placeholders or missing AC commands.
+- Do not manually mark phases or tasks completed.
+- Do not manually create runtime proof files.
+- Do not claim Generate or Evaluate is complete unless the required runtime proof exists.
+
+## Stop Conditions
+
+- During Clarify, stop only to ask targeted questions or to present Clarify Review.
+- After Clarify Review passes, stop and ask the user to approve docs creation.
+- After the user approves docs creation, do not stop until these exist:
+  - `docs/harness/runner-contract.md`
+  - `docs/harness/testing.md`
+  - `docs/harness/document-scope.md`
+  - `tasks/<task-dir>/docs/prd.md`
+  - `tasks/<task-dir>/docs/flow.md`
+  - `tasks/<task-dir>/docs/data-schema.md`
+  - `tasks/<task-dir>/docs/code-architecture.md`
+  - `tasks/<task-dir>/docs/adr.md`
+  - `tasks/index.json`
+  - `tasks/<task-dir>/index.json`
+  - `tasks/<task-dir>/context-pack/static/*`
+  - `tasks/<task-dir>/phases/phase<N>.md`
+- After Plan, run `python3 scripts/harness/verify-task.py <task-dir>` and `python3 scripts/harness/run-phases.py <task-dir> --dry-run`. Fix failures before stopping.
+- After Generate, verify runtime proof before stopping.
+- After Generate, run `python3 scripts/harness/evaluate-task.py <task-dir>` with the task's evaluation commands unless the user explicitly asks not to.
+
+## Runtime Proof
+
+Generate is not complete unless these files exist:
+
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-prompt.md` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-output-attempt<M>.jsonl` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-stderr-attempt<M>.txt` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/docs-diff.md` after phase 0
+- `tasks/<task-dir>/context-pack/handoffs/phase<N>.md` for every completed phase
+
+Evaluate is not complete unless these files exist:
+
+- `tasks/<task-dir>/context-pack/runtime/evaluation-command-results.json`
+- `tasks/<task-dir>/context-pack/runtime/evaluation-prompt.md`
+- `tasks/<task-dir>/context-pack/runtime/evaluation-output.jsonl`
+
+If runtime proof is missing, report the task as blocked or failed. Do not infer success from handoffs or status JSON alone.
+
+Before final reporting, run:
+
+```bash
+python3 scripts/harness/verify-task.py <task-dir> --require-evaluation
+find tasks/<task-dir>/context-pack/runtime -maxdepth 1 -type f | sort
+find tasks/<task-dir>/context-pack/handoffs -maxdepth 1 -type f | sort
+```
 
 ## References
 
@@ -58,13 +114,14 @@ python3 scripts/harness/init-task.py <task-name> \
 Build the next phase prompt without running Codex:
 
 ```bash
+python3 scripts/harness/verify-task.py <task-dir>
 python3 scripts/harness/run-phases.py <task-dir> --dry-run
 ```
 
 Run pending phases:
 
 ```bash
-python3 scripts/harness/run-phases.py <task-dir> --full-auto
+python3 scripts/harness/run-phases.py <task-dir> --full-auto --evaluate
 ```
 
 Evaluate from fresh context:

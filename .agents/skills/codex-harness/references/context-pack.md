@@ -9,11 +9,16 @@ It stores reusable, curated context fragments. The runner assembles only the fra
 ## Directory
 
 ```text
+docs/harness/
 tasks/<task-dir>/context-pack/
+tasks/<task-dir>/docs/
   static/
   runtime/
   handoffs/
 ```
+
+Use `docs/harness/` for reusable harness policy.
+Use `tasks/<task-dir>/docs/` for task-specific planning docs.
 
 ## Static Context
 
@@ -29,8 +34,13 @@ Use for stable context:
 - architecture
 - data schema
 - test policy
+- clarify review result
+- docs approval record
+- context gathering result
+- docs index
 
 Keep each file concise.
+Do not leave placeholders in static context files before Generate.
 
 ## Runtime Context
 
@@ -45,6 +55,21 @@ Use for changing context:
 - git status snapshots
 
 Runtime files are not strategic source of truth.
+Runtime files are execution proof.
+Do not create them manually.
+
+Required Generate proof:
+
+- `phase<N>-prompt.md`
+- `phase<N>-output-attempt<M>.jsonl`
+- `phase<N>-stderr-attempt<M>.txt`
+- `docs-diff.md` after phase 0
+
+Required Evaluate proof:
+
+- `evaluation-command-results.json`
+- `evaluation-prompt.md`
+- `evaluation-output.jsonl`
 
 ## Handoffs
 
@@ -78,6 +103,7 @@ Required structure:
 
 Handoff must not claim final success.
 The runner decides success with AC commands and required output checks.
+Handoff alone is not proof that Generate ran through the runner.
 
 ## Prompt Assembly
 
@@ -85,6 +111,8 @@ For each phase, include:
 
 - harness execution contract
 - task metadata
+- mandatory docs listed in `tasks/<task-dir>/index.json`
+- common docs listed in `tasks/<task-dir>/index.json`
 - static context files
 - current phase file
 - previous handoffs

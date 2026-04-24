@@ -80,9 +80,13 @@ def collect_files(root: Path, paths: Iterable[Path], max_bytes: int) -> str:
     return "\n".join(chunks).rstrip()
 
 
-def context_files(task_path: Path) -> list[Path]:
+def context_files(root: Path, task_path: Path, task_index: dict) -> list[Path]:
     context_path = task_path / "context-pack"
     files: list[Path] = []
+    for raw_path in task_index.get("common_docs") or []:
+        files.append(root / raw_path)
+    for raw_path in task_index.get("docs") or []:
+        files.append(root / raw_path)
     for relative in ["static", "handoffs"]:
         target = context_path / relative
         if target.exists():
@@ -107,7 +111,7 @@ def untracked_text_files(root: Path) -> list[Path]:
 
 def build_prompt(root: Path, task_path: Path, command_results: list[dict]) -> str:
     task_index = read_json(task_path / "index.json")
-    context = collect_files(root, context_files(task_path), 100_000)
+    context = collect_files(root, context_files(root, task_path, task_index), 100_000)
     status = run_capture(["git", "status", "--short"], root)
     diff_stat = run_capture(["git", "diff", "--stat"], root)
     diff = run_capture(["git", "diff"], root, max_chars=160_000)
