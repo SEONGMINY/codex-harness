@@ -1,9 +1,9 @@
 ---
-name: harness
-description: Run a Codex implementation harness for scoped product or internal tooling work. Use when the user invokes `$harness`, asks to clarify requirements before implementation, wants a strict Clarify to Review to Context Gathering to Plan to Generate to Evaluate workflow, or wants phase-based Codex execution controlled by scripts instead of subagents or long chained sessions.
+name: codex-harness
+description: Run a Codex implementation harness for scoped product or internal tooling work. Use when the user invokes `$codex-harness`, asks to clarify requirements before implementation, wants a strict Clarify to Review to Context Gathering to Plan to Generate to Evaluate workflow, or wants phase-based Codex execution controlled by scripts instead of subagents or long chained sessions.
 ---
 
-# Harness
+# Codex Harness
 
 ## Overview
 
