@@ -27,7 +27,10 @@ codex-harness는 그래서 체이닝을 쓰지 않습니다.
 체이닝 방식:
 
 ```text
-대화 A → 대화 B → 대화 C → 더 길어진 컨텍스트
+AGENT.md
+  → Plan Agent
+    → Verify Agent
+      → Execute Agent
 ```
 
 codex-harness 방식:
