@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -132,6 +133,18 @@ def runtime_context_files(task_path: Path, phase_number: int) -> list[Path]:
     ]
 
 
+def phase_result_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-result.json"
+
+
+def phase_handoff_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "handoffs" / f"phase{phase_number}.md"
+
+
+def ac_results_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-ac-attempt{attempt}.json"
+
+
 def task_doc_files(root: Path, task_index: dict) -> list[Path]:
     return [root / raw_path for raw_path in task_index.get("docs") or []]
 
@@ -200,6 +213,7 @@ Rules:
 - Report changed files and remaining risk.
 
 The runner will decide success by process exit code, required outputs, and AC commands.
+The runner will generate `tasks/{task_path.name}/context-pack/runtime/phase{phase_number}-result.json`.
 """
 
     parts = [
@@ -218,7 +232,14 @@ The runner will decide success by process exit code, required outputs, and AC co
 def phase_ac_commands(phase: dict, phase_markdown: str) -> list[str]:
     commands = list(phase.get("ac_commands") or [])
     commands.extend(parse_ac_commands(phase_markdown))
-    return [cmd for cmd in commands if cmd and cmd != "TODO"]
+    unique_commands = []
+    seen = set()
+    for command in commands:
+        if not command or command == "TODO" or command in seen:
+            continue
+        seen.add(command)
+        unique_commands.append(command)
+    return unique_commands
 
 
 def has_placeholder(text: str) -> bool:
@@ -287,6 +308,60 @@ def run_shell(command: str, cwd: Path, timeout: int) -> tuple[int, str]:
     )
     output = (result.stdout + result.stderr).strip()
     return result.returncode, output
+
+
+def git_lines(args: list[str], root: Path) -> list[str]:
+    result = subprocess.run(
+        args,
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def file_digest(path: Path) -> str:
+    if not path.exists():
+        return "<deleted>"
+    if not path.is_file():
+        return "<non-file>"
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def worktree_snapshot(root: Path) -> dict[str, str]:
+    paths: set[str] = set()
+    for command in [
+        ["git", "diff", "--name-only"],
+        ["git", "diff", "--name-only", "--cached"],
+        ["git", "ls-files", "--deleted"],
+        ["git", "ls-files", "--others", "--exclude-standard"],
+    ]:
+        paths.update(git_lines(command, root))
+    return {path: file_digest(root / path) for path in sorted(paths)}
+
+
+def changed_paths(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    return sorted(
+        path
+        for path in set(before) | set(after)
+        if before.get(path) != after.get(path)
+    )
+
+
+def phase_changed_paths(task_path: Path, before: dict[str, str], after: dict[str, str]) -> list[str]:
+    runtime_prefix = f"tasks/{task_path.name}/context-pack/runtime/"
+    return [
+        path
+        for path in changed_paths(before, after)
+        if not path.startswith(runtime_prefix)
+    ]
 
 
 def set_phase_status(task_index: dict, phase_number: int, status: str, **fields: object) -> None:
@@ -405,6 +480,82 @@ def verify_required_outputs(task_path: Path, phase: dict) -> list[str]:
     return missing
 
 
+def required_output_results(task_path: Path, phase: dict) -> list[dict[str, object]]:
+    return [
+        {
+            "path": raw_path,
+            "exists": (task_path / raw_path).exists(),
+        }
+        for raw_path in phase.get("required_outputs") or []
+    ]
+
+
+def task_relative(path: Path, task_path: Path) -> str:
+    return str(path.relative_to(task_path))
+
+
+def write_ac_results(
+    task_path: Path,
+    phase_number: int,
+    attempt: int,
+    command_results: list[dict[str, object]],
+) -> Path:
+    path = ac_results_path(task_path, phase_number, attempt)
+    write_json(
+        path,
+        {
+            "phase": phase_number,
+            "attempt": attempt,
+            "commands": command_results,
+        },
+    )
+    return path
+
+
+def write_phase_result(
+    task_path: Path,
+    phase_number: int,
+    attempt: int,
+    codex_exit_code: int,
+    changed_files: list[str],
+    command_results: list[dict[str, object]],
+    phase: dict,
+    prompt_path: Path,
+    output_path: Path,
+    stderr_path: Path,
+    ac_results: Path,
+) -> None:
+    result = {
+        "phase": phase_number,
+        "status": "completed",
+        "attempt": attempt,
+        "codex_exit_code": codex_exit_code,
+        "changed_files": changed_files,
+        "commands_run": [
+            {
+                "command": item["command"],
+                "exit_code": item["exit_code"],
+            }
+            for item in command_results
+        ],
+        "tests_passed": all(item["exit_code"] == 0 for item in command_results),
+        "required_outputs": required_output_results(task_path, phase),
+        "artifacts": {
+            "prompt": task_relative(prompt_path, task_path),
+            "stdout": task_relative(output_path, task_path),
+            "stderr": task_relative(stderr_path, task_path),
+            "ac_results": task_relative(ac_results, task_path),
+            "handoff": task_relative(phase_handoff_path(task_path, phase_number), task_path),
+        },
+    }
+    write_json(phase_result_path(task_path, phase_number), result)
+
+
+def clear_attempt_artifacts(task_path: Path, phase_number: int) -> None:
+    for path in [phase_result_path(task_path, phase_number), phase_handoff_path(task_path, phase_number)]:
+        path.unlink(missing_ok=True)
+
+
 def generate_docs_diff(root: Path, task_path: Path, baseline: str | None) -> None:
     output_path = task_path / "context-pack" / "runtime" / "docs-diff.md"
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -521,6 +672,7 @@ def execute_phase(
         return False
 
     attempts = int(phase.get("attempts", 0))
+    phase_start_snapshot: dict[str, str] | None = None
     for attempt in range(attempts + 1, args.max_attempts + 1):
         task_index = read_json(index_path)
         set_phase_status(
@@ -534,6 +686,9 @@ def execute_phase(
 
         output_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-output-attempt{attempt}.jsonl"
         stderr_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-stderr-attempt{attempt}.txt"
+        clear_attempt_artifacts(task_path, phase_number)
+        if phase_start_snapshot is None:
+            phase_start_snapshot = worktree_snapshot(root)
         returncode = run_codex(
             root,
             prompt,
@@ -558,11 +713,20 @@ def execute_phase(
             return False
 
         phase_markdown = phase_file(task_path, phase_number).read_text(encoding="utf-8")
+        command_results: list[dict[str, object]] = []
         for command in phase_ac_commands(phase, phase_markdown):
             ac_returncode, ac_output = run_shell(command, root, args.ac_timeout)
+            command_results.append(
+                {
+                    "command": command,
+                    "exit_code": ac_returncode,
+                    "output": ac_output,
+                }
+            )
             if ac_returncode != 0:
                 message = f"AC command failed: {command}\n\n{ac_output}"
                 write_last_error(task_path, phase_number, message)
+                write_ac_results(task_path, phase_number, attempt, command_results)
                 if attempt < args.max_attempts:
                     prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     break
@@ -574,6 +738,7 @@ def execute_phase(
                 args.failed = True
                 return False
         else:
+            ac_results = write_ac_results(task_path, phase_number, attempt, command_results)
             missing_outputs = verify_required_outputs(task_path, phase)
             if missing_outputs:
                 message = "Missing required outputs: " + ", ".join(missing_outputs)
@@ -588,6 +753,21 @@ def execute_phase(
                 print(message, file=sys.stderr)
                 args.failed = True
                 return False
+
+            final_snapshot = worktree_snapshot(root)
+            write_phase_result(
+                task_path=task_path,
+                phase_number=phase_number,
+                attempt=attempt,
+                codex_exit_code=returncode,
+                changed_files=phase_changed_paths(task_path, phase_start_snapshot, final_snapshot),
+                command_results=command_results,
+                phase=phase,
+                prompt_path=prompt_path,
+                output_path=output_path,
+                stderr_path=stderr_path,
+                ac_results=ac_results,
+            )
 
             task_index = read_json(index_path)
             set_phase_status(

@@ -49,7 +49,9 @@ The runner updates `status`, `completed_at`, and `failed_at`.
       "name": "docs",
       "status": "pending",
       "ac_commands": ["python3 -m py_compile scripts/harness/run-phases.py"],
-      "required_outputs": ["context-pack/handoffs/phase0.md"]
+      "required_outputs": [
+        "context-pack/handoffs/phase0.md"
+      ]
     }
   ]
 }
@@ -67,6 +69,8 @@ Only runner scripts update phase status.
 The runner must fail before Generate if mandatory docs, static context, AC commands, or phase files are missing or contain placeholders.
 The orchestrator must treat status JSON as insufficient proof.
 Completed phases also require matching runtime output and handoff files.
+Completed phases also require a schema-valid `phase<N>-result.json`.
+The runner generates `phase<N>-result.json`; phase agents do not.
 Use `scripts/harness/verify-task.py` to enforce this.
 
 ## Phase Files
@@ -123,6 +127,7 @@ Phase agents must not:
 - update `tasks/*/index.json`
 - mark themselves completed
 - decide next phase
+- write `context-pack/runtime/phase<N>-result.json`
 - spawn subagents for Generate
 - commit unless the phase explicitly requires it
 

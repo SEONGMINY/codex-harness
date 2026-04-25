@@ -27,8 +27,11 @@ Completed phases require:
 - `context-pack/runtime/phase<N>-prompt.md`
 - `context-pack/runtime/phase<N>-output-attempt<M>.jsonl`
 - `context-pack/runtime/phase<N>-stderr-attempt<M>.txt`
+- `context-pack/runtime/phase<N>-result.json`
 - `context-pack/handoffs/phase<N>.md`
 
+The runner generates `phase<N>-result.json`.
+Phase agents only write handoffs and implementation changes.
 Phase 0 also requires `context-pack/runtime/docs-diff.md`.
 """,
     "testing.md": """# Harness Testing
@@ -220,7 +223,12 @@ def docs_index(task_dir: str, common_docs: list[str], docs: list[str]) -> str:
     return "\n".join(lines)
 
 
-def phase_template(phase: int, name: str, common_docs: list[str], docs: list[str]) -> str:
+def phase_template(
+    phase: int,
+    name: str,
+    common_docs: list[str],
+    docs: list[str],
+) -> str:
     common_doc_lines = "\n".join(f"- `{doc}`" for doc in common_docs)
     doc_lines = "\n".join(f"- `{doc}`" for doc in docs)
     return f"""# Phase {phase}: {name}
@@ -257,6 +265,7 @@ TODO
 ## Constraints
 
 - Do not update `tasks/*/index.json`; the runner owns status.
+- Do not write `context-pack/runtime/phase{phase}-result.json`; the runner generates it.
 - Do not spawn subagents for implementation.
 - Do not expand scope beyond this phase.
 """

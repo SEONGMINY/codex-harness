@@ -83,6 +83,25 @@ def require_file(
     return errors
 
 
+def resolve_task_relative_path(
+    root: Path,
+    task_path: Path,
+    raw_path: str,
+    label: str,
+) -> tuple[Path | None, list[str]]:
+    path = Path(raw_path)
+    if path.is_absolute():
+        return None, [f"`{label}` must be relative to the task directory: {raw_path}"]
+
+    target = (task_path / path).resolve()
+    task_root = task_path.resolve()
+    try:
+        target.relative_to(task_root)
+    except ValueError:
+        return None, [f"`{label}` must not escape the task directory: {raw_path}"]
+    return target, []
+
+
 def phase_ac_commands(markdown: str) -> list[str]:
     match = re.search(
         r"## Acceptance Criteria(?P<body>.*?)(?:\n## |\Z)",
@@ -100,11 +119,198 @@ def phase_ac_commands(markdown: str) -> list[str]:
     return commands
 
 
+def expected_ac_commands(phase: dict, markdown: str) -> list[str]:
+    commands = list(phase.get("ac_commands") or [])
+    commands.extend(phase_ac_commands(markdown))
+    unique_commands = []
+    seen = set()
+    for command in commands:
+        if not command or command == "TODO" or command in seen:
+            continue
+        seen.add(command)
+        unique_commands.append(command)
+    return unique_commands
+
+
 def phase_attempts(phase: dict) -> list[int]:
     attempts = phase.get("attempts")
     if isinstance(attempts, int) and attempts > 0:
         return [attempts]
     return [1]
+
+
+def require_string_list(value: object, field: str) -> list[str]:
+    if not isinstance(value, list):
+        return [f"`{field}` must be a list."]
+    if not all(isinstance(item, str) for item in value):
+        return [f"`{field}` entries must be strings."]
+    return []
+
+
+def validate_commands_run(value: object, expected_commands: list[str]) -> list[str]:
+    if not isinstance(value, list):
+        return ["`commands_run` must be a list."]
+    errors: list[str] = []
+    if not value:
+        errors.append("`commands_run` must not be empty.")
+    actual_commands = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            errors.append(f"`commands_run[{index}]` must be an object.")
+            continue
+        if not isinstance(item.get("command"), str) or not item.get("command", "").strip():
+            errors.append(f"`commands_run[{index}].command` must be a non-empty string.")
+        else:
+            actual_commands.append(item["command"])
+        if not isinstance(item.get("exit_code"), int):
+            errors.append(f"`commands_run[{index}].exit_code` must be an integer.")
+        elif item.get("exit_code") != 0:
+            errors.append(f"`commands_run[{index}].exit_code` must be 0 for a completed phase.")
+    if actual_commands != expected_commands:
+        errors.append(
+            "`commands_run` must match phase AC commands. "
+            f"expected={expected_commands!r} actual={actual_commands!r}"
+        )
+    return errors
+
+
+def validate_required_outputs(
+    root: Path,
+    task_path: Path,
+    value: object,
+    expected_outputs: list[str],
+) -> list[str]:
+    if not isinstance(value, list):
+        return ["`required_outputs` must be a list."]
+    errors: list[str] = []
+    actual_outputs = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            errors.append(f"`required_outputs[{index}]` must be an object.")
+            continue
+        if not isinstance(item.get("path"), str) or not item.get("path", "").strip():
+            errors.append(f"`required_outputs[{index}].path` must be a non-empty string.")
+            continue
+        raw_path = item["path"]
+        actual_outputs.append(raw_path)
+        if item.get("exists") is not True:
+            errors.append(f"`required_outputs[{index}].exists` must be true.")
+        target, path_errors = resolve_task_relative_path(
+            root,
+            task_path,
+            raw_path,
+            f"required_outputs[{index}].path",
+        )
+        errors.extend(path_errors)
+        if target is not None and not target.exists():
+            errors.append(f"`required_outputs[{index}].path` does not exist: {rel(root, target)}")
+    if actual_outputs != expected_outputs:
+        errors.append(
+            "`required_outputs` must match phase required_outputs. "
+            f"expected={expected_outputs!r} actual={actual_outputs!r}"
+        )
+    return errors
+
+
+def validate_artifacts(
+    root: Path,
+    task_path: Path,
+    value: object,
+    phase_number: int,
+    attempt: int | None,
+) -> list[str]:
+    if not isinstance(value, dict):
+        return ["`artifacts` must be an object."]
+    errors: list[str] = []
+    expected_paths = {
+        "prompt": f"context-pack/runtime/phase{phase_number}-prompt.md",
+        "handoff": f"context-pack/handoffs/phase{phase_number}.md",
+    }
+    if attempt is not None:
+        expected_paths.update(
+            {
+                "stdout": f"context-pack/runtime/phase{phase_number}-output-attempt{attempt}.jsonl",
+                "stderr": f"context-pack/runtime/phase{phase_number}-stderr-attempt{attempt}.txt",
+                "ac_results": f"context-pack/runtime/phase{phase_number}-ac-attempt{attempt}.json",
+            }
+        )
+    for key in ["prompt", "stdout", "stderr", "ac_results", "handoff"]:
+        raw_path = value.get(key)
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            errors.append(f"`artifacts.{key}` must be a non-empty string.")
+            continue
+        if key in expected_paths and raw_path != expected_paths[key]:
+            errors.append(f"`artifacts.{key}` must be {expected_paths[key]}.")
+        target, path_errors = resolve_task_relative_path(root, task_path, raw_path, f"artifacts.{key}")
+        errors.extend(path_errors)
+        if target is None:
+            continue
+        allow_empty = key == "stderr"
+        errors.extend(
+            require_file(
+                root,
+                target,
+                f"phase result artifact {key}",
+                check_placeholder=False,
+                allow_empty=allow_empty,
+            )
+        )
+    return errors
+
+
+def validate_phase_result(
+    root: Path,
+    task_path: Path,
+    phase_number: int,
+    expected_commands: list[str],
+    expected_outputs: list[str],
+) -> list[str]:
+    result_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-result.json"
+    if not result_path.exists():
+        return [f"Missing phase result: {rel(root, result_path)}"]
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"Invalid phase result JSON: {rel(root, result_path)}: {exc}"]
+
+    if not isinstance(result, dict):
+        return [f"Phase result must be a JSON object: {rel(root, result_path)}"]
+
+    errors: list[str] = []
+    required_fields = {
+        "phase",
+        "status",
+        "attempt",
+        "codex_exit_code",
+        "changed_files",
+        "commands_run",
+        "tests_passed",
+        "required_outputs",
+        "artifacts",
+    }
+    missing = sorted(required_fields - set(result))
+    if missing:
+        errors.append(f"Phase result missing fields: {', '.join(missing)}")
+    if result.get("phase") != phase_number:
+        errors.append(f"`phase` must be {phase_number}.")
+    if result.get("status") != "completed":
+        errors.append('`status` must be "completed".')
+    attempt = result.get("attempt")
+    if not isinstance(attempt, int) or attempt <= 0:
+        errors.append("`attempt` must be a positive integer.")
+        attempt = None
+    if result.get("codex_exit_code") != 0:
+        errors.append("`codex_exit_code` must be 0 for a completed phase.")
+    errors.extend(require_string_list(result.get("changed_files"), "changed_files"))
+    errors.extend(validate_commands_run(result.get("commands_run"), expected_commands))
+    if result.get("tests_passed") is not True:
+        errors.append("`tests_passed` must be true for a completed phase.")
+    errors.extend(validate_required_outputs(root, task_path, result.get("required_outputs"), expected_outputs))
+    errors.extend(validate_artifacts(root, task_path, result.get("artifacts"), phase_number, attempt))
+    artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+    if artifacts.get("handoff") != f"context-pack/handoffs/phase{phase_number}.md":
+        errors.append(f"`artifacts.handoff` must be context-pack/handoffs/phase{phase_number}.md.")
+    return errors
 
 
 def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
@@ -152,13 +358,24 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
         phase_number = int(phase["phase"])
         phase_path = task_path / "phases" / f"phase{phase_number}.md"
         errors.extend(require_file(root, phase_path, "phase file"))
+        expected_commands = list(phase.get("ac_commands") or [])
         if phase_path.exists():
             markdown = phase_path.read_text(encoding="utf-8", errors="replace")
-            if not phase_ac_commands(markdown) and not phase.get("ac_commands"):
+            expected_commands = expected_ac_commands(phase, markdown)
+            if not expected_commands:
                 errors.append(f"Missing AC commands for phase {phase_number}.")
 
         if phase.get("status") == "completed":
             errors.extend(require_file(root, handoff_dir / f"phase{phase_number}.md", "handoff"))
+            errors.extend(
+                validate_phase_result(
+                    root,
+                    task_path,
+                    phase_number,
+                    expected_commands,
+                    list(phase.get("required_outputs") or []),
+                )
+            )
             errors.extend(require_file(root, runtime_dir / f"phase{phase_number}-prompt.md", "runtime prompt"))
             for attempt in phase_attempts(phase):
                 errors.extend(

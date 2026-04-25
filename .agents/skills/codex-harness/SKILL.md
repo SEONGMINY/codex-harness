@@ -40,7 +40,7 @@ The harness does not chain long Codex conversations. It captures decisions as fi
 - Do not stop after approval until mandatory docs, context-pack files, task indexes, and phase files exist.
 - Do not run Generate when phase files still contain placeholders or missing AC commands.
 - Do not manually mark phases or tasks completed.
-- Do not manually create runtime proof files.
+- Do not manually create runner-owned runtime proof files.
 - Do not claim Generate or Evaluate is complete unless the required runtime proof exists.
 
 ## Stop Conditions
@@ -71,8 +71,11 @@ Generate is not complete unless these files exist:
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-prompt.md` for every executed phase
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-output-attempt<M>.jsonl` for every executed phase
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-stderr-attempt<M>.txt` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-result.json` for every completed phase
 - `tasks/<task-dir>/context-pack/runtime/docs-diff.md` after phase 0
 - `tasks/<task-dir>/context-pack/handoffs/phase<N>.md` for every completed phase
+
+`phase<N>-result.json` is runner-owned. It contains measured facts: exit codes, changed files, required output status, and artifact paths. Phase agents write handoffs, not result JSON.
 
 Evaluate is not complete unless these files exist:
 
