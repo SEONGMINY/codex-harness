@@ -468,9 +468,11 @@ task 실행 중 생성되는 파일:
 
 ## 문제 해결
 
-### `verify-task.py`가 구현 전에 실패합니다
+> Q. `verify-task.py`가 구현 전에 실패합니다
+>
+> A. task 문서나 phase 계약이 아직 완성되지 않은 상태입니다.
 
-대부분 다음 중 하나입니다.
+확인할 것:
 
 - task 문서가 비어 있음
 - 컨텍스트 파일이 비어 있음
@@ -478,17 +480,30 @@ task 실행 중 생성되는 파일:
 - 필수 산출물이 없음
 - TODO가 남아 있음
 
-확인:
+확인 명령:
 
 ```bash
 python3 scripts/harness/verify-task.py <task-dir>
 ```
 
-출력된 파일을 고치면 됩니다.
+해결:
 
-### Codex는 완료됐다고 했는데 task는 완료가 아닙니다
+- 출력에 나온 파일을 채웁니다.
+- phase에 확인 명령과 필수 산출물을 추가합니다.
+- TODO나 빈 섹션을 제거합니다.
 
-Codex의 말보다 runner 산출물을 봅니다.
+> Q. Codex는 완료됐다고 했는데 task는 완료가 아닙니다
+>
+> A. runner 산출물을 확인합니다.
+
+확인할 것:
+
+- `phase<N>-result.json`이 있는가
+- 확인 명령이 성공했는가
+- 필수 산출물이 생성됐는가
+- handoff가 남아 있는가
+
+확인 명령:
 
 ```bash
 python3 scripts/harness/verify-task.py <task-dir>
@@ -496,13 +511,29 @@ find tasks/<task-dir>/context-pack/runtime -maxdepth 1 -type f | sort
 find tasks/<task-dir>/context-pack/handoffs -maxdepth 1 -type f | sort
 ```
 
-### 설치된 하네스를 업데이트하고 싶습니다
+해결:
 
-대상 저장소에서 다시 설치합니다.
+- 실패한 phase를 고칩니다.
+- 필요한 경우 `--from`으로 해당 phase부터 다시 실행합니다.
+
+> Q. 설치된 하네스를 업데이트하고 싶습니다
+>
+> A. 대상 저장소에서 설치 명령을 다시 실행합니다.
+
+확인할 것:
+
+- 기존 하네스 파일을 덮어써도 되는가
+- 대상 저장소 루트에서 실행 중인가
+
+설치 명령:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SEONGMINY/codex-harness/master/scripts/bootstrap-install.py | python3 - --force
 ```
+
+해결:
+
+- `--force`로 기존 하네스를 덮어씁니다.
 
 ## 목표가 아닌 것
 
