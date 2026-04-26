@@ -70,6 +70,7 @@ The runner must fail before Generate if mandatory docs, static context, AC comma
 The orchestrator must treat status JSON as insufficient proof.
 Completed phases also require matching runtime output and handoff files.
 Completed phases also require a schema-valid `phase<N>-result.json`.
+Completed phases also require runner-generated contract, checklist, evidence, reconciliation, and gate files.
 The runner generates `phase<N>-result.json`; phase agents do not.
 Use `scripts/harness/verify-task.py` to enforce this.
 
@@ -89,6 +90,62 @@ Required sections:
 ## Purpose
 
 <one paragraph>
+
+## Contract
+
+```json
+{
+  "phase": 0,
+  "name": "implementation",
+  "read_first": {
+    "docs": [
+      "docs/harness/runner-contract.md",
+      "tasks/0-example/docs/code-architecture.md",
+      "context-pack/static/context-gathering.md"
+    ],
+    "previous_outputs": []
+  },
+  "scope": {
+    "layer": "runner",
+    "allowed_paths": [
+      "scripts/harness/run-phases.py",
+      "scripts/harness/verify-task.py"
+    ]
+  },
+  "interfaces": [
+    {
+      "path": "scripts/harness/run-phases.py",
+      "symbol": "write_phase_result",
+      "signature": "def write_phase_result(...) -> None",
+      "business_rules": [
+        "Only the runner writes phase result proof."
+      ]
+    }
+  ],
+  "instructions": [
+    {
+      "id": "P0-001",
+      "task": "Add runner-owned phase reconciliation output.",
+      "expected_evidence": [
+        "phase<N>-reconciliation.json exists",
+        "phase<N>-gate.json exists"
+      ]
+    }
+  ],
+  "acceptance_commands": [
+    "python3 -m py_compile scripts/harness/run-phases.py scripts/harness/verify-task.py"
+  ],
+  "required_outputs": [
+    "context-pack/handoffs/phase0.md"
+  ],
+  "forbidden": [
+    {
+      "rule": "Do not update `tasks/*/index.json`.",
+      "reason": "The runner owns phase status."
+    }
+  ]
+}
+```
 
 ## Read First
 
@@ -112,6 +169,23 @@ Required sections:
 
 - <what not to do>
 ```
+
+The Contract block is the source of truth.
+The readable Markdown sections explain the same work for humans.
+Do not put requirements only in prose if the runner must enforce them.
+
+Contract rules:
+
+- `read_first.docs` must list concrete document or context paths.
+- `read_first.previous_outputs` must list prior phase reconciliation, gate, or handoff files for phase N > 0.
+- `scope.allowed_paths` must list every implementation path the phase may change.
+- `interfaces` must describe function/class signatures for non-documentation phases.
+- `instructions[*].id` must be stable and unique within the phase.
+- `instructions[*].expected_evidence` must describe observable proof.
+- `acceptance_commands` must contain executable commands only.
+- `required_outputs` must contain task-relative paths.
+- `forbidden[*]` must include both `rule` and `reason`.
+- Phase files must not refer to prior chat context such as "as discussed" or "이전 대화".
 
 ## Phase Agent Contract
 

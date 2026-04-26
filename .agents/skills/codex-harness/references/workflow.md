@@ -104,6 +104,12 @@ Rules:
 
 - Phase 0 should update docs when docs must change.
 - Each phase should target one layer or module.
+- Each phase must include a `## Contract` JSON block.
+- Each phase contract must be self-contained and must not reference prior chat context.
+- Each phase contract must list `read_first.docs` and, for phase N > 0, `read_first.previous_outputs`.
+- Each phase contract must list `scope.allowed_paths`.
+- Each non-documentation phase should describe function/class signatures in `interfaces`.
+- Each forbidden rule must include a concrete reason.
 - Each phase must have executable AC commands.
 - Each phase must write a handoff file.
 - Status is owned by the runner, not Codex.
@@ -136,13 +142,22 @@ Allowed exception:
 Generate completion requires runtime proof:
 
 - `context-pack/runtime/phase<N>-prompt.md`
+- `context-pack/runtime/phase<N>-contract.json`
+- `context-pack/runtime/phase<N>-checklist.md`
 - `context-pack/runtime/phase<N>-output-attempt<M>.jsonl`
 - `context-pack/runtime/phase<N>-stderr-attempt<M>.txt`
+- `context-pack/runtime/phase<N>-ac-attempt<M>.json`
+- `context-pack/runtime/phase<N>-evidence.json`
+- `context-pack/runtime/phase<N>-reconciliation.json`
+- `context-pack/runtime/phase<N>-reconciliation.md`
+- `context-pack/runtime/phase<N>-gate.json`
 - `context-pack/runtime/phase<N>-result.json`
 - `context-pack/runtime/docs-diff.md` after phase 0
 - `context-pack/handoffs/phase<N>.md`
 
 The runner-generated phase result JSON is the machine-readable completion contract.
+The runner-generated gate JSON decides whether the phase may complete.
+The reconciliation summary is included in later phase context.
 The handoff remains the human-readable summary.
 
 If runtime proof is absent, the orchestrator must report failure or blocked status.

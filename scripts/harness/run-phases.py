@@ -13,6 +13,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from phase_contract import (
+    checklist_markdown,
+    contract_acceptance_commands,
+    contract_allowed_paths,
+    contract_required_outputs,
+    parse_phase_contract,
+    scope_violations,
+    validate_phase_contract,
+)
+
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
 TERMINAL_RESET_STATUSES = {"completed", "error"}
@@ -127,14 +137,46 @@ def previous_handoff_files(task_path: Path, phase_number: int) -> list[Path]:
 
 def runtime_context_files(task_path: Path, phase_number: int) -> list[Path]:
     runtime_dir = task_path / "context-pack" / "runtime"
-    return [
+    paths = [
         runtime_dir / "docs-diff.md",
         runtime_dir / f"phase{phase_number}-last-error.md",
     ]
+    for previous in range(phase_number):
+        paths.extend(
+            [
+                runtime_dir / f"phase{previous}-reconciliation.md",
+                runtime_dir / f"phase{previous}-gate.json",
+            ]
+        )
+    return paths
 
 
 def phase_result_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-result.json"
+
+
+def phase_contract_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-contract.json"
+
+
+def phase_checklist_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-checklist.md"
+
+
+def phase_evidence_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-evidence.json"
+
+
+def phase_reconciliation_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-reconciliation.json"
+
+
+def phase_reconciliation_summary_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-reconciliation.md"
+
+
+def phase_gate_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-gate.json"
 
 
 def phase_handoff_path(task_path: Path, phase_number: int) -> Path:
@@ -186,12 +228,14 @@ def build_prompt(root: Path, task_path: Path, task_index: dict, phase: dict) -> 
     phase_number = int(phase["phase"])
     phase_path = phase_file(task_path, phase_number)
     phase_markdown = phase_path.read_text(encoding="utf-8")
+    contract_data = materialize_phase_contract(task_path, phase_number, phase_markdown)
 
     common_docs_context = collect_files(root, common_doc_files(root, task_index), 60_000)
     docs_context = collect_files(root, task_doc_files(root, task_index), 80_000)
     static_context = collect_files(root, static_context_files(task_path), 80_000)
     handoffs = collect_files(root, previous_handoff_files(task_path, phase_number), 60_000)
     runtime = collect_files(root, runtime_context_files(task_path, phase_number), 60_000)
+    checklist_context = phase_checklist_path(task_path, phase_number).read_text(encoding="utf-8")
 
     contract = f"""# Harness Phase Execution Contract
 
@@ -224,12 +268,51 @@ The runner will generate `tasks/{task_path.name}/context-pack/runtime/phase{phas
         "# Previous Handoffs\n\n" + (handoffs or "(none)"),
         "# Runtime Context\n\n" + (runtime or "(none)"),
         "# Repository Snapshot\n\n" + git_summary(root),
+        "# Current Phase Checklist\n\n" + checklist_context.rstrip(),
         "# Current Phase File\n\n" + phase_markdown.rstrip(),
     ]
     return "\n\n".join(parts).rstrip() + "\n"
 
 
+def materialize_phase_contract(task_path: Path, phase_number: int, phase_markdown: str) -> dict:
+    contract_data, contract_errors = parse_phase_contract(phase_markdown)
+    if contract_errors or contract_data is None:
+        raise ValueError("; ".join(contract_errors))
+    phase_contract_path(task_path, phase_number).parent.mkdir(parents=True, exist_ok=True)
+    write_json(phase_contract_path(task_path, phase_number), contract_data)
+    phase_checklist_path(task_path, phase_number).write_text(
+        checklist_markdown(contract_data),
+        encoding="utf-8",
+    )
+    return contract_data
+
+
+def runtime_phase_contract(task_path: Path, phase_number: int) -> dict:
+    path = phase_contract_path(task_path, phase_number)
+    if not path.exists():
+        raise FileNotFoundError(f"Missing runtime phase contract: {path}")
+    data = read_json(path)
+    if not isinstance(data, dict):
+        raise ValueError(f"Runtime phase contract must be a JSON object: {path}")
+    return data
+
+
+def verify_phase_contract_unchanged(task_path: Path, phase_number: int, original_contract: dict) -> list[str]:
+    current_markdown = phase_file(task_path, phase_number).read_text(encoding="utf-8")
+    current_contract, errors = parse_phase_contract(current_markdown)
+    if errors or current_contract is None:
+        return ["Phase contract block missing or invalid after Codex execution: " + "; ".join(errors)]
+    if phase_contract_hash(current_contract) != phase_contract_hash(original_contract):
+        return ["Phase contract changed during Codex execution."]
+    return []
+
+
 def phase_ac_commands(phase: dict, phase_markdown: str) -> list[str]:
+    contract, _ = parse_phase_contract(phase_markdown)
+    if contract is not None:
+        commands = contract_acceptance_commands(contract)
+        if commands:
+            return commands
     commands = list(phase.get("ac_commands") or [])
     commands.extend(parse_ac_commands(phase_markdown))
     unique_commands = []
@@ -240,6 +323,34 @@ def phase_ac_commands(phase: dict, phase_markdown: str) -> list[str]:
         seen.add(command)
         unique_commands.append(command)
     return unique_commands
+
+
+def phase_required_outputs(phase: dict, phase_markdown: str) -> list[str]:
+    contract, _ = parse_phase_contract(phase_markdown)
+    if contract is not None:
+        outputs = contract_required_outputs(contract)
+        if outputs:
+            return outputs
+    return list(phase.get("required_outputs") or [])
+
+
+def contract_ac_commands(phase: dict, contract: dict) -> list[str]:
+    commands = contract_acceptance_commands(contract)
+    if commands:
+        return commands
+    return list(phase.get("ac_commands") or [])
+
+
+def contract_outputs(phase: dict, contract: dict) -> list[str]:
+    outputs = contract_required_outputs(contract)
+    if outputs:
+        return outputs
+    return list(phase.get("required_outputs") or [])
+
+
+def phase_contract_hash(contract: dict) -> str:
+    payload = json.dumps(contract, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def has_placeholder(text: str) -> bool:
@@ -266,6 +377,15 @@ def preflight_phase(root: Path, task_path: Path, task_index: dict, phase: dict) 
     phase_number = int(phase["phase"])
     phase_path = phase_file(task_path, phase_number)
     phase_markdown = phase_path.read_text(encoding="utf-8")
+    contract, contract_errors = validate_phase_contract(
+        root,
+        task_path,
+        phase_number,
+        phase.get("name"),
+        phase_markdown,
+        require_previous_outputs=True,
+    )
+    errors.extend(contract_errors)
 
     if has_placeholder(phase_markdown):
         errors.append(f"Placeholder remains in phase file: {phase_path.relative_to(root)}")
@@ -273,8 +393,22 @@ def preflight_phase(root: Path, task_path: Path, task_index: dict, phase: dict) 
     if not phase_ac_commands(phase, phase_markdown):
         errors.append(f"Missing AC commands for phase {phase_number}.")
 
-    if not phase.get("required_outputs"):
+    if not phase_required_outputs(phase, phase_markdown):
         errors.append(f"Missing required_outputs for phase {phase_number}.")
+    if contract is not None and phase.get("required_outputs"):
+        contract_outputs = contract_required_outputs(contract)
+        if list(phase.get("required_outputs") or []) != contract_outputs:
+            errors.append(
+                "Phase index required_outputs must match Contract.required_outputs. "
+                f"expected={contract_outputs!r} actual={list(phase.get('required_outputs') or [])!r}"
+            )
+    if contract is not None and phase.get("ac_commands"):
+        contract_commands = contract_acceptance_commands(contract)
+        if list(phase.get("ac_commands") or []) != contract_commands:
+            errors.append(
+                "Phase index ac_commands must match Contract.acceptance_commands. "
+                f"expected={contract_commands!r} actual={list(phase.get('ac_commands') or [])!r}"
+            )
 
     docs = task_doc_files(root, task_index)
     if len(docs) < 5:
@@ -471,22 +605,22 @@ def run_codex(
     return result.returncode
 
 
-def verify_required_outputs(task_path: Path, phase: dict) -> list[str]:
+def verify_required_outputs(task_path: Path, required_outputs: list[str]) -> list[str]:
     missing = []
-    for raw_path in phase.get("required_outputs") or []:
+    for raw_path in required_outputs:
         target = task_path / raw_path
         if not target.exists():
             missing.append(raw_path)
     return missing
 
 
-def required_output_results(task_path: Path, phase: dict) -> list[dict[str, object]]:
+def required_output_results(task_path: Path, required_outputs: list[str]) -> list[dict[str, object]]:
     return [
         {
             "path": raw_path,
             "exists": (task_path / raw_path).exists(),
         }
-        for raw_path in phase.get("required_outputs") or []
+        for raw_path in required_outputs
     ]
 
 
@@ -519,7 +653,7 @@ def write_phase_result(
     codex_exit_code: int,
     changed_files: list[str],
     command_results: list[dict[str, object]],
-    phase: dict,
+    required_outputs: list[str],
     prompt_path: Path,
     output_path: Path,
     stderr_path: Path,
@@ -539,20 +673,202 @@ def write_phase_result(
             for item in command_results
         ],
         "tests_passed": all(item["exit_code"] == 0 for item in command_results),
-        "required_outputs": required_output_results(task_path, phase),
+        "required_outputs": required_output_results(task_path, required_outputs),
         "artifacts": {
+            "contract": task_relative(phase_contract_path(task_path, phase_number), task_path),
+            "checklist": task_relative(phase_checklist_path(task_path, phase_number), task_path),
             "prompt": task_relative(prompt_path, task_path),
             "stdout": task_relative(output_path, task_path),
             "stderr": task_relative(stderr_path, task_path),
             "ac_results": task_relative(ac_results, task_path),
             "handoff": task_relative(phase_handoff_path(task_path, phase_number), task_path),
+            "evidence": task_relative(phase_evidence_path(task_path, phase_number), task_path),
+            "reconciliation": task_relative(phase_reconciliation_path(task_path, phase_number), task_path),
+            "reconciliation_summary": task_relative(phase_reconciliation_summary_path(task_path, phase_number), task_path),
+            "gate": task_relative(phase_gate_path(task_path, phase_number), task_path),
         },
     }
     write_json(phase_result_path(task_path, phase_number), result)
 
 
+def required_output_repo_paths(task_path: Path, required_outputs: list[str]) -> list[str]:
+    return [f"tasks/{task_path.name}/{raw_path.strip('/')}" for raw_path in required_outputs]
+
+
+def build_gate(
+    task_path: Path,
+    phase_number: int,
+    contract: dict,
+    changed_files: list[str],
+    command_results: list[dict[str, object]],
+    required_outputs: list[str],
+) -> dict[str, object]:
+    failed_commands = [item for item in command_results if item.get("exit_code") != 0]
+    missing_outputs = verify_required_outputs(task_path, required_outputs)
+    violations = scope_violations(
+        changed_files,
+        contract_allowed_paths(contract),
+        required_output_repo_paths(task_path, required_outputs),
+    )
+    blocking_reasons: list[str] = []
+    if failed_commands:
+        blocking_reasons.append("One or more acceptance commands failed.")
+    if missing_outputs:
+        blocking_reasons.append("One or more required outputs are missing.")
+    if violations:
+        blocking_reasons.append("Changed files include paths outside Contract.scope.allowed_paths.")
+
+    checks = [
+        {
+            "name": "acceptance_commands",
+            "status": "passed" if not failed_commands else "failed",
+            "failed_commands": [item.get("command") for item in failed_commands],
+        },
+        {
+            "name": "required_outputs",
+            "status": "passed" if not missing_outputs else "failed",
+            "missing_outputs": missing_outputs,
+        },
+        {
+            "name": "scope",
+            "status": "passed" if not violations else "failed",
+            "violations": violations,
+        },
+    ]
+    return {
+        "phase": phase_number,
+        "status": "passed" if not blocking_reasons else "failed",
+        "checks": checks,
+        "blocking_reasons": blocking_reasons,
+    }
+
+
+def build_evidence(
+    phase_number: int,
+    attempt: int,
+    changed_files: list[str],
+    command_results: list[dict[str, object]],
+    required_outputs: list[str],
+    task_path: Path,
+) -> dict[str, object]:
+    return {
+        "phase": phase_number,
+        "attempt": attempt,
+        "changed_files": changed_files,
+        "commands": command_results,
+        "required_outputs": required_output_results(task_path, required_outputs),
+    }
+
+
+def build_reconciliation(contract: dict, evidence: dict[str, object], gate: dict[str, object]) -> dict[str, object]:
+    gate_passed = gate.get("status") == "passed"
+    evidence_text = json.dumps(evidence, ensure_ascii=False, sort_keys=True).lower()
+    observed_evidence = [
+        f"changed_files={evidence.get('changed_files', [])!r}",
+        f"commands={[item.get('command') for item in evidence.get('commands', [])]!r}",
+        f"gate={gate.get('status')}",
+    ]
+    instruction_results = []
+    for instruction in contract.get("instructions") or []:
+        expected_items = instruction.get("expected_evidence") or []
+        matched_expected = [
+            item
+            for item in expected_items
+            if isinstance(item, str) and item.lower() in evidence_text
+        ]
+        if not gate_passed:
+            status = "blocked"
+        elif expected_items and len(matched_expected) == len(expected_items):
+            status = "satisfied"
+        else:
+            status = "unverified"
+        instruction_results.append(
+            {
+                "id": instruction.get("id"),
+                "task": instruction.get("task"),
+                "expected_evidence": expected_items,
+                "matched_expected_evidence": matched_expected,
+                "observed_evidence": observed_evidence,
+                "status": status,
+                "method": "evidence_substring_match",
+            }
+        )
+    aggregate_status = "satisfied"
+    if not gate_passed:
+        aggregate_status = "blocked"
+    elif any(item.get("status") != "satisfied" for item in instruction_results):
+        aggregate_status = "unverified"
+    return {
+        "phase": contract.get("phase"),
+        "status": aggregate_status,
+        "instruction_results": instruction_results,
+        "extra_changes": [
+            violation
+            for check in gate.get("checks", [])
+            if check.get("name") == "scope"
+            for violation in check.get("violations", [])
+        ],
+        "blocking_reasons": gate.get("blocking_reasons", []),
+    }
+
+
+def reconciliation_markdown(reconciliation: dict[str, object], gate: dict[str, object]) -> str:
+    lines = [
+        f"# Phase {reconciliation.get('phase')} Reconciliation",
+        "",
+        f"Gate: `{gate.get('status')}`",
+        f"Status: `{reconciliation.get('status')}`",
+        "",
+        "## Instruction Results",
+        "",
+    ]
+    for item in reconciliation.get("instruction_results", []):
+        lines.append(f"- `{item.get('id')}` {item.get('status')}: {item.get('task')}")
+    lines.extend(["", "## Blocking Reasons", ""])
+    reasons = gate.get("blocking_reasons") or []
+    if reasons:
+        for reason in reasons:
+            lines.append(f"- {reason}")
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Extra Changes", ""])
+    extra_changes = reconciliation.get("extra_changes") or []
+    if extra_changes:
+        for path in extra_changes:
+            lines.append(f"- `{path}`")
+    else:
+        lines.append("- none")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_runtime_review_artifacts(
+    task_path: Path,
+    phase_number: int,
+    contract: dict,
+    evidence: dict[str, object],
+    gate: dict[str, object],
+) -> dict[str, object]:
+    reconciliation = build_reconciliation(contract, evidence, gate)
+    write_json(phase_evidence_path(task_path, phase_number), evidence)
+    write_json(phase_gate_path(task_path, phase_number), gate)
+    write_json(phase_reconciliation_path(task_path, phase_number), reconciliation)
+    phase_reconciliation_summary_path(task_path, phase_number).write_text(
+        reconciliation_markdown(reconciliation, gate),
+        encoding="utf-8",
+    )
+    return reconciliation
+
+
 def clear_attempt_artifacts(task_path: Path, phase_number: int) -> None:
-    for path in [phase_result_path(task_path, phase_number), phase_handoff_path(task_path, phase_number)]:
+    for path in [
+        phase_result_path(task_path, phase_number),
+        phase_handoff_path(task_path, phase_number),
+        phase_evidence_path(task_path, phase_number),
+        phase_reconciliation_path(task_path, phase_number),
+        phase_reconciliation_summary_path(task_path, phase_number),
+        phase_gate_path(task_path, phase_number),
+    ]:
         path.unlink(missing_ok=True)
 
 
@@ -712,9 +1028,32 @@ def execute_phase(
             args.failed = True
             return False
 
-        phase_markdown = phase_file(task_path, phase_number).read_text(encoding="utf-8")
+        try:
+            contract = runtime_phase_contract(task_path, phase_number)
+        except (FileNotFoundError, ValueError) as exc:
+            message = str(exc)
+            write_last_error(task_path, phase_number, message)
+            task_index = read_json(index_path)
+            set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
+            write_json(index_path, task_index)
+            update_top_index(root, task_path.name, "error")
+            print(message, file=sys.stderr)
+            args.failed = True
+            return False
+        contract_tamper_errors = verify_phase_contract_unchanged(task_path, phase_number, contract)
+        if contract_tamper_errors:
+            message = "; ".join(contract_tamper_errors)
+            write_last_error(task_path, phase_number, message)
+            task_index = read_json(index_path)
+            set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
+            write_json(index_path, task_index)
+            update_top_index(root, task_path.name, "error")
+            print(message, file=sys.stderr)
+            args.failed = True
+            return False
+        required_outputs = contract_outputs(phase, contract)
         command_results: list[dict[str, object]] = []
-        for command in phase_ac_commands(phase, phase_markdown):
+        for command in contract_ac_commands(phase, contract):
             ac_returncode, ac_output = run_shell(command, root, args.ac_timeout)
             command_results.append(
                 {
@@ -739,7 +1078,7 @@ def execute_phase(
                 return False
         else:
             ac_results = write_ac_results(task_path, phase_number, attempt, command_results)
-            missing_outputs = verify_required_outputs(task_path, phase)
+            missing_outputs = verify_required_outputs(task_path, required_outputs)
             if missing_outputs:
                 message = "Missing required outputs: " + ", ".join(missing_outputs)
                 write_last_error(task_path, phase_number, message)
@@ -755,14 +1094,42 @@ def execute_phase(
                 return False
 
             final_snapshot = worktree_snapshot(root)
+            changed_files = phase_changed_paths(task_path, phase_start_snapshot, final_snapshot)
+            evidence = build_evidence(
+                phase_number,
+                attempt,
+                changed_files,
+                command_results,
+                required_outputs,
+                task_path,
+            )
+            gate = build_gate(task_path, phase_number, contract, changed_files, command_results, required_outputs)
+            reconciliation = write_runtime_review_artifacts(task_path, phase_number, contract, evidence, gate)
+            if gate.get("status") != "passed" or reconciliation.get("status") != "satisfied":
+                reasons = list(gate.get("blocking_reasons") or [])
+                if reconciliation.get("status") != "satisfied":
+                    reasons.append(f"Phase reconciliation status is {reconciliation.get('status')}.")
+                message = "Phase gate failed: " + "; ".join(reasons)
+                write_last_error(task_path, phase_number, message)
+                if attempt < args.max_attempts:
+                    prompt = build_prompt(root, task_path, read_json(index_path), phase)
+                    continue
+                task_index = read_json(index_path)
+                set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
+                write_json(index_path, task_index)
+                update_top_index(root, task_path.name, "error")
+                print(message, file=sys.stderr)
+                args.failed = True
+                return False
+
             write_phase_result(
                 task_path=task_path,
                 phase_number=phase_number,
                 attempt=attempt,
                 codex_exit_code=returncode,
-                changed_files=phase_changed_paths(task_path, phase_start_snapshot, final_snapshot),
+                changed_files=changed_files,
                 command_results=command_results,
-                phase=phase,
+                required_outputs=required_outputs,
                 prompt_path=prompt_path,
                 output_path=output_path,
                 stderr_path=stderr_path,

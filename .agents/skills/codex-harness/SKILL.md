@@ -69,13 +69,21 @@ The harness does not chain long Codex conversations. It captures decisions as fi
 Generate is not complete unless these files exist:
 
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-prompt.md` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-contract.json` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-checklist.md` for every executed phase
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-output-attempt<M>.jsonl` for every executed phase
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-stderr-attempt<M>.txt` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-ac-attempt<M>.json` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-evidence.json` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-reconciliation.json` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-reconciliation.md` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-gate.json` for every executed phase
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-result.json` for every completed phase
 - `tasks/<task-dir>/context-pack/runtime/docs-diff.md` after phase 0
 - `tasks/<task-dir>/context-pack/handoffs/phase<N>.md` for every completed phase
 
 `phase<N>-result.json` is runner-owned. It contains measured facts: exit codes, changed files, required output status, and artifact paths. Phase agents write handoffs, not result JSON.
+`phase<N>-gate.json` is runner-owned. It must pass before the phase can be marked completed.
 
 Evaluate is not complete unless these files exist:
 

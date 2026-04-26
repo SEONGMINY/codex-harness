@@ -9,6 +9,14 @@ import re
 import sys
 from pathlib import Path
 
+from phase_contract import (
+    contract_acceptance_commands,
+    contract_required_outputs,
+    parse_phase_contract,
+    scope_violations,
+    validate_phase_contract,
+)
+
 
 MANDATORY_STATIC_FILES = [
     "original-prompt.md",
@@ -120,6 +128,11 @@ def phase_ac_commands(markdown: str) -> list[str]:
 
 
 def expected_ac_commands(phase: dict, markdown: str) -> list[str]:
+    contract, _ = parse_phase_contract(markdown)
+    if contract is not None:
+        commands = contract_acceptance_commands(contract)
+        if commands:
+            return commands
     commands = list(phase.get("ac_commands") or [])
     commands.extend(phase_ac_commands(markdown))
     unique_commands = []
@@ -130,6 +143,15 @@ def expected_ac_commands(phase: dict, markdown: str) -> list[str]:
         seen.add(command)
         unique_commands.append(command)
     return unique_commands
+
+
+def expected_required_outputs(phase: dict, markdown: str) -> list[str]:
+    contract, _ = parse_phase_contract(markdown)
+    if contract is not None:
+        outputs = contract_required_outputs(contract)
+        if outputs:
+            return outputs
+    return list(phase.get("required_outputs") or [])
 
 
 def phase_attempts(phase: dict) -> list[int]:
@@ -258,6 +280,159 @@ def validate_artifacts(
     return errors
 
 
+def validate_phase_gate(root: Path, path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        gate = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"Invalid phase gate JSON: {rel(root, path)}: {exc}"]
+    if not isinstance(gate, dict):
+        return [f"Phase gate must be a JSON object: {rel(root, path)}"]
+    if gate.get("status") != "passed":
+        return [f'Phase gate status must be "passed": {rel(root, path)}']
+    checks = gate.get("checks")
+    if not isinstance(checks, list) or not checks:
+        return [f"Phase gate must include checks: {rel(root, path)}"]
+    return []
+
+
+def validate_phase_reconciliation(root: Path, path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        reconciliation = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"Invalid phase reconciliation JSON: {rel(root, path)}: {exc}"]
+    if not isinstance(reconciliation, dict):
+        return [f"Phase reconciliation must be a JSON object: {rel(root, path)}"]
+    if reconciliation.get("status") != "satisfied":
+        return [f'Phase reconciliation status must be "satisfied": {rel(root, path)}']
+    if not isinstance(reconciliation.get("instruction_results"), list):
+        return [f"Phase reconciliation must include instruction_results: {rel(root, path)}"]
+    return []
+
+
+def required_output_repo_paths(task_path: Path, required_outputs: list[str]) -> list[str]:
+    return [f"tasks/{task_path.name}/{raw_path.strip('/')}" for raw_path in required_outputs]
+
+
+def contract_allowed_paths(contract: dict) -> list[str]:
+    scope = contract.get("scope")
+    if not isinstance(scope, dict):
+        return []
+    values = scope.get("allowed_paths")
+    if not isinstance(values, list):
+        return []
+    return [item for item in values if isinstance(item, str) and item.strip()]
+
+
+def validate_runtime_contract_bundle(
+    root: Path,
+    task_path: Path,
+    phase_number: int,
+    expected_commands: list[str],
+    expected_outputs: list[str],
+) -> list[str]:
+    runtime_dir = task_path / "context-pack" / "runtime"
+    contract_path = runtime_dir / f"phase{phase_number}-contract.json"
+    evidence_path = runtime_dir / f"phase{phase_number}-evidence.json"
+    reconciliation_path = runtime_dir / f"phase{phase_number}-reconciliation.json"
+    gate_path = runtime_dir / f"phase{phase_number}-gate.json"
+    errors: list[str] = []
+
+    try:
+        contract = read_json(contract_path)
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        return [f"Cannot read phase runtime contract: {rel(root, contract_path)}: {exc}"]
+    try:
+        evidence = read_json(evidence_path)
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        return [f"Cannot read phase evidence: {rel(root, evidence_path)}: {exc}"]
+    try:
+        reconciliation = read_json(reconciliation_path)
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        return [f"Cannot read phase reconciliation: {rel(root, reconciliation_path)}: {exc}"]
+    try:
+        gate = read_json(gate_path)
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        return [f"Cannot read phase gate: {rel(root, gate_path)}: {exc}"]
+
+    if contract_acceptance_commands(contract) != expected_commands:
+        errors.append(
+            "Runtime contract acceptance_commands must match phase contract. "
+            f"expected={expected_commands!r} actual={contract_acceptance_commands(contract)!r}"
+        )
+    if contract_required_outputs(contract) != expected_outputs:
+        errors.append(
+            "Runtime contract required_outputs must match phase contract. "
+            f"expected={expected_outputs!r} actual={contract_required_outputs(contract)!r}"
+        )
+
+    commands = evidence.get("commands") if isinstance(evidence, dict) else None
+    actual_commands = [
+        item.get("command")
+        for item in commands or []
+        if isinstance(item, dict)
+    ]
+    if actual_commands != expected_commands:
+        errors.append(
+            "Evidence commands must match phase contract. "
+            f"expected={expected_commands!r} actual={actual_commands!r}"
+        )
+
+    output_entries = evidence.get("required_outputs") if isinstance(evidence, dict) else None
+    actual_outputs = [
+        item.get("path")
+        for item in output_entries or []
+        if isinstance(item, dict)
+    ]
+    if actual_outputs != expected_outputs:
+        errors.append(
+            "Evidence required_outputs must match phase contract. "
+            f"expected={expected_outputs!r} actual={actual_outputs!r}"
+        )
+
+    changed_files = evidence.get("changed_files") if isinstance(evidence, dict) else []
+    if not isinstance(changed_files, list) or not all(isinstance(item, str) for item in changed_files):
+        errors.append("Evidence changed_files must be a string list.")
+        changed_files = []
+    violations = scope_violations(
+        changed_files,
+        contract_allowed_paths(contract),
+        required_output_repo_paths(task_path, expected_outputs),
+    )
+    if violations:
+        errors.append(f"Evidence changed_files include paths outside scope: {violations!r}")
+
+    contract_instruction_ids = [
+        item.get("id")
+        for item in contract.get("instructions", [])
+        if isinstance(item, dict)
+    ]
+    reconciliation_items = reconciliation.get("instruction_results")
+    actual_instruction_ids = [
+        item.get("id")
+        for item in reconciliation_items or []
+        if isinstance(item, dict)
+    ]
+    if actual_instruction_ids != contract_instruction_ids:
+        errors.append(
+            "Reconciliation instruction ids must match contract instructions. "
+            f"expected={contract_instruction_ids!r} actual={actual_instruction_ids!r}"
+        )
+    if any(item.get("status") != "satisfied" for item in reconciliation_items or [] if isinstance(item, dict)):
+        errors.append("All reconciliation instruction results must be satisfied for a completed phase.")
+
+    gate_checks = gate.get("checks") if isinstance(gate, dict) else []
+    if not isinstance(gate_checks, list) or not gate_checks:
+        errors.append("Gate checks must be a non-empty list.")
+    elif any(check.get("status") != "passed" for check in gate_checks if isinstance(check, dict)):
+        errors.append("All gate checks must be passed for a completed phase.")
+
+    return errors
+
+
 def validate_phase_result(
     root: Path,
     task_path: Path,
@@ -359,11 +534,32 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
         phase_path = task_path / "phases" / f"phase{phase_number}.md"
         errors.extend(require_file(root, phase_path, "phase file"))
         expected_commands = list(phase.get("ac_commands") or [])
+        expected_outputs = list(phase.get("required_outputs") or [])
         if phase_path.exists():
             markdown = phase_path.read_text(encoding="utf-8", errors="replace")
+            _, contract_errors = validate_phase_contract(
+                root,
+                task_path,
+                phase_number,
+                phase.get("name"),
+                markdown,
+                require_previous_outputs=phase.get("status") == "completed",
+            )
+            errors.extend([f"Phase {phase_number} contract: {error}" for error in contract_errors])
             expected_commands = expected_ac_commands(phase, markdown)
+            expected_outputs = expected_required_outputs(phase, markdown)
+            if phase.get("ac_commands") and list(phase.get("ac_commands") or []) != expected_commands:
+                errors.append(
+                    f"Phase {phase_number} index ac_commands must match Contract.acceptance_commands."
+                )
+            if phase.get("required_outputs") and list(phase.get("required_outputs") or []) != expected_outputs:
+                errors.append(
+                    f"Phase {phase_number} index required_outputs must match Contract.required_outputs."
+                )
             if not expected_commands:
                 errors.append(f"Missing AC commands for phase {phase_number}.")
+            if not expected_outputs:
+                errors.append(f"Missing required outputs for phase {phase_number}.")
 
         if phase.get("status") == "completed":
             errors.extend(require_file(root, handoff_dir / f"phase{phase_number}.md", "handoff"))
@@ -373,10 +569,33 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
                     task_path,
                     phase_number,
                     expected_commands,
-                    list(phase.get("required_outputs") or []),
+                    expected_outputs,
                 )
             )
             errors.extend(require_file(root, runtime_dir / f"phase{phase_number}-prompt.md", "runtime prompt"))
+            errors.extend(require_file(root, runtime_dir / f"phase{phase_number}-contract.json", "phase contract"))
+            errors.extend(require_file(root, runtime_dir / f"phase{phase_number}-checklist.md", "phase checklist"))
+            errors.extend(require_file(root, runtime_dir / f"phase{phase_number}-evidence.json", "phase evidence"))
+            errors.extend(
+                require_file(root, runtime_dir / f"phase{phase_number}-reconciliation.json", "phase reconciliation")
+            )
+            errors.extend(
+                validate_phase_reconciliation(root, runtime_dir / f"phase{phase_number}-reconciliation.json")
+            )
+            errors.extend(
+                require_file(root, runtime_dir / f"phase{phase_number}-reconciliation.md", "phase reconciliation summary")
+            )
+            errors.extend(require_file(root, runtime_dir / f"phase{phase_number}-gate.json", "phase gate"))
+            errors.extend(validate_phase_gate(root, runtime_dir / f"phase{phase_number}-gate.json"))
+            errors.extend(
+                validate_runtime_contract_bundle(
+                    root,
+                    task_path,
+                    phase_number,
+                    expected_commands,
+                    expected_outputs,
+                )
+            )
             for attempt in phase_attempts(phase):
                 errors.extend(
                     require_file(

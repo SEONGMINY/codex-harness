@@ -25,12 +25,20 @@ COMMON_DOC_TEMPLATES = {
 Completed phases require:
 
 - `context-pack/runtime/phase<N>-prompt.md`
+- `context-pack/runtime/phase<N>-contract.json`
+- `context-pack/runtime/phase<N>-checklist.md`
 - `context-pack/runtime/phase<N>-output-attempt<M>.jsonl`
 - `context-pack/runtime/phase<N>-stderr-attempt<M>.txt`
+- `context-pack/runtime/phase<N>-ac-attempt<M>.json`
+- `context-pack/runtime/phase<N>-evidence.json`
+- `context-pack/runtime/phase<N>-reconciliation.json`
+- `context-pack/runtime/phase<N>-reconciliation.md`
+- `context-pack/runtime/phase<N>-gate.json`
 - `context-pack/runtime/phase<N>-result.json`
 - `context-pack/handoffs/phase<N>.md`
 
 The runner generates `phase<N>-result.json`.
+The runner generates `phase<N>-gate.json`.
 Phase agents only write handoffs and implementation changes.
 Phase 0 also requires `context-pack/runtime/docs-diff.md`.
 """,
@@ -231,11 +239,77 @@ def phase_template(
 ) -> str:
     common_doc_lines = "\n".join(f"- `{doc}`" for doc in common_docs)
     doc_lines = "\n".join(f"- `{doc}`" for doc in docs)
+    previous_outputs = []
+    if phase > 0:
+        previous = phase - 1
+        previous_outputs = [
+            f"context-pack/runtime/phase{previous}-reconciliation.md",
+            f"context-pack/runtime/phase{previous}-gate.json",
+            f"context-pack/handoffs/phase{previous}.md",
+        ]
+    contract = {
+        "phase": phase,
+        "name": name,
+        "read_first": {
+            "docs": [
+                *common_docs,
+                *docs,
+                "context-pack/static/original-prompt.md",
+                "context-pack/static/product.md",
+                "context-pack/static/decisions.md",
+                "context-pack/static/rejected-options.md",
+                "context-pack/static/constraints.md",
+                "context-pack/static/context-gathering.md",
+            ],
+            "previous_outputs": previous_outputs,
+        },
+        "scope": {
+            "layer": "TODO",
+            "allowed_paths": [],
+        },
+        "interfaces": [],
+        "instructions": [
+            {
+                "id": f"P{phase}-001",
+                "task": "TODO: Describe one concrete task.",
+                "expected_evidence": [
+                    "TODO: Describe observable evidence for this instruction."
+                ],
+            }
+        ],
+        "acceptance_commands": [
+            "TODO"
+        ],
+        "required_outputs": [
+            f"context-pack/handoffs/phase{phase}.md"
+        ],
+        "forbidden": [
+            {
+                "rule": "Do not update `tasks/*/index.json`.",
+                "reason": "The runner owns task and phase status.",
+            },
+            {
+                "rule": f"Do not write `context-pack/runtime/phase{phase}-result.json`.",
+                "reason": "The runner owns phase result proof.",
+            },
+            {
+                "rule": "Do not spawn subagents for implementation.",
+                "reason": "Generate phases must run in one fresh Codex session.",
+            },
+        ],
+    }
+    contract_json = json.dumps(contract, ensure_ascii=False, indent=2)
     return f"""# Phase {phase}: {name}
 
 ## Purpose
 
 TODO: Describe the single outcome for this phase.
+
+## Contract
+
+```json
+{contract_json}
+```
 
 ## Read First
 
@@ -254,13 +328,11 @@ TODO: Add specific implementation instructions.
 
 ## Acceptance Criteria
 
-```bash
-TODO
-```
+The runner uses `acceptance_commands` from the Contract block.
 
 ## Required Outputs
 
-- `context-pack/handoffs/phase{phase}.md`
+The runner uses `required_outputs` from the Contract block.
 
 ## Constraints
 
