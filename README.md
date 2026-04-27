@@ -36,35 +36,24 @@ flowchart TD
 
 ## 설치
 
-설치는 두 번 나눠서 합니다.
-
-먼저 내 Codex에 한 번 설치합니다. 어느 프로젝트에서든 `$codex-harness`를 부르기 위한 준비입니다.
+프로젝트 루트에서 한 줄만 실행합니다.
 
 ```bash
-python3 scripts/install-codex-harness.py --scope user --user-hooks --force
+curl -fsSL https://raw.githubusercontent.com/SEONGMINY/codex-harness/master/scripts/bootstrap-install.py | python3 - . --all --force
 ```
 
-설치되는 파일:
+이 명령이 한 번에 처리하는 일:
 
 - `~/.codex/skills/codex-harness`
 - `~/.codex/hooks/codex-harness`
+- `scripts/harness`
+- `.agents/skills/codex-harness`
+
+전역 skill은 어디서든 `$codex-harness`를 부르기 위해 씁니다. 프로젝트 안의 `scripts/harness`는 실제 phase 실행에 씁니다.
 
 전역 hooks는 평소 Codex 작업에는 끼어들지 않습니다. 하네스가 Codex를 실행할 때만 `CODEX_HARNESS_ACTIVE=1`이 들어가고, 그때만 검사합니다.
 
-그 다음, 하네스를 쓸 프로젝트마다 한 번씩 설치합니다. 프로젝트 루트에서 실행합니다.
-
-```bash
-python3 ~/.codex/skills/codex-harness/assets/bootstrap-install.py . --with-hooks
-```
-
-프로젝트에 들어가는 파일:
-
-- `scripts/harness`
-- `.agents/skills/codex-harness`
-- `.codex/hooks/codex-harness`
-- `.codex/hooks.json`
-
-기존 hooks가 있으면 지우지 않고 하네스 항목만 더합니다.
+프로젝트에 hooks 파일까지 남기고 싶으면 `--with-hooks`를 붙입니다. 기존 프로젝트 hooks가 있으면 지우지 않고 하네스 항목만 더합니다.
 
 설치가 끝나면 해당 프로젝트에서 바로 시작합니다.
 
@@ -652,7 +641,7 @@ task 실행 중 생성되는 파일:
    설치 명령:
 
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/SEONGMINY/codex-harness/master/scripts/bootstrap-install.py | python3 - --force
+   curl -fsSL https://raw.githubusercontent.com/SEONGMINY/codex-harness/master/scripts/bootstrap-install.py | python3 - . --all --force
    ```
 
    해결:

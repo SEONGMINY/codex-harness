@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -35,17 +36,29 @@ def codex_home() -> Path:
 def copy_tree(source: Path, target: Path, force: bool) -> None:
     if not source.exists():
         raise FileNotFoundError(f"Missing source path: {source}")
+    source = source.resolve()
+    target = target.resolve()
+    if source == target:
+        return
     if target.exists():
         if not force:
             raise FileExistsError(f"Target already exists: {target}. Re-run with --force.")
         shutil.rmtree(target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, target)
+    if source in target.parents:
+        with tempfile.TemporaryDirectory(prefix="codex-harness-copy-") as tmp:
+            staged = Path(tmp) / source.name
+            shutil.copytree(source, staged)
+            shutil.copytree(staged, target)
+    else:
+        shutil.copytree(source, target)
 
 
 def copy_file(source: Path, target: Path, force: bool) -> None:
     if not source.exists():
         raise FileNotFoundError(f"Missing source path: {source}")
+    if source.resolve() == target.resolve():
+        return
     if target.exists() and not force:
         raise FileExistsError(f"Target already exists: {target}. Re-run with --force.")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -305,6 +318,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", nargs="?", default=".", help="Target Codex project or repository root.")
     parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Install user skill, user hooks, and project harness.",
+    )
+    parser.add_argument(
         "--scope",
         choices=["project", "user", "both"],
         default="project",
@@ -327,6 +345,9 @@ def main() -> int:
         help="Also install optional PostToolUse and UserPromptSubmit hooks.",
     )
     args = parser.parse_args()
+    if args.all:
+        args.scope = "both"
+        args.user_hooks = True
 
     source_root = repo_root()
     target_root = Path(args.target).expanduser().resolve()

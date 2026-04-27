@@ -30,7 +30,7 @@ If the skill is running from a project-local `.agents/skills/codex-harness` copy
 For one-time user-wide setup, install the skill and global no-op-unless-active hooks:
 
 ```bash
-python3 ~/.codex/skills/codex-harness/assets/bootstrap-install.py . --scope user --user-hooks --force
+python3 ~/.codex/skills/codex-harness/assets/bootstrap-install.py . --all --force
 ```
 
 User-level hooks must remain no-op unless `CODEX_HARNESS_ACTIVE=1`. Do not install hooks that affect ordinary Codex work outside `run-phases.py`.

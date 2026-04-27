@@ -24,6 +24,11 @@ def main() -> int:
     parser.add_argument("--repo", default=DEFAULT_REPO, help="codex-harness git repository URL.")
     parser.add_argument("--ref", help="Git ref to install.")
     parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Install user skill, user hooks, and project harness.",
+    )
+    parser.add_argument(
         "--scope",
         choices=["project", "user", "both"],
         default="project",
@@ -65,6 +70,8 @@ def main() -> int:
 
         install_script = source / "scripts" / "install-codex-harness.py"
         command = [sys.executable, str(install_script), str(target), "--scope", args.scope]
+        if args.all:
+            command.append("--all")
         if args.force:
             command.append("--force")
         if args.with_hooks:
