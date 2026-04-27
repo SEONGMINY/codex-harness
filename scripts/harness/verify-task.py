@@ -421,8 +421,8 @@ def validate_runtime_contract_bundle(
             "Reconciliation instruction ids must match contract instructions. "
             f"expected={contract_instruction_ids!r} actual={actual_instruction_ids!r}"
         )
-    if any(item.get("status") != "satisfied" for item in reconciliation_items or [] if isinstance(item, dict)):
-        errors.append("All reconciliation instruction results must be satisfied for a completed phase.")
+    if any(item.get("status") == "blocked" for item in reconciliation_items or [] if isinstance(item, dict)):
+        errors.append("Reconciliation instruction results must not be blocked for a completed phase.")
 
     gate_checks = gate.get("checks") if isinstance(gate, dict) else []
     if not isinstance(gate_checks, list) or not gate_checks:

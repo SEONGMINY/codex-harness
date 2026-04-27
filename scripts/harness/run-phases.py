@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from codex_exec import CODEX_IDLE_EXIT_CODE, run_codex_exec
 from phase_contract import (
     checklist_markdown,
     contract_acceptance_commands,
@@ -26,7 +27,8 @@ from phase_contract import (
 
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
-TERMINAL_RESET_STATUSES = {"completed", "error"}
+RUNNABLE_PHASE_STATUSES = {"pending", "running"}
+HARNESS_VERSION = "0.1.0"
 MANDATORY_STATIC_FILES = [
     "original-prompt.md",
     "product.md",
@@ -61,11 +63,30 @@ def write_json(path: Path, data: dict) -> None:
     )
 
 
+def harness_install_errors(root: Path) -> list[str]:
+    manifest_path = root / "codex-harness.json"
+    if not manifest_path.exists():
+        return ["Missing codex-harness.json. Reinstall codex-harness in this project."]
+    try:
+        manifest = read_json(manifest_path)
+    except (json.JSONDecodeError, OSError) as exc:
+        return [f"Invalid codex-harness.json: {exc}"]
+
+    version = manifest.get("version")
+    if version != HARNESS_VERSION:
+        return [
+            "codex-harness version mismatch: "
+            f"script={HARNESS_VERSION}, manifest={version or '(missing)'}. "
+            "Reinstall or update codex-harness in this project."
+        ]
+    return []
+
+
 def non_negative_int(value: str) -> int:
-    phase_number = int(value)
-    if phase_number < 0:
-        raise argparse.ArgumentTypeError("phase number must be non-negative")
-    return phase_number
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return parsed
 
 
 def run_capture(args: list[str], cwd: Path) -> str:
@@ -104,7 +125,7 @@ def phase_file(task_path: Path, phase_number: int) -> Path:
 
 def pending_phase(task_index: dict) -> dict | None:
     for phase in task_index.get("phases", []):
-        if phase.get("status") == "pending":
+        if phase.get("status") in RUNNABLE_PHASE_STATUSES:
             return phase
     return None
 
@@ -200,6 +221,10 @@ def phase_repair_packet_path(task_path: Path, phase_number: int) -> Path:
 
 def phase_repair_packet_summary_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-repair-packet.md"
+
+
+def runner_lock_path(task_path: Path) -> Path:
+    return task_path / "context-pack" / "runtime" / "run-phases.lock"
 
 
 def phase_handoff_path(task_path: Path, phase_number: int) -> Path:
@@ -562,7 +587,7 @@ def reset_phase_statuses(task_index: dict, from_phase: int, reset_at: str) -> li
     for phase in task_index.get("phases", []):
         phase_number = int(phase["phase"])
         old_status = phase.get("status")
-        if phase_number < from_phase or old_status not in TERMINAL_RESET_STATUSES:
+        if phase_number < from_phase:
             continue
 
         phase["status"] = "pending"
@@ -626,6 +651,77 @@ def write_last_error(task_path: Path, phase_number: int, message: str) -> None:
     )
 
 
+def process_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def lock_is_stale(path: Path) -> bool:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    pid = data.get("pid") if isinstance(data, dict) else None
+    if not isinstance(pid, int) or pid <= 0:
+        return True
+    return not process_is_alive(pid)
+
+
+def acquire_runner_lock(task_path: Path, dry_run: bool) -> Path | None:
+    if dry_run:
+        return None
+    path = runner_lock_path(task_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"pid": os.getpid(), "started_at": now()}
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as exc:
+            if lock_is_stale(path):
+                path.unlink(missing_ok=True)
+                continue
+            raise RuntimeError(f"Another run-phases process is active: {path}") from exc
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        return path
+
+
+def release_runner_lock(path: Path | None) -> None:
+    if path is not None:
+        path.unlink(missing_ok=True)
+
+
+def allowed_path_activity_root(root: Path, raw_path: str) -> Path | None:
+    value = raw_path.strip().lstrip("./")
+    if not value or value.startswith("../") or Path(value).is_absolute():
+        return None
+    if "*" in value:
+        prefix = value.split("*", 1)[0].rstrip("/")
+        if not prefix:
+            return root
+        return root / prefix
+    return root / value
+
+
+def phase_activity_paths(root: Path, task_path: Path, phase_number: int) -> list[Path]:
+    paths = [phase_handoff_path(task_path, phase_number)]
+    try:
+        contract = runtime_phase_contract(task_path, phase_number)
+    except (FileNotFoundError, ValueError, json.JSONDecodeError):
+        return paths
+    for raw_path in contract_allowed_paths(contract):
+        activity_root = allowed_path_activity_root(root, raw_path)
+        if activity_root is not None:
+            paths.append(activity_root)
+    return paths
+
+
 def run_codex(
     root: Path,
     task_path: Path,
@@ -636,6 +732,7 @@ def run_codex(
     codex_bin: str,
     full_auto: bool,
     yolo: bool,
+    idle_timeout: int,
 ) -> int:
     command = [codex_bin, "exec", "--json"]
     if yolo:
@@ -658,18 +755,16 @@ def run_codex(
         }
     )
 
-    result = subprocess.run(
+    return run_codex_exec(
         command,
         cwd=root,
+        prompt=prompt,
+        output_path=output_path,
+        stderr_path=stderr_path,
         env=env,
-        input=prompt,
-        text=True,
-        capture_output=True,
-        check=False,
+        idle_timeout=idle_timeout,
+        activity_paths=phase_activity_paths(root, task_path, phase_number),
     )
-    output_path.write_text(result.stdout, encoding="utf-8")
-    stderr_path.write_text(result.stderr, encoding="utf-8")
-    return result.returncode
 
 
 def verify_required_outputs(task_path: Path, required_outputs: list[str]) -> list[str]:
@@ -833,9 +928,50 @@ def build_evidence(
     }
 
 
+def _normalized_evidence_path(raw_path: object) -> str | None:
+    if not isinstance(raw_path, str):
+        return None
+    value = raw_path.strip().strip("`").strip()
+    if not value:
+        return None
+    return value.lstrip("./")
+
+
+def _path_matches(expected: str, observed: str) -> bool:
+    return observed == expected or observed.endswith(f"/{expected}")
+
+
+def expected_evidence_matched(expected: object, evidence: dict[str, object]) -> bool:
+    expected_text = _normalized_evidence_path(expected)
+    if expected_text is None:
+        return False
+
+    for item in evidence.get("commands", []) or []:
+        if (
+            isinstance(item, dict)
+            and item.get("command") == expected_text
+            and item.get("exit_code") == 0
+        ):
+            return True
+
+    for item in evidence.get("required_outputs", []) or []:
+        if (
+            isinstance(item, dict)
+            and item.get("exists") is True
+            and item.get("path") == expected_text
+        ):
+            return True
+
+    for raw_path in evidence.get("changed_files", []) or []:
+        observed = _normalized_evidence_path(raw_path)
+        if observed and _path_matches(expected_text, observed):
+            return True
+
+    return False
+
+
 def build_reconciliation(contract: dict, evidence: dict[str, object], gate: dict[str, object]) -> dict[str, object]:
     gate_passed = gate.get("status") == "passed"
-    evidence_text = json.dumps(evidence, ensure_ascii=False, sort_keys=True).lower()
     observed_evidence = [
         f"changed_files={evidence.get('changed_files', [])!r}",
         f"commands={[item.get('command') for item in evidence.get('commands', [])]!r}",
@@ -847,7 +983,7 @@ def build_reconciliation(contract: dict, evidence: dict[str, object], gate: dict
         matched_expected = [
             item
             for item in expected_items
-            if isinstance(item, str) and item.lower() in evidence_text
+            if expected_evidence_matched(item, evidence)
         ]
         if not gate_passed:
             status = "blocked"
@@ -863,14 +999,10 @@ def build_reconciliation(contract: dict, evidence: dict[str, object], gate: dict
                 "matched_expected_evidence": matched_expected,
                 "observed_evidence": observed_evidence,
                 "status": status,
-                "method": "evidence_substring_match",
+                "method": "structured_evidence_match",
             }
         )
-    aggregate_status = "satisfied"
-    if not gate_passed:
-        aggregate_status = "blocked"
-    elif any(item.get("status") != "satisfied" for item in instruction_results):
-        aggregate_status = "unverified"
+    aggregate_status = "satisfied" if gate_passed else "blocked"
     return {
         "phase": contract.get("phase"),
         "status": aggregate_status,
@@ -891,6 +1023,8 @@ def reconciliation_markdown(reconciliation: dict[str, object], gate: dict[str, o
         "",
         f"Gate: `{gate.get('status')}`",
         f"Status: `{reconciliation.get('status')}`",
+        "",
+        "Unverified items are QA notes. They do not trigger a retry when the gate passes.",
         "",
         "## Instruction Results",
         "",
@@ -1312,6 +1446,7 @@ def execute_phase(
             args.codex_bin,
             args.full_auto,
             args.yolo,
+            args.codex_idle_timeout,
         )
         if returncode != 0:
             message = f"codex exec failed with exit code {returncode}. See {stderr_path}."
@@ -1472,10 +1607,8 @@ def execute_phase(
             )
             gate = build_gate(task_path, phase_number, contract, changed_files, command_results, required_outputs)
             reconciliation = write_runtime_review_artifacts(task_path, phase_number, contract, evidence, gate)
-            if gate.get("status") != "passed" or reconciliation.get("status") != "satisfied":
+            if gate.get("status") != "passed":
                 reasons = list(gate.get("blocking_reasons") or [])
-                if reconciliation.get("status") != "satisfied":
-                    reasons.append(f"Phase reconciliation status is {reconciliation.get('status')}.")
                 message = "Phase gate failed: " + "; ".join(reasons)
                 write_last_error(task_path, phase_number, message)
                 write_repair_packet(
@@ -1546,6 +1679,12 @@ def main() -> int:
     parser.add_argument("--codex-bin", default="codex", help="Codex executable.")
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--ac-timeout", type=int, default=600)
+    parser.add_argument(
+        "--codex-idle-timeout",
+        type=non_negative_int,
+        default=300,
+        help="Fail codex exec after this many seconds with no stdout/stderr/stdin or watched file activity. Use 0 to disable.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Only build the next prompt.")
     parser.add_argument("--one", action="store_true", help="Run only one pending phase.")
     parser.add_argument(
@@ -1566,29 +1705,43 @@ def main() -> int:
     args.failed = False
 
     root = Path(args.root).resolve()
+    install_errors = harness_install_errors(root)
+    if install_errors:
+        print("[ERROR] Invalid codex-harness installation:", file=sys.stderr)
+        for error in install_errors:
+            print(f"- {error}", file=sys.stderr)
+        return 1
     task_path = resolve_task_path(root, args.task)
-    task_index_override = apply_phase_reset(root, task_path, args.from_phase, args.dry_run)
+    try:
+        lock_path = acquire_runner_lock(task_path, args.dry_run)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    try:
+        task_index_override = apply_phase_reset(root, task_path, args.from_phase, args.dry_run)
 
-    while True:
-        progressed = execute_phase(root, task_path, args, task_index_override)
-        task_index_override = None
-        if args.dry_run or args.one or not progressed:
-            break
+        while True:
+            progressed = execute_phase(root, task_path, args, task_index_override)
+            task_index_override = None
+            if args.dry_run or args.one or not progressed:
+                break
 
-    task_index = read_json(task_path / "index.json")
-    if not args.dry_run and all(phase.get("status") == "completed" for phase in task_index.get("phases", [])):
-        if verify_task(root, task_path) != 0:
-            update_top_index(root, task_path.name, "error")
-            args.failed = True
-            return 1
-        update_top_index(root, task_path.name, "completed")
-        if args.evaluate:
-            eval_returncode = run_evaluation(root, task_path, args)
-            if eval_returncode != 0:
+        task_index = read_json(task_path / "index.json")
+        if not args.dry_run and all(phase.get("status") == "completed" for phase in task_index.get("phases", [])):
+            if verify_task(root, task_path) != 0:
+                update_top_index(root, task_path.name, "error")
                 args.failed = True
-            elif verify_task(root, task_path, require_evaluation=True) != 0:
-                args.failed = True
-    return 1 if args.failed else 0
+                return 1
+            update_top_index(root, task_path.name, "completed")
+            if args.evaluate:
+                eval_returncode = run_evaluation(root, task_path, args)
+                if eval_returncode != 0:
+                    args.failed = True
+                elif verify_task(root, task_path, require_evaluation=True) != 0:
+                    args.failed = True
+        return 1 if args.failed else 0
+    finally:
+        release_runner_lock(lock_path)
 
 
 if __name__ == "__main__":

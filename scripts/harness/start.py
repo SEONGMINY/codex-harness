@@ -8,10 +8,11 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+
+from codex_exec import run_codex_exec
 
 
 SKIP_SNAPSHOT_DIRS = {
@@ -28,6 +29,7 @@ SKIP_SNAPSHOT_DIRS = {
     "node_modules",
     "venv",
 }
+HARNESS_VERSION = "0.1.0"
 
 
 def now_id() -> str:
@@ -117,6 +119,7 @@ def launcher_allowed_change(path: str, run_dir: Path, root: Path) -> bool:
 def build_prompt(
     root: Path,
     run_dir: Path,
+    skill_path: Path,
     request_path: Path,
     answer_paths: list[Path],
     docs_approved: bool,
@@ -196,7 +199,7 @@ Do not invoke `scripts/harness/start.py` again.
 
 ## First Steps
 
-1. Read `.agents/skills/codex-harness/SKILL.md`.
+1. Read `{rel(skill_path, root)}`.
 2. Follow the `Harness Session Mode` section in that skill.
 3. Read the request file and answer files before making any task files.
 4. Treat the parent chat as unavailable context.
@@ -244,22 +247,86 @@ def run_codex(
             "CODEX_HARNESS_LAUNCH_DIR": str(run_dir),
         }
     )
-    result = subprocess.run(
+    activity_paths = [run_dir]
+    if args.docs_approved:
+        activity_paths.extend([root / "docs", root / "tasks"])
+    return run_codex_exec(
         command,
         cwd=root,
+        prompt=prompt,
+        output_path=output_path,
+        stderr_path=stderr_path,
         env=env,
-        input=prompt,
-        text=True,
-        capture_output=True,
-        check=False,
+        idle_timeout=args.codex_idle_timeout,
+        activity_paths=activity_paths,
     )
-    output_path.write_text(result.stdout, encoding="utf-8")
-    stderr_path.write_text(result.stderr, encoding="utf-8")
-    return result.returncode
 
 
 def write_json(path: Path, data: dict[str, object]) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def skill_version(skill_path: Path) -> str | None:
+    try:
+        text = skill_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"(?m)^version:\s*['\"]?([^'\"\n]+)", text)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def harness_skill_path(root: Path) -> Path | None:
+    installed = root / "scripts" / "harness" / "skill" / "SKILL.md"
+    if installed.exists():
+        return installed
+    if not (root / "scripts" / "install-codex-harness.py").exists():
+        return None
+    source_tree = root / ".agents" / "skills" / "codex-harness" / "SKILL.md"
+    if source_tree.exists():
+        return source_tree
+    return None
+
+
+def harness_install_errors(root: Path) -> list[str]:
+    required_paths = [
+        root / "codex-harness.json",
+        root / "scripts" / "harness" / "start.py",
+        root / "scripts" / "harness" / "run-phases.py",
+    ]
+    missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
+    if missing_required:
+        return [
+            "codex-harness is not installed in this project. Missing: "
+            + ", ".join(missing_required)
+        ]
+
+    errors: list[str] = []
+    try:
+        manifest = json.loads((root / "codex-harness.json").read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        errors.append(f"Invalid codex-harness.json: {exc}")
+    else:
+        manifest_version = manifest.get("version")
+        if manifest_version != HARNESS_VERSION:
+            errors.append(
+                "codex-harness version mismatch: "
+                f"launcher={HARNESS_VERSION}, manifest={manifest_version or '(missing)'}."
+            )
+
+    skill_path = harness_skill_path(root)
+    if skill_path is None:
+        errors.append("Missing harness skill instructions: scripts/harness/skill/SKILL.md")
+        return errors
+
+    declared_skill_version = skill_version(skill_path)
+    if declared_skill_version != HARNESS_VERSION:
+        errors.append(
+            "codex-harness skill version mismatch: "
+            f"launcher={HARNESS_VERSION}, skill={declared_skill_version or '(missing)'}."
+        )
+    return errors
 
 
 def launcher_status(run_dir: Path, returncode: int | None, dry_run: bool) -> str:
@@ -304,6 +371,12 @@ def main() -> int:
     )
     parser.add_argument("--full-auto", action="store_true", help="Pass --full-auto to codex exec.")
     parser.add_argument(
+        "--codex-idle-timeout",
+        type=int,
+        default=300,
+        help="Fail codex exec after this many seconds with no activity. Use 0 to disable.",
+    )
+    parser.add_argument(
         "--yolo",
         action="store_true",
         help="Pass --dangerously-bypass-approvals-and-sandbox to codex exec.",
@@ -315,17 +388,15 @@ def main() -> int:
     if not root.exists() or not root.is_dir():
         print(f"[ERROR] Root directory does not exist: {root}", file=sys.stderr)
         return 1
-    required_paths = [
-        root / ".agents" / "skills" / "codex-harness" / "SKILL.md",
-        root / "scripts" / "harness" / "run-phases.py",
-    ]
-    missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
-    if missing_required:
-        print(
-            "[ERROR] codex-harness is not installed in this project. Missing: "
-            + ", ".join(missing_required),
-            file=sys.stderr,
-        )
+    install_errors = harness_install_errors(root)
+    if install_errors:
+        print("[ERROR] Invalid codex-harness installation:", file=sys.stderr)
+        for error in install_errors:
+            print(f"- {error}", file=sys.stderr)
+        return 1
+    skill_path = harness_skill_path(root)
+    if skill_path is None:
+        print("[ERROR] Missing harness skill instructions.", file=sys.stderr)
         return 1
 
     try:
@@ -351,6 +422,7 @@ def main() -> int:
     prompt = build_prompt(
         root,
         run_dir,
+        skill_path,
         request_path,
         answer_paths,
         args.docs_approved,

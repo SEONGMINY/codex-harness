@@ -57,9 +57,9 @@ python3 /Users/leesm/work/side/harness/scripts/install-codex-harness.py . --all 
 - `~/.codex/skills/codex-harness`
 - `~/.codex/hooks/codex-harness`
 - `scripts/harness`
-- `.agents/skills/codex-harness`
+- `codex-harness.json`
 
-전역 skill은 어디서든 `$codex-harness`를 부르기 위해 씁니다. 프로젝트 안의 `scripts/harness`는 실제 phase 실행에 씁니다.
+전역 skill은 어디서든 `$codex-harness`를 부르기 위해 씁니다. 프로젝트 안의 `scripts/harness`는 실제 phase 실행에 씁니다. 설치 과정에서 오래된 `.agents/skills/codex-harness`가 있으면 제거합니다.
 
 전역 hooks는 평소 Codex 작업에는 끼어들지 않습니다. 하네스가 Codex를 실행할 때만 `CODEX_HARNESS_ACTIVE=1`이 들어가고, 그때만 검사합니다.
 
@@ -286,7 +286,9 @@ context-pack/handoffs/phase1.md
 
 `phase1-result.json`이 없거나 gate가 실패하면, Codex가 완료했다고 말해도 완료가 아닙니다.
 
-gate에서 걸리면 바로 끝내지 않습니다. 어떤 명령이 실패했는지, 어떤 파일이 빠졌는지, 어떤 지시가 확인되지 않았는지를 `repair-packet`에 적고 같은 phase를 다시 돌립니다. 다음 시도는 그 파일을 먼저 읽고 실패한 지점만 고칩니다.
+gate에서 걸리면 바로 끝내지 않습니다. 실패한 확인 명령, 빠진 파일, 허용 범위 밖 변경을 `repair-packet`에 적고 같은 phase를 다시 돌립니다. 다음 시도는 그 파일을 먼저 읽고 실패한 지점만 고칩니다.
+
+`reconciliation`은 지시사항 대비 반영 결과를 남기는 QA 기록입니다. `unverified` 항목이 있어도 gate가 통과했다면 그 이유만 기록하고, 그것만으로 같은 phase를 다시 돌리지는 않습니다.
 
 ## 1. 요구사항 정리
 
@@ -490,12 +492,14 @@ python3 scripts/harness/verify-task.py <task-dir> --require-evaluation
 │           ├── harness_stop.py
 │           ├── harness_post_tool_use.py
 │           └── harness_user_prompt_submit.py
+├── codex-harness.json
 ├── scripts/
 │   ├── bootstrap-install.py
 │   ├── install-codex-harness.py
 │   └── harness/
 │       ├── start.py
 │       ├── init-task.py
+│       ├── codex_exec.py
 │       ├── run-phases.py
 │       ├── verify-task.py
 │       ├── evaluate-task.py
@@ -508,15 +512,14 @@ python3 scripts/harness/verify-task.py <task-dir> --require-evaluation
 
 ```text
 .
-├── .agents/
-│   └── skills/
-│       └── codex-harness/
 ├── .codex/
 │   ├── hooks.json
 │   ├── hooks.optional.json
 │   └── hooks/
+├── codex-harness.json
 └── scripts/
     └── harness/
+        └── skill/
 ```
 
 task 실행 중 생성되는 파일:
@@ -629,7 +632,8 @@ task 실행 중 생성되는 파일:
    - 실패한 확인 명령이 무엇인가
    - 필요한 파일이 빠졌는가
    - 허용 범위 밖 파일을 건드렸는가
-   - 지시사항 중 `unverified`나 `blocked`가 있는가
+   - 지시사항 중 `blocked`가 있는가
+   - `unverified`가 있다면 실제 누락인지, 자동 매칭 한계인지
 
    확인 명령:
 

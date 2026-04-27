@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from codex_exec import run_codex_exec
+
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
 
@@ -191,6 +193,8 @@ def run_codex(
     codex_bin: str,
     full_auto: bool,
     yolo: bool,
+    idle_timeout: int,
+    activity_paths: Iterable[Path],
 ) -> int:
     command = [codex_bin, "exec", "--json"]
     if yolo:
@@ -199,17 +203,15 @@ def run_codex(
         command.append("--full-auto")
     command.append("-")
 
-    result = subprocess.run(
+    return run_codex_exec(
         command,
         cwd=root,
-        input=prompt,
-        text=True,
-        capture_output=True,
-        check=False,
+        prompt=prompt,
+        output_path=output_path,
+        stderr_path=stderr_path,
+        idle_timeout=idle_timeout,
+        activity_paths=activity_paths,
     )
-    output_path.write_text(result.stdout, encoding="utf-8")
-    stderr_path.write_text(result.stderr, encoding="utf-8")
-    return result.returncode
 
 
 def main() -> int:
@@ -221,6 +223,12 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=600, help="Validation command timeout.")
     parser.add_argument("--dry-run", action="store_true", help="Only write the evaluation prompt.")
     parser.add_argument("--full-auto", action="store_true", help="Pass --full-auto to codex exec.")
+    parser.add_argument(
+        "--codex-idle-timeout",
+        type=int,
+        default=300,
+        help="Fail codex exec after this many seconds with no activity. Use 0 to disable.",
+    )
     parser.add_argument(
         "--yolo",
         action="store_true",
@@ -262,6 +270,8 @@ def main() -> int:
         args.codex_bin,
         args.full_auto,
         args.yolo,
+        args.codex_idle_timeout,
+        [runtime_dir],
     )
     if returncode != 0:
         print(f"codex exec failed. See {stderr_path}.", file=sys.stderr)

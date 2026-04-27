@@ -160,7 +160,10 @@ The runner-generated phase result JSON is the machine-readable completion contra
 The runner-generated gate JSON decides whether the phase may complete.
 The runner-generated repair packet tells the next attempt exactly what failed.
 The reconciliation summary is included in later phase context.
+Unverified reconciliation items are QA notes, not retry triggers. Retry only when the gate fails.
 The handoff remains the human-readable summary.
+`start.py`, `run-phases.py`, and `evaluate-task.py` stream child Codex stdout/stderr into runtime log files while Codex is running.
+They fail a silent child after `--codex-idle-timeout` when stdout, stderr, stdin progress, and watched files stay unchanged.
 
 When hooks are installed, the runner passes these environment variables to `codex exec`:
 

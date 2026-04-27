@@ -14,9 +14,13 @@ from pathlib import Path
 
 
 INSTALL_PATHS = [
-    (Path(".agents") / "skills" / "codex-harness", Path(".agents") / "skills" / "codex-harness"),
     (Path("scripts") / "harness", Path("scripts") / "harness"),
 ]
+INSTALL_FILES = [
+    (Path("codex-harness.json"), Path("codex-harness.json")),
+]
+PROJECT_LOCAL_SKILL_TARGET = Path(".agents") / "skills" / "codex-harness"
+PROJECT_RUNTIME_SKILL_TARGET = Path("scripts") / "harness" / "skill"
 PROJECT_HOOKS_SOURCE = Path(".codex") / "hooks"
 PROJECT_HOOKS_TARGET = Path(".codex") / "hooks" / "codex-harness"
 USER_SKILL_SOURCE = Path(".agents") / "skills" / "codex-harness"
@@ -161,6 +165,19 @@ def install_project(
 
     for source_rel, target_rel in INSTALL_PATHS:
         copy_tree(source_root / source_rel, target_root / target_rel, force)
+        print(f"installed {target_rel}")
+
+    local_skill = target_root / PROJECT_LOCAL_SKILL_TARGET
+    source_skill = source_root / PROJECT_LOCAL_SKILL_TARGET
+    if local_skill.exists() and local_skill.resolve() != source_skill.resolve():
+        shutil.rmtree(local_skill)
+        print(f"removed stale project-local skill {PROJECT_LOCAL_SKILL_TARGET}")
+
+    copy_tree(source_root / USER_SKILL_SOURCE, target_root / PROJECT_RUNTIME_SKILL_TARGET, True)
+    print(f"installed {PROJECT_RUNTIME_SKILL_TARGET}")
+
+    for source_rel, target_rel in INSTALL_FILES:
+        copy_file(source_root / source_rel, target_root / target_rel, True)
         print(f"installed {target_rel}")
 
     for rel_path in [Path("docs"), Path("tasks")]:

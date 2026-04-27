@@ -1,6 +1,7 @@
 ---
 name: codex-harness
 description: Run a Codex implementation harness for scoped product or internal tooling work. Use when the user invokes `$codex-harness`, asks to clarify requirements before implementation, wants a strict Clarify to Review to Context Gathering to Plan to Generate to Evaluate workflow, or wants phase-based Codex execution controlled by scripts instead of subagents or long chained sessions.
+version: 0.1.0
 ---
 
 # Codex Harness
@@ -19,15 +20,36 @@ If repository hooks are installed, `scripts/harness/run-phases.py` passes the ac
 
 ## Installation Check
 
-Before starting the workflow, check whether the current repository has `scripts/harness/run-phases.py`.
+Before starting the workflow, check whether the current repository has the matching harness version:
 
-If it is missing, install the harness into the current repository first:
+```bash
+python3 - <<'PY'
+import json
+from pathlib import Path
+root = Path(".")
+required = [
+    root / "codex-harness.json",
+    root / "scripts" / "harness" / "skill" / "SKILL.md",
+    root / "scripts" / "harness" / "start.py",
+    root / "scripts" / "harness" / "run-phases.py",
+]
+missing = [str(path) for path in required if not path.exists()]
+if missing:
+    raise SystemExit("missing: " + ", ".join(missing))
+manifest_version = json.loads((root / "codex-harness.json").read_text(encoding="utf-8")).get("version")
+skill_text = (root / "scripts" / "harness" / "skill" / "SKILL.md").read_text(encoding="utf-8")
+if manifest_version != "0.1.0" or "version: 0.1.0" not in skill_text:
+    raise SystemExit(f"version mismatch: manifest={manifest_version}")
+PY
+```
+
+If it is missing or stale, install the harness into the current repository first:
 
 ```bash
 python3 ~/.codex/skills/codex-harness/assets/bootstrap-install.py . --all --force
 ```
 
-If the skill is running from a project-local `.agents/skills/codex-harness` copy, use that skill's `assets/bootstrap-install.py` path instead of the global path.
+Project install removes old `.agents/skills/codex-harness` copies. The project should use the global skill for invocation and `scripts/harness/skill/SKILL.md` for isolated harness sessions.
 
 For one-time user-wide setup, install the skill and global no-op-unless-active hooks:
 
