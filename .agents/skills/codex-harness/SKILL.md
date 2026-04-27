@@ -7,9 +7,11 @@ description: Run a Codex implementation harness for scoped product or internal t
 
 ## Overview
 
-Use this skill to turn an ambiguous implementation request into concise agent-facing docs, a reviewed scope decision, a reusable context-pack, and phase files that can be executed by `scripts/harness/run-phases.py`.
+Use this skill to launch a separate codex-harness orchestration session. The parent chat should stay small: save the user's request, run `scripts/harness/start.py`, and report the launcher result.
 
-The harness does not chain long Codex conversations. It captures decisions as files, then runs each phase in a fresh `codex exec` session while the runner owns status, retries, and failure decisions.
+The harness session turns an ambiguous implementation request into concise agent-facing docs, a reviewed scope decision, a reusable context-pack, and phase files that can be executed by `scripts/harness/run-phases.py`.
+
+The harness does not chain long Codex conversations. It captures decisions as files, runs orchestration in a separate `codex exec` session, then runs each implementation phase in another fresh `codex exec` session while the runner owns status, retries, and failure decisions.
 
 When a phase fails a retryable check, the runner writes a repair packet under `context-pack/runtime/` and retries the same phase with that packet in context. The phase agent repairs only the listed failures; it does not decide the next phase.
 
@@ -22,7 +24,7 @@ Before starting the workflow, check whether the current repository has `scripts/
 If it is missing, install the harness into the current repository first:
 
 ```bash
-python3 ~/.codex/skills/codex-harness/assets/bootstrap-install.py . --with-hooks
+python3 ~/.codex/skills/codex-harness/assets/bootstrap-install.py . --all --force
 ```
 
 If the skill is running from a project-local `.agents/skills/codex-harness` copy, use that skill's `assets/bootstrap-install.py` path instead of the global path.
@@ -34,6 +36,38 @@ python3 ~/.codex/skills/codex-harness/assets/bootstrap-install.py . --all --forc
 ```
 
 User-level hooks must remain no-op unless `CODEX_HARNESS_ACTIVE=1`. Do not install hooks that affect ordinary Codex work outside `run-phases.py`.
+
+## Launcher Mode
+
+Default to this mode when the user invokes `$codex-harness` from an ordinary chat.
+
+1. Ensure the harness is installed in the current repository.
+2. Do not run Clarify, Review, Context Gathering, Plan, Generate, or Evaluate in the parent chat.
+3. Pass the user's request to the launcher through stdin.
+4. Run:
+
+```bash
+python3 scripts/harness/start.py --request-file - --full-auto <<'EOF'
+<user request>
+EOF
+```
+
+Add `--docs-approved`, `--run-phases`, or `--evaluate` only when the user explicitly requested that state.
+
+After the command finishes, read only these launcher outputs:
+
+- `.codex-harness/sessions/<run-id>/last-message.md`
+- `.codex-harness/sessions/<run-id>/questions.md`, when present
+- `.codex-harness/sessions/<run-id>/docs-approval-request.md`, when present
+- `.codex-harness/sessions/<run-id>/launcher-result.json`
+
+Report the status and next file path. Do not summarize the whole harness session unless the user asks.
+
+## Harness Session Mode
+
+Use this mode when the prompt or environment says this is an isolated harness session launched by `scripts/harness/start.py`.
+
+Do not invoke `scripts/harness/start.py` from this mode.
 
 ## Workflow
 

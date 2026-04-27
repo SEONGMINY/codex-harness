@@ -2,3 +2,4 @@ docs/
 tasks/*
 !tasks/.gitkeep
 _workspace/*
+.codex-harness/

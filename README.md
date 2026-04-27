@@ -14,22 +14,26 @@ codex-harness를 쓰면 이렇게 작업합니다.
 - 작업 기준은 대화가 아니라 `docs`, `context-pack`, `phase` 파일에 둡니다.
 - 완료 여부는 Codex의 답변이 아니라 확인 명령과 실행 기록으로 판단합니다.
 - 실패하면 실패 이유를 `repair packet`으로 남기고 같은 phase를 다시 실행합니다.
+- `$codex-harness`를 부른 메인 대화는 launcher 역할만 합니다.
 
 ```mermaid
 flowchart TD
-  A["요구사항 정리"] --> B["요구사항 검토"]
-  B --> C{"문서 생성 승인?"}
-  C -- "거부" --> X["중단"]
-  C -- "승인" --> D["docs / context-pack 생성"]
-  D --> E["phase 계획"]
-  E --> F["run-phases.py 실행"]
-  F --> G["새 Codex 세션에서 phase 작업"]
-  G --> H["확인 명령 실행"]
-  H --> I{"gate 통과?"}
-  I -- "실패" --> J["repair packet 생성"]
-  J --> G
-  I -- "통과" --> K["phase-result.json 생성"]
-  K --> L["평가"]
+  A["메인 대화"] --> B["start.py 실행"]
+  B --> C["별도 harness 세션"]
+  C --> D["요구사항 정리"]
+  D --> E["요구사항 검토"]
+  E --> F{"문서 생성 승인?"}
+  F -- "거부" --> X["중단"]
+  F -- "승인" --> G["docs / context-pack 생성"]
+  G --> H["phase 계획"]
+  H --> I["run-phases.py 실행"]
+  I --> J["새 Codex 세션에서 phase 작업"]
+  J --> K["확인 명령 실행"]
+  K --> L{"gate 통과?"}
+  L -- "실패" --> M["repair packet 생성"]
+  M --> J
+  L -- "통과" --> N["phase-result.json 생성"]
+  N --> O["평가"]
 ```
 
 다음 단계로 넘어갈 때도 Codex의 말이 아니라, 파일로 남은 기준과 실행 기록을 봅니다.
@@ -39,7 +43,13 @@ flowchart TD
 프로젝트 루트에서 한 줄만 실행합니다.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SEONGMINY/codex-harness/master/scripts/bootstrap-install.py | python3 - . --all --force
+python3 /path/to/codex-harness/scripts/install-codex-harness.py . --all --force
+```
+
+예를 들어 이 저장소를 `/Users/leesm/work/side/harness`에 받아 두었다면:
+
+```bash
+python3 /Users/leesm/work/side/harness/scripts/install-codex-harness.py . --all --force
 ```
 
 이 명령이 한 번에 처리하는 일:
@@ -60,6 +70,8 @@ curl -fsSL https://raw.githubusercontent.com/SEONGMINY/codex-harness/master/scri
 ```text
 $codex-harness
 ```
+
+이때 메인 대화는 오래 끌지 않습니다. 요청을 파일로 저장하고 `scripts/harness/start.py`를 실행합니다. 실제 요구사항 정리와 계획은 `.codex-harness/sessions/<run-id>/` 아래에 기록되는 별도 harness 세션에서 진행됩니다.
 
 ## 실행 기록
 
@@ -93,6 +105,7 @@ codex-harness 사용:
 
 ```text
 요청
+→ start.py가 별도 harness 세션 실행
 → 요구사항 정리
 → 만들 가치 검토
 → 문서와 컨텍스트 저장
@@ -481,6 +494,7 @@ python3 scripts/harness/verify-task.py <task-dir> --require-evaluation
 │   ├── bootstrap-install.py
 │   ├── install-codex-harness.py
 │   └── harness/
+│       ├── start.py
 │       ├── init-task.py
 │       ├── run-phases.py
 │       ├── verify-task.py
@@ -641,7 +655,7 @@ task 실행 중 생성되는 파일:
    설치 명령:
 
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/SEONGMINY/codex-harness/master/scripts/bootstrap-install.py | python3 - . --all --force
+   python3 /path/to/codex-harness/scripts/install-codex-harness.py . --all --force
    ```
 
    해결:
