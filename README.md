@@ -34,6 +34,44 @@ flowchart TD
 
 다음 단계로 넘어갈 때도 Codex의 말이 아니라, 파일로 남은 기준과 실행 기록을 봅니다.
 
+## 설치
+
+설치는 두 번 나눠서 합니다.
+
+먼저 내 Codex에 한 번 설치합니다. 어느 프로젝트에서든 `$codex-harness`를 부르기 위한 준비입니다.
+
+```bash
+python3 scripts/install-codex-harness.py --scope user --user-hooks --force
+```
+
+설치되는 파일:
+
+- `~/.codex/skills/codex-harness`
+- `~/.codex/hooks/codex-harness`
+
+전역 hooks는 평소 Codex 작업에는 끼어들지 않습니다. 하네스가 Codex를 실행할 때만 `CODEX_HARNESS_ACTIVE=1`이 들어가고, 그때만 검사합니다.
+
+그 다음, 하네스를 쓸 프로젝트마다 한 번씩 설치합니다. 프로젝트 루트에서 실행합니다.
+
+```bash
+python3 ~/.codex/skills/codex-harness/assets/bootstrap-install.py . --with-hooks
+```
+
+프로젝트에 들어가는 파일:
+
+- `scripts/harness`
+- `.agents/skills/codex-harness`
+- `.codex/hooks/codex-harness`
+- `.codex/hooks.json`
+
+기존 hooks가 있으면 지우지 않고 하네스 항목만 더합니다.
+
+설치가 끝나면 해당 프로젝트에서 바로 시작합니다.
+
+```text
+$codex-harness
+```
+
 ## 실행 기록
 
 여기서 말하는 실행 기록은 "이 phase를 실제로 실행했고, 확인까지 했다"는 파일 기록입니다.
@@ -414,7 +452,7 @@ python3 scripts/harness/verify-task.py <task-dir> --require-evaluation
    - Stop hook: 필요한 기록 없이 멈추려 하면 다시 돌려보냅니다.
    - PreToolUse hook: tool을 쓰기 전에 phase 범위를 벗어나는지 봅니다.
 
-   선택 hook도 같이 들어 있지만 기본으로 켜지지는 않습니다.
+   선택 hook도 같이 들어 있지만 기본으로 켜지지는 않습니다. 처음부터 켜려면 `--optional-hooks`를 같이 씁니다.
    - PostToolUse hook: tool을 쓴 뒤 범위 위반이 보이면 바로 고치게 합니다.
    - UserPromptSubmit hook: `$codex-harness`를 호출할 때 하네스 규칙을 붙입니다.
 
@@ -444,11 +482,12 @@ python3 scripts/harness/verify-task.py <task-dir> --require-evaluation
 │   ├── hooks.json
 │   ├── hooks.optional.json
 │   └── hooks/
-│       ├── harness_common.py
-│       ├── harness_pre_tool_use.py
-│       ├── harness_stop.py
-│       ├── harness_post_tool_use.py
-│       └── harness_user_prompt_submit.py
+│       └── codex-harness/
+│           ├── harness_common.py
+│           ├── harness_pre_tool_use.py
+│           ├── harness_stop.py
+│           ├── harness_post_tool_use.py
+│           └── harness_user_prompt_submit.py
 ├── scripts/
 │   ├── bootstrap-install.py
 │   ├── install-codex-harness.py

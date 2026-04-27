@@ -15,20 +15,41 @@ When a phase fails a retryable check, the runner writes a repair packet under `c
 
 If repository hooks are installed, `scripts/harness/run-phases.py` passes the active task, phase, and runtime contract through `CODEX_HARNESS_*` environment variables. Required hooks then use that contract to block obvious phase-scope violations and to continue Codex when required outputs are missing.
 
+## Installation Check
+
+Before starting the workflow, check whether the current repository has `scripts/harness/run-phases.py`.
+
+If it is missing, install the harness into the current repository first:
+
+```bash
+python3 ~/.codex/skills/codex-harness/assets/bootstrap-install.py . --with-hooks
+```
+
+If the skill is running from a project-local `.agents/skills/codex-harness` copy, use that skill's `assets/bootstrap-install.py` path instead of the global path.
+
+For one-time user-wide setup, install the skill and global no-op-unless-active hooks:
+
+```bash
+python3 ~/.codex/skills/codex-harness/assets/bootstrap-install.py . --scope user --user-hooks --force
+```
+
+User-level hooks must remain no-op unless `CODEX_HARNESS_ACTIVE=1`. Do not install hooks that affect ordinary Codex work outside `run-phases.py`.
+
 ## Workflow
 
-1. Read `references/workflow.md`, `references/review-gates.md`, `references/context-pack.md`, and `references/task-format.md`.
-2. Clarify the request.
-3. Review the request with the correct gate:
+1. Ensure the harness is installed in the current repository.
+2. Read `references/workflow.md`, `references/review-gates.md`, `references/context-pack.md`, and `references/task-format.md`.
+3. Clarify the request.
+4. Review the request with the correct gate:
    - product feature gate for customer-facing features
    - internal tooling gate for automation and developer workflow tools
-4. Ask for approval before writing Clarify docs.
-5. After approval, create all mandatory docs, context-pack files, task indexes, and phase files.
-6. Gather code and project context into the context-pack.
-7. Plan work into self-contained task/phase files.
-8. Validate the task with `scripts/harness/verify-task.py <task-dir>` and `scripts/harness/run-phases.py <task-dir> --dry-run`.
-9. Run phases with `scripts/harness/run-phases.py`.
-10. Evaluate from fresh context.
+5. Ask for approval before writing Clarify docs.
+6. After approval, create all mandatory docs, context-pack files, task indexes, and phase files.
+7. Gather code and project context into the context-pack.
+8. Plan work into self-contained task/phase files.
+9. Validate the task with `scripts/harness/verify-task.py <task-dir>` and `scripts/harness/run-phases.py <task-dir> --dry-run`.
+10. Run phases with `scripts/harness/run-phases.py`.
+11. Evaluate from fresh context.
 
 ## Hard Rules
 
