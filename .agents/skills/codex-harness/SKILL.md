@@ -11,6 +11,10 @@ Use this skill to turn an ambiguous implementation request into concise agent-fa
 
 The harness does not chain long Codex conversations. It captures decisions as files, then runs each phase in a fresh `codex exec` session while the runner owns status, retries, and failure decisions.
 
+When a phase fails a retryable check, the runner writes a repair packet under `context-pack/runtime/` and retries the same phase with that packet in context. The phase agent repairs only the listed failures; it does not decide the next phase.
+
+If repository hooks are installed, `scripts/harness/run-phases.py` passes the active task, phase, and runtime contract through `CODEX_HARNESS_*` environment variables. Required hooks then use that contract to block obvious phase-scope violations and to continue Codex when required outputs are missing.
+
 ## Workflow
 
 1. Read `references/workflow.md`, `references/review-gates.md`, `references/context-pack.md`, and `references/task-format.md`.
@@ -42,6 +46,7 @@ The harness does not chain long Codex conversations. It captures decisions as fi
 - Do not manually mark phases or tasks completed.
 - Do not manually create runner-owned runtime proof files.
 - Do not claim Generate or Evaluate is complete unless the required runtime proof exists.
+- Do not bypass installed codex-harness hooks. If a hook blocks a tool call, fix the phase work or contract instead of weakening the hook.
 
 ## Stop Conditions
 
@@ -79,11 +84,13 @@ Generate is not complete unless these files exist:
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-reconciliation.md` for every executed phase
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-gate.json` for every executed phase
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-result.json` for every completed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-repair-packet.json` and `.md` for failed/retried attempts, when present
 - `tasks/<task-dir>/context-pack/runtime/docs-diff.md` after phase 0
 - `tasks/<task-dir>/context-pack/handoffs/phase<N>.md` for every completed phase
 
 `phase<N>-result.json` is runner-owned. It contains measured facts: exit codes, changed files, required output status, and artifact paths. Phase agents write handoffs, not result JSON.
 `phase<N>-gate.json` is runner-owned. It must pass before the phase can be marked completed.
+`phase<N>-repair-packet.*` is runner-owned. It summarizes retryable failures for the next attempt.
 
 Evaluate is not complete unless these files exist:
 

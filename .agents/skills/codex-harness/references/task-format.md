@@ -72,6 +72,7 @@ Completed phases also require matching runtime output and handoff files.
 Completed phases also require a schema-valid `phase<N>-result.json`.
 Completed phases also require runner-generated contract, checklist, evidence, reconciliation, and gate files.
 The runner generates `phase<N>-result.json`; phase agents do not.
+Failed or retried attempts may also have runner-generated `phase<N>-repair-packet.json` and `.md`.
 Use `scripts/harness/verify-task.py` to enforce this.
 
 ## Phase Files
@@ -204,6 +205,7 @@ Phase agents must not:
 - write `context-pack/runtime/phase<N>-result.json`
 - spawn subagents for Generate
 - commit unless the phase explicitly requires it
+- bypass codex-harness hooks when a hook blocks a tool call
 
 ## Completion Proof
 

@@ -137,7 +137,7 @@ The orchestrator runs the runner; the phase agent launched by the runner edits i
 
 Allowed exception:
 
-- A runner may retry the same phase with fresh context and the latest failure summary.
+- A runner may retry the same phase with fresh context and a runner-generated repair packet.
 
 Generate completion requires runtime proof:
 
@@ -152,13 +152,36 @@ Generate completion requires runtime proof:
 - `context-pack/runtime/phase<N>-reconciliation.md`
 - `context-pack/runtime/phase<N>-gate.json`
 - `context-pack/runtime/phase<N>-result.json`
+- `context-pack/runtime/phase<N>-repair-packet.json` and `.md` for failed/retried attempts, when present
 - `context-pack/runtime/docs-diff.md` after phase 0
 - `context-pack/handoffs/phase<N>.md`
 
 The runner-generated phase result JSON is the machine-readable completion contract.
 The runner-generated gate JSON decides whether the phase may complete.
+The runner-generated repair packet tells the next attempt exactly what failed.
 The reconciliation summary is included in later phase context.
 The handoff remains the human-readable summary.
+
+When hooks are installed, the runner passes these environment variables to `codex exec`:
+
+- `CODEX_HARNESS_ACTIVE`
+- `CODEX_HARNESS_ROOT`
+- `CODEX_HARNESS_TASK`
+- `CODEX_HARNESS_TASK_PATH`
+- `CODEX_HARNESS_PHASE`
+- `CODEX_HARNESS_CONTRACT_PATH`
+
+Required hooks:
+
+- `PreToolUse`: blocks supported edits outside `Contract.scope.allowed_paths` and runner-owned proof files.
+- `Stop`: continues Codex if `Contract.required_outputs` are missing.
+
+Optional hooks:
+
+- `PostToolUse`: feeds back scope violations after supported tools run.
+- `UserPromptSubmit`: adds harness reminders when the user invokes `$codex-harness`.
+
+Hooks are guardrails. Runner proof remains the source of truth.
 
 If runtime proof is absent, the orchestrator must report failure or blocked status.
 It must not manually mark phases complete.
