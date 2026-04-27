@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -135,12 +136,26 @@ def previous_handoff_files(task_path: Path, phase_number: int) -> list[Path]:
     return [handoff_dir / f"phase{n}.md" for n in range(phase_number)]
 
 
-def runtime_context_files(task_path: Path, phase_number: int) -> list[Path]:
+def runtime_context_files(
+    task_path: Path,
+    phase_number: int,
+    include_current_failure_context: bool = True,
+) -> list[Path]:
     runtime_dir = task_path / "context-pack" / "runtime"
     paths = [
         runtime_dir / "docs-diff.md",
-        runtime_dir / f"phase{phase_number}-last-error.md",
     ]
+    if include_current_failure_context:
+        paths.extend(
+            [
+                runtime_dir / f"phase{phase_number}-last-error.md",
+                runtime_dir / f"phase{phase_number}-repair-packet.md",
+                runtime_dir / f"phase{phase_number}-repair-packet.json",
+                runtime_dir / f"phase{phase_number}-gate.json",
+                runtime_dir / f"phase{phase_number}-reconciliation.md",
+                runtime_dir / f"phase{phase_number}-evidence.json",
+            ]
+        )
     for previous in range(phase_number):
         paths.extend(
             [
@@ -177,6 +192,14 @@ def phase_reconciliation_summary_path(task_path: Path, phase_number: int) -> Pat
 
 def phase_gate_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-gate.json"
+
+
+def phase_repair_packet_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-repair-packet.json"
+
+
+def phase_repair_packet_summary_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-repair-packet.md"
 
 
 def phase_handoff_path(task_path: Path, phase_number: int) -> Path:
@@ -224,7 +247,13 @@ def parse_ac_commands(markdown: str) -> list[str]:
     return commands
 
 
-def build_prompt(root: Path, task_path: Path, task_index: dict, phase: dict) -> str:
+def build_prompt(
+    root: Path,
+    task_path: Path,
+    task_index: dict,
+    phase: dict,
+    include_repair_packet: bool = True,
+) -> str:
     phase_number = int(phase["phase"])
     phase_path = phase_file(task_path, phase_number)
     phase_markdown = phase_path.read_text(encoding="utf-8")
@@ -234,8 +263,29 @@ def build_prompt(root: Path, task_path: Path, task_index: dict, phase: dict) -> 
     docs_context = collect_files(root, task_doc_files(root, task_index), 80_000)
     static_context = collect_files(root, static_context_files(task_path), 80_000)
     handoffs = collect_files(root, previous_handoff_files(task_path, phase_number), 60_000)
-    runtime = collect_files(root, runtime_context_files(task_path, phase_number), 60_000)
+    runtime = collect_files(
+        root,
+        runtime_context_files(
+            task_path,
+            phase_number,
+            include_current_failure_context=include_repair_packet,
+        ),
+        60_000,
+    )
     checklist_context = phase_checklist_path(task_path, phase_number).read_text(encoding="utf-8")
+    repair_summary = phase_repair_packet_summary_path(task_path, phase_number)
+    repair_mode = ""
+    if include_repair_packet and repair_summary.exists():
+        repair_mode = f"""
+
+Repair mode:
+
+- A previous attempt for this phase failed.
+- Read `tasks/{task_path.name}/context-pack/runtime/phase{phase_number}-repair-packet.md` first.
+- Fix only the failures listed in the repair packet.
+- Keep the phase contract unchanged.
+- Do not expand scope or edit runner-owned runtime files.
+"""
 
     contract = f"""# Harness Phase Execution Contract
 
@@ -258,7 +308,7 @@ Rules:
 
 The runner will decide success by process exit code, required outputs, and AC commands.
 The runner will generate `tasks/{task_path.name}/context-pack/runtime/phase{phase_number}-result.json`.
-"""
+{repair_mode}"""
 
     parts = [
         contract,
@@ -578,6 +628,8 @@ def write_last_error(task_path: Path, phase_number: int, message: str) -> None:
 
 def run_codex(
     root: Path,
+    task_path: Path,
+    phase_number: int,
     prompt: str,
     output_path: Path,
     stderr_path: Path,
@@ -592,9 +644,24 @@ def run_codex(
         command.append("--full-auto")
     command.append("-")
 
+    env = os.environ.copy()
+    env.update(
+        {
+            "CODEX_HARNESS_ACTIVE": "1",
+            "CODEX_HARNESS_ROOT": str(root),
+            "CODEX_HARNESS_TASK": task_path.name,
+            "CODEX_HARNESS_TASK_PATH": str(task_path.relative_to(root)),
+            "CODEX_HARNESS_PHASE": str(phase_number),
+            "CODEX_HARNESS_CONTRACT_PATH": str(
+                phase_contract_path(task_path, phase_number).relative_to(root)
+            ),
+        }
+    )
+
     result = subprocess.run(
         command,
         cwd=root,
+        env=env,
         input=prompt,
         text=True,
         capture_output=True,
@@ -688,6 +755,12 @@ def write_phase_result(
             "gate": task_relative(phase_gate_path(task_path, phase_number), task_path),
         },
     }
+    repair_packet = phase_repair_packet_path(task_path, phase_number)
+    repair_packet_summary = phase_repair_packet_summary_path(task_path, phase_number)
+    if repair_packet.exists():
+        result["artifacts"]["repair_packet"] = task_relative(repair_packet, task_path)
+    if repair_packet_summary.exists():
+        result["artifacts"]["repair_packet_summary"] = task_relative(repair_packet_summary, task_path)
     write_json(phase_result_path(task_path, phase_number), result)
 
 
@@ -860,6 +933,210 @@ def write_runtime_review_artifacts(
     return reconciliation
 
 
+def truncate_text(value: object, max_chars: int = 4_000) -> str:
+    text = "" if value is None else str(value)
+    if len(text) <= max_chars:
+        return text
+    return "[truncated]\n" + text[-max_chars:]
+
+
+def compact_command_results(command_results: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        {
+            "command": item.get("command"),
+            "exit_code": item.get("exit_code"),
+            "output_tail": truncate_text(item.get("output"), 3_000),
+        }
+        for item in command_results
+    ]
+
+
+def failed_gate_checks(gate: dict[str, object] | None) -> list[dict[str, object]]:
+    if not gate:
+        return []
+    return [
+        check
+        for check in gate.get("checks", [])
+        if isinstance(check, dict) and check.get("status") != "passed"
+    ]
+
+
+def failed_instruction_results(reconciliation: dict[str, object] | None) -> list[dict[str, object]]:
+    if not reconciliation:
+        return []
+    return [
+        item
+        for item in reconciliation.get("instruction_results", [])
+        if isinstance(item, dict) and item.get("status") != "satisfied"
+    ]
+
+
+def contract_summary(contract: dict | None, phase: dict, required_outputs: list[str]) -> dict[str, object] | None:
+    if contract is None:
+        return None
+    return {
+        "phase": contract.get("phase"),
+        "name": contract.get("name") or phase.get("name"),
+        "read_first": contract.get("read_first") or [],
+        "allowed_paths": contract_allowed_paths(contract),
+        "acceptance_commands": contract_ac_commands(phase, contract),
+        "required_outputs": required_outputs,
+        "instructions": [
+            {
+                "id": item.get("id"),
+                "task": item.get("task"),
+                "expected_evidence": item.get("expected_evidence") or [],
+            }
+            for item in contract.get("instructions") or []
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def build_repair_packet(
+    task_path: Path,
+    phase_number: int,
+    phase: dict,
+    attempt: int,
+    failure_type: str,
+    message: str,
+    *,
+    retryable: bool,
+    contract: dict | None = None,
+    codex_exit_code: int | None = None,
+    stderr_path: Path | None = None,
+    command_results: list[dict[str, object]] | None = None,
+    required_outputs: list[str] | None = None,
+    missing_outputs: list[str] | None = None,
+    changed_files: list[str] | None = None,
+    gate: dict[str, object] | None = None,
+    reconciliation: dict[str, object] | None = None,
+) -> dict[str, object]:
+    commands = command_results or []
+    outputs = required_outputs or []
+    stderr_tail = ""
+    if stderr_path and stderr_path.exists():
+        stderr_tail = truncate_text(stderr_path.read_text(encoding="utf-8", errors="replace"), 4_000)
+    return {
+        "phase": phase_number,
+        "attempt": attempt,
+        "status": "repair_required",
+        "created_at": now(),
+        "failure": {
+            "type": failure_type,
+            "message": truncate_text(message, 4_000),
+            "retryable": retryable,
+            "codex_exit_code": codex_exit_code,
+            "stderr_tail": stderr_tail,
+        },
+        "contract": contract_summary(contract, phase, outputs),
+        "failed_commands": [
+            item
+            for item in compact_command_results(commands)
+            if item.get("exit_code") != 0
+        ],
+        "commands": compact_command_results(commands),
+        "required_outputs": required_output_results(task_path, outputs),
+        "missing_outputs": missing_outputs or [],
+        "changed_files": changed_files or [],
+        "failed_gate_checks": failed_gate_checks(gate),
+        "blocking_reasons": list(gate.get("blocking_reasons") or []) if gate else [],
+        "instruction_results_to_repair": failed_instruction_results(reconciliation),
+        "next_attempt_instructions": [
+            "Repair only the current phase.",
+            "Read this repair packet before editing.",
+            "Keep the phase contract unchanged.",
+            "Do not change task indexes or runner-owned runtime files.",
+            "Fix the listed failures before doing unrelated cleanup.",
+            "Leave the required handoff for this phase.",
+        ],
+    }
+
+
+def repair_packet_markdown(packet: dict[str, object]) -> str:
+    failure = packet.get("failure") or {}
+    contract = packet.get("contract") or {}
+    lines = [
+        f"# Phase {packet.get('phase')} Repair Packet",
+        "",
+        f"Attempt: `{packet.get('attempt')}`",
+        f"Failure type: `{failure.get('type')}`",
+        f"Retryable: `{failure.get('retryable')}`",
+        "",
+        "## Failure",
+        "",
+        str(failure.get("message") or "(none)").rstrip(),
+        "",
+        "## Next Attempt",
+        "",
+    ]
+    for item in packet.get("next_attempt_instructions") or []:
+        lines.append(f"- {item}")
+
+    failed_commands = packet.get("failed_commands") or []
+    lines.extend(["", "## Failed Commands", ""])
+    if failed_commands:
+        for item in failed_commands:
+            lines.append(f"- `{item.get('command')}` exited `{item.get('exit_code')}`")
+            output = item.get("output_tail")
+            if output:
+                lines.extend(["", "```text", str(output).rstrip(), "```", ""])
+    else:
+        lines.append("- none")
+
+    missing_outputs = packet.get("missing_outputs") or []
+    lines.extend(["", "## Missing Outputs", ""])
+    if missing_outputs:
+        for path in missing_outputs:
+            lines.append(f"- `{path}`")
+    else:
+        lines.append("- none")
+
+    failed_checks = packet.get("failed_gate_checks") or []
+    lines.extend(["", "## Failed Gate Checks", ""])
+    if failed_checks:
+        for check in failed_checks:
+            lines.append(f"- `{check.get('name')}`: {json.dumps(check, ensure_ascii=False)}")
+    else:
+        lines.append("- none")
+
+    instructions = packet.get("instruction_results_to_repair") or []
+    lines.extend(["", "## Instructions To Repair", ""])
+    if instructions:
+        for item in instructions:
+            lines.append(f"- `{item.get('id')}` {item.get('status')}: {item.get('task')}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Contract Reminders", ""])
+    if contract:
+        lines.append("Allowed paths:")
+        for path in contract.get("allowed_paths") or []:
+            lines.append(f"- `{path}`")
+        lines.extend(["", "Acceptance commands:"])
+        for command in contract.get("acceptance_commands") or []:
+            lines.append(f"- `{command}`")
+        lines.extend(["", "Required outputs:"])
+        for path in contract.get("required_outputs") or []:
+            lines.append(f"- `{path}`")
+    else:
+        lines.append("- contract unavailable")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_repair_packet(
+    task_path: Path,
+    phase_number: int,
+    packet: dict[str, object],
+) -> None:
+    write_json(phase_repair_packet_path(task_path, phase_number), packet)
+    phase_repair_packet_summary_path(task_path, phase_number).write_text(
+        repair_packet_markdown(packet),
+        encoding="utf-8",
+    )
+
+
 def clear_attempt_artifacts(task_path: Path, phase_number: int) -> None:
     for path in [
         phase_result_path(task_path, phase_number),
@@ -868,6 +1145,14 @@ def clear_attempt_artifacts(task_path: Path, phase_number: int) -> None:
         phase_reconciliation_path(task_path, phase_number),
         phase_reconciliation_summary_path(task_path, phase_number),
         phase_gate_path(task_path, phase_number),
+    ]:
+        path.unlink(missing_ok=True)
+
+
+def clear_repair_packet(task_path: Path, phase_number: int) -> None:
+    for path in [
+        phase_repair_packet_path(task_path, phase_number),
+        phase_repair_packet_summary_path(task_path, phase_number),
     ]:
         path.unlink(missing_ok=True)
 
@@ -947,6 +1232,8 @@ def apply_phase_reset(
     if reset_results:
         write_json(index_path, task_index)
         update_top_index(root, task_path.name, "pending")
+        for item in reset_results:
+            clear_repair_packet(task_path, int(item["phase"]))
     return None
 
 
@@ -970,6 +1257,10 @@ def execute_phase(
         return False
 
     phase_number = int(phase["phase"])
+    attempts = int(phase.get("attempts", 0) or 0)
+    if attempts <= 0 and not args.dry_run:
+        clear_repair_packet(task_path, phase_number)
+
     preflight_errors = preflight_phase(root, task_path, task_index, phase)
     if preflight_errors:
         message = "Preflight failed:\n" + "\n".join(f"- {error}" for error in preflight_errors)
@@ -978,7 +1269,13 @@ def execute_phase(
         args.failed = True
         return False
 
-    prompt = build_prompt(root, task_path, task_index, phase)
+    prompt = build_prompt(
+        root,
+        task_path,
+        task_index,
+        phase,
+        include_repair_packet=attempts > 0,
+    )
     prompt_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-prompt.md"
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt, encoding="utf-8")
@@ -987,7 +1284,6 @@ def execute_phase(
         print(prompt_path)
         return False
 
-    attempts = int(phase.get("attempts", 0))
     phase_start_snapshot: dict[str, str] | None = None
     for attempt in range(attempts + 1, args.max_attempts + 1):
         task_index = read_json(index_path)
@@ -1005,8 +1301,11 @@ def execute_phase(
         clear_attempt_artifacts(task_path, phase_number)
         if phase_start_snapshot is None:
             phase_start_snapshot = worktree_snapshot(root)
+        prompt_path.write_text(prompt, encoding="utf-8")
         returncode = run_codex(
             root,
+            task_path,
+            phase_number,
             prompt,
             output_path,
             stderr_path,
@@ -1017,6 +1316,41 @@ def execute_phase(
         if returncode != 0:
             message = f"codex exec failed with exit code {returncode}. See {stderr_path}."
             write_last_error(task_path, phase_number, message)
+            try:
+                contract = runtime_phase_contract(task_path, phase_number)
+                required_outputs = contract_outputs(phase, contract)
+            except (FileNotFoundError, ValueError):
+                contract = None
+                required_outputs = []
+            if contract is not None:
+                contract_tamper_errors = verify_phase_contract_unchanged(task_path, phase_number, contract)
+                if contract_tamper_errors:
+                    message = "; ".join(contract_tamper_errors)
+                    write_last_error(task_path, phase_number, message)
+                    task_index = read_json(index_path)
+                    set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
+                    write_json(index_path, task_index)
+                    update_top_index(root, task_path.name, "error")
+                    print(message, file=sys.stderr)
+                    args.failed = True
+                    return False
+            write_repair_packet(
+                task_path,
+                phase_number,
+                build_repair_packet(
+                    task_path,
+                    phase_number,
+                    phase,
+                    attempt,
+                    "codex_exec",
+                    message,
+                    retryable=attempt < args.max_attempts,
+                    contract=contract,
+                    codex_exit_code=returncode,
+                    stderr_path=stderr_path,
+                    required_outputs=required_outputs,
+                ),
+            )
             if attempt < args.max_attempts:
                 prompt = build_prompt(root, task_path, read_json(index_path), phase)
                 continue
@@ -1066,6 +1400,22 @@ def execute_phase(
                 message = f"AC command failed: {command}\n\n{ac_output}"
                 write_last_error(task_path, phase_number, message)
                 write_ac_results(task_path, phase_number, attempt, command_results)
+                write_repair_packet(
+                    task_path,
+                    phase_number,
+                    build_repair_packet(
+                        task_path,
+                        phase_number,
+                        phase,
+                        attempt,
+                        "acceptance_commands",
+                        message,
+                        retryable=attempt < args.max_attempts,
+                        contract=contract,
+                        command_results=command_results,
+                        required_outputs=required_outputs,
+                    ),
+                )
                 if attempt < args.max_attempts:
                     prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     break
@@ -1082,6 +1432,23 @@ def execute_phase(
             if missing_outputs:
                 message = "Missing required outputs: " + ", ".join(missing_outputs)
                 write_last_error(task_path, phase_number, message)
+                write_repair_packet(
+                    task_path,
+                    phase_number,
+                    build_repair_packet(
+                        task_path,
+                        phase_number,
+                        phase,
+                        attempt,
+                        "required_outputs",
+                        message,
+                        retryable=attempt < args.max_attempts,
+                        contract=contract,
+                        command_results=command_results,
+                        required_outputs=required_outputs,
+                        missing_outputs=missing_outputs,
+                    ),
+                )
                 if attempt < args.max_attempts:
                     prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     continue
@@ -1111,6 +1478,25 @@ def execute_phase(
                     reasons.append(f"Phase reconciliation status is {reconciliation.get('status')}.")
                 message = "Phase gate failed: " + "; ".join(reasons)
                 write_last_error(task_path, phase_number, message)
+                write_repair_packet(
+                    task_path,
+                    phase_number,
+                    build_repair_packet(
+                        task_path,
+                        phase_number,
+                        phase,
+                        attempt,
+                        "gate",
+                        message,
+                        retryable=attempt < args.max_attempts,
+                        contract=contract,
+                        command_results=command_results,
+                        required_outputs=required_outputs,
+                        changed_files=changed_files,
+                        gate=gate,
+                        reconciliation=reconciliation,
+                    ),
+                )
                 if attempt < args.max_attempts:
                     prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     continue
