@@ -13,6 +13,11 @@ INSTALL_PATHS = [
     (Path(".agents") / "skills" / "codex-harness", Path(".agents") / "skills" / "codex-harness"),
     (Path("scripts") / "harness", Path("scripts") / "harness"),
 ]
+HOOK_PATHS = [
+    (Path(".codex") / "hooks", Path(".codex") / "hooks"),
+    (Path(".codex") / "hooks.json", Path(".codex") / "hooks.json"),
+    (Path(".codex") / "hooks.optional.json", Path(".codex") / "hooks.optional.json"),
+]
 
 
 def repo_root() -> Path:
@@ -30,10 +35,24 @@ def copy_tree(source: Path, target: Path, force: bool) -> None:
     shutil.copytree(source, target)
 
 
+def copy_file(source: Path, target: Path, force: bool) -> None:
+    if not source.exists():
+        raise FileNotFoundError(f"Missing source path: {source}")
+    if target.exists() and not force:
+        raise FileExistsError(f"Target already exists: {target}. Re-run with --force.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", help="Target Codex project or repository root.")
     parser.add_argument("--force", action="store_true", help="Overwrite existing harness files.")
+    parser.add_argument(
+        "--with-hooks",
+        action="store_true",
+        help="Install repo-local Codex hook config and hook scripts.",
+    )
     args = parser.parse_args()
 
     source_root = repo_root()
@@ -45,6 +64,16 @@ def main() -> int:
     for source_rel, target_rel in INSTALL_PATHS:
         copy_tree(source_root / source_rel, target_root / target_rel, args.force)
         print(f"installed {target_rel}")
+
+    if args.with_hooks:
+        for source_rel, target_rel in HOOK_PATHS:
+            source = source_root / source_rel
+            target = target_root / target_rel
+            if source.is_dir():
+                copy_tree(source, target, args.force)
+            else:
+                copy_file(source, target, args.force)
+            print(f"installed {target_rel}")
 
     print(f"codex-harness installed into {target_root}")
     return 0

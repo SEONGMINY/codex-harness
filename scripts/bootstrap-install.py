@@ -24,6 +24,11 @@ def main() -> int:
     parser.add_argument("--repo", default=DEFAULT_REPO, help="codex-harness git repository URL.")
     parser.add_argument("--ref", help="Git ref to install.")
     parser.add_argument("--force", action="store_true", help="Overwrite existing harness files.")
+    parser.add_argument(
+        "--with-hooks",
+        action="store_true",
+        help="Install repo-local Codex hook config and hook scripts.",
+    )
     args = parser.parse_args()
 
     target = Path(args.target).expanduser().resolve()
@@ -46,6 +51,8 @@ def main() -> int:
         command = [sys.executable, str(install_script), str(target)]
         if args.force:
             command.append("--force")
+        if args.with_hooks:
+            command.append("--with-hooks")
         run(command)
 
     return 0

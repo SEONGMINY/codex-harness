@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/harness_pre_tool_use.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking harness phase scope"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/harness_stop.py\"",
+            "timeout": 30,
+            "statusMessage": "Checking harness required outputs"
+          }
+        ]
+      }
+    ]
+  }
+}
