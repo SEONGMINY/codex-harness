@@ -29,6 +29,11 @@ SKIP_ACTIVITY_DIRS = {
 }
 
 
+def add_output_schema(command: list[str], schema_path: Path) -> None:
+    if schema_path.exists():
+        command.extend(["--output-schema", str(schema_path)])
+
+
 def stream_pipe_to_file(pipe, output_path: Path, activity_queue: queue.Queue[float]) -> None:
     try:
         with output_path.open("a", encoding="utf-8") as handle:

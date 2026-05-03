@@ -109,6 +109,8 @@ Rules:
 - Each phase contract must list `read_first.docs` and, for phase N > 0, `read_first.previous_outputs`.
 - Each phase contract must list `scope.allowed_paths`.
 - Each non-documentation phase should describe function/class signatures in `interfaces`.
+- Each phase contract must list outcome-first `success_criteria`.
+- Each phase contract must define `stop_rules`, `fallback_behavior`, `validation_budget`, and `missing_evidence_behavior`.
 - Each forbidden rule must include a concrete reason.
 - Each phase must have executable AC commands.
 - Each phase must write a handoff file.

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "confidence",
+    "core_reason",
+    "details",
+    "blockers",
+    "required_followups"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["approved", "rejected"]
+    },
+    "confidence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "core_reason": {
+      "type": "string"
+    },
+    "details": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tests", "implementation", "scope", "risk"],
+      "properties": {
+        "tests": {
+          "type": "string"
+        },
+        "implementation": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "risk": {
+          "type": "string"
+        }
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "required_followups": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

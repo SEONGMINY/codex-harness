@@ -11,10 +11,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from codex_exec import run_codex_exec
+from codex_exec import add_output_schema, run_codex_exec
 
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
+SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 
 
 def now() -> str:
@@ -129,7 +130,18 @@ Project: `{task_index.get("project")}`
 Task: `{task_index.get("task")}`
 Time: `{now()}`
 
-Rules:
+## Goal
+
+Decide whether the task should be accepted from fresh evidence.
+
+## Success Criteria
+
+- The implementation satisfies the original intent.
+- Validation commands passed or failures are explicitly blocking.
+- Diffs stay within the approved task scope.
+- Constraints and rejected options were respected.
+
+## Hard Invariants
 
 - Do not trust phase self-reporting.
 - Verify the implementation against the original intent.
@@ -169,19 +181,10 @@ Rules:
 
 {untracked or "(none)"}
 
-# Required Output Format
+# Required Output
 
-판정: 승인 | 거부
-신뢰도: 0-100
-핵심 근거: <한 문장>
-
-상세:
-
-* 테스트: <판단 결과>
-* 구현: <판단 결과>
-* 스코프: <판단 결과>
-* 리스크: <판단 결과>
-* 후속 작업: <없으면 "없음">
+Return only the structured final output requested by the active output schema.
+Use `approved` or `rejected` for `verdict`.
 """
 
 
@@ -197,6 +200,7 @@ def run_codex(
     activity_paths: Iterable[Path],
 ) -> int:
     command = [codex_bin, "exec", "--json"]
+    add_output_schema(command, SCHEMA_DIR / "evaluation-final.schema.json")
     if yolo:
         command.append("--dangerously-bypass-approvals-and-sandbox")
     elif full_auto:

@@ -66,6 +66,8 @@ class StartLauncherTest(unittest.TestCase):
                 textwrap.dedent(
                     """
                     args = sys.argv
+                    assert "--output-schema" in args, args
+                    assert args[args.index("--output-schema") + 1].endswith("launcher-final.schema.json")
                     last_message = Path(args[args.index("--output-last-message") + 1])
                     last_message.parent.mkdir(parents=True, exist_ok=True)
                     last_message.write_text("questions written\\n", encoding="utf-8")

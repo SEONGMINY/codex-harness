@@ -12,7 +12,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from codex_exec import run_codex_exec
+from codex_exec import add_output_schema, run_codex_exec
 
 
 SKIP_SNAPSHOT_DIRS = {
@@ -30,6 +30,7 @@ SKIP_SNAPSHOT_DIRS = {
     "venv",
 }
 HARNESS_VERSION = "0.1.0"
+SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 
 
 def now_id() -> str:
@@ -184,8 +185,13 @@ Generate is disabled in this launcher run.
 
 You are the isolated codex-harness orchestration session.
 
-Do not act as the parent chat. Do not ask the parent chat to reason through this task.
-Do not invoke `scripts/harness/start.py` again.
+Goal: turn the request into the next durable harness state.
+
+Hard invariants:
+
+- Do not act as the parent chat.
+- Do not ask the parent chat to reason through this task.
+- Do not invoke `scripts/harness/start.py` again.
 
 ## Required Inputs
 
@@ -210,12 +216,8 @@ Do not invoke `scripts/harness/start.py` again.
 
 ## Final Output
 
-Keep the final message short.
-Include:
-
-- status: questions_needed | docs_approval_needed | planned | generated | blocked
-- task path, if created
-- files the parent chat should read next
+Return only the structured final output requested by the active output schema.
+Use status: questions_needed | docs_approval_needed | planned | generated | blocked.
 """
 
 
@@ -229,6 +231,7 @@ def run_codex(
     stderr_path = run_dir / "harness-stderr.txt"
     last_message_path = run_dir / "last-message.md"
     command = [args.codex_bin, "exec", "--json", "--output-last-message", str(last_message_path)]
+    add_output_schema(command, SCHEMA_DIR / "launcher-final.schema.json")
     if args.model:
         command.extend(["--model", args.model])
     if args.reasoning_effort:

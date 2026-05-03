@@ -14,6 +14,8 @@ The harness session turns an ambiguous implementation request into concise agent
 
 The harness does not chain long Codex conversations. It captures decisions as files, runs orchestration in a separate `codex exec` session, then runs each implementation phase in another fresh `codex exec` session while the runner owns status, retries, and failure decisions.
 
+Harness `codex exec` calls use structured output schemas for launcher, phase, and evaluation final responses. Treat those final responses as summaries only. Runtime proof files and command results remain the source of truth.
+
 When a phase fails a retryable check, the runner writes a repair packet under `context-pack/runtime/` and retries the same phase with that packet in context. The phase agent repairs only the listed failures; it does not decide the next phase.
 
 If repository hooks are installed, `scripts/harness/run-phases.py` passes the active task, phase, and runtime contract through `CODEX_HARNESS_*` environment variables. Required hooks then use that contract to block obvious phase-scope violations and to continue Codex when required outputs are missing.

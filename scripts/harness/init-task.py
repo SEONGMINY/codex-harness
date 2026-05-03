@@ -277,6 +277,22 @@ def phase_template(
                 ],
             }
         ],
+        "success_criteria": [
+            "TODO: Describe the observable phase outcome."
+        ],
+        "stop_rules": [
+            "Stop and report blocked if required context is missing.",
+            "Stop and report blocked if the work requires edits outside allowed_paths.",
+        ],
+        "fallback_behavior": {
+            "if_blocked": "Write the blocker and missing decision to the phase handoff.",
+            "if_tests_fail": "Fix failures inside the phase scope before reporting.",
+        },
+        "validation_budget": {
+            "max_attempts": 2,
+            "command_timeout_seconds": 600,
+        },
+        "missing_evidence_behavior": "Treat missing expected evidence as unresolved until command output or required files prove it.",
         "acceptance_commands": [
             "TODO"
         ],

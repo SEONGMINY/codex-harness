@@ -65,6 +65,43 @@ def string_list(value: Any) -> list[str]:
     return [item for item in value if isinstance(item, str) and item.strip()]
 
 
+def _validate_non_empty_string_list(value: Any, label: str) -> list[str]:
+    errors = []
+    if not isinstance(value, list) or not value:
+        return [f"`{label}` must be a non-empty list."]
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            errors.append(f"`{label}[{index}]` must be a non-empty string.")
+        elif item.strip() == "TODO" or "TODO:" in item:
+            errors.append(f"`{label}[{index}]` must not contain TODO.")
+    return errors
+
+
+def _validate_fallback_behavior(value: Any) -> list[str]:
+    errors = []
+    if not isinstance(value, dict):
+        return ["`fallback_behavior` must be an object."]
+    for field in ["if_blocked", "if_tests_fail"]:
+        if not isinstance(value.get(field), str) or not value.get(field, "").strip():
+            errors.append(f"`fallback_behavior.{field}` must be a non-empty string.")
+        elif value[field].strip() == "TODO" or "TODO:" in value[field]:
+            errors.append(f"`fallback_behavior.{field}` must not contain TODO.")
+    return errors
+
+
+def _validate_validation_budget(value: Any) -> list[str]:
+    errors = []
+    if not isinstance(value, dict):
+        return ["`validation_budget` must be an object."]
+    max_attempts = value.get("max_attempts")
+    command_timeout = value.get("command_timeout_seconds")
+    if not isinstance(max_attempts, int) or max_attempts < 1:
+        errors.append("`validation_budget.max_attempts` must be a positive integer.")
+    if not isinstance(command_timeout, int) or command_timeout < 1:
+        errors.append("`validation_budget.command_timeout_seconds` must be a positive integer.")
+    return errors
+
+
 def contract_acceptance_commands(contract: dict[str, Any] | None) -> list[str]:
     if not contract:
         return []
@@ -173,6 +210,16 @@ def validate_phase_contract(
         errors.append(f"`phase` must be {phase_number}.")
     if phase_name and contract.get("name") != phase_name:
         errors.append(f"`name` must be {phase_name!r}.")
+
+    errors.extend(_validate_non_empty_string_list(contract.get("success_criteria"), "success_criteria"))
+    errors.extend(_validate_non_empty_string_list(contract.get("stop_rules"), "stop_rules"))
+    errors.extend(_validate_fallback_behavior(contract.get("fallback_behavior")))
+    errors.extend(_validate_validation_budget(contract.get("validation_budget")))
+    missing_evidence = contract.get("missing_evidence_behavior")
+    if not isinstance(missing_evidence, str) or not missing_evidence.strip():
+        errors.append("`missing_evidence_behavior` must be a non-empty string.")
+    elif missing_evidence.strip() == "TODO" or "TODO:" in missing_evidence:
+        errors.append("`missing_evidence_behavior` must not contain TODO.")
 
     read_first = contract.get("read_first")
     if not isinstance(read_first, dict):
@@ -312,6 +359,30 @@ def checklist_markdown(contract: dict[str, Any]) -> str:
     lines.extend(["", "## Acceptance Commands", ""])
     for command in contract_acceptance_commands(contract):
         lines.append(f"- [ ] `{command}`")
+
+    lines.extend(["", "## Success Criteria", ""])
+    for item in contract.get("success_criteria") or []:
+        lines.append(f"- [ ] {item}")
+
+    lines.extend(["", "## Stop Rules", ""])
+    for item in contract.get("stop_rules") or []:
+        lines.append(f"- [ ] {item}")
+
+    fallback = contract.get("fallback_behavior") if isinstance(contract.get("fallback_behavior"), dict) else {}
+    lines.extend(["", "## Fallback Behavior", ""])
+    for key in ["if_blocked", "if_tests_fail"]:
+        if fallback.get(key):
+            lines.append(f"- [ ] {key}: {fallback[key]}")
+
+    budget = contract.get("validation_budget") if isinstance(contract.get("validation_budget"), dict) else {}
+    lines.extend(["", "## Validation Budget", ""])
+    for key in ["max_attempts", "command_timeout_seconds"]:
+        if key in budget:
+            lines.append(f"- [ ] {key}: `{budget[key]}`")
+
+    lines.extend(["", "## Missing Evidence Behavior", ""])
+    if contract.get("missing_evidence_behavior"):
+        lines.append(f"- [ ] {contract.get('missing_evidence_behavior')}")
 
     lines.extend(["", "## Required Outputs", ""])
     for raw_path in contract_required_outputs(contract):

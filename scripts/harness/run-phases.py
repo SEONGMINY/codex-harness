@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from codex_exec import CODEX_IDLE_EXIT_CODE, run_codex_exec
+from codex_exec import CODEX_IDLE_EXIT_CODE, add_output_schema, run_codex_exec
 from phase_contract import (
     checklist_markdown,
     contract_acceptance_commands,
@@ -29,6 +29,7 @@ from phase_contract import (
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
 RUNNABLE_PHASE_STATUSES = {"pending", "running"}
 HARNESS_VERSION = "0.1.0"
+SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MANDATORY_STATIC_FILES = [
     "original-prompt.md",
     "product.md",
@@ -272,6 +273,49 @@ def parse_ac_commands(markdown: str) -> list[str]:
     return commands
 
 
+def markdown_bullets(items: object, fallback: str = "- none") -> str:
+    if not isinstance(items, list):
+        return fallback
+    lines = [f"- {item}" for item in items if isinstance(item, str) and item.strip()]
+    return "\n".join(lines) if lines else fallback
+
+
+def fallback_behavior_text(contract: dict) -> str:
+    value = contract.get("fallback_behavior")
+    if isinstance(value, dict):
+        lines = [
+            f"- {key}: {item}"
+            for key, item in value.items()
+            if isinstance(key, str) and isinstance(item, str) and item.strip()
+        ]
+        return "\n".join(lines) if lines else "- none"
+    return "- none"
+
+
+def validation_budget_text(contract: dict) -> str:
+    value = contract.get("validation_budget")
+    if not isinstance(value, dict):
+        return "- none"
+    lines = []
+    for key in ["max_attempts", "command_timeout_seconds"]:
+        if key in value:
+            lines.append(f"- {key}: `{value[key]}`")
+    return "\n".join(lines) if lines else "- none"
+
+
+def contract_validation_budget(contract: dict | None, args: argparse.Namespace) -> tuple[int, int]:
+    budget = contract.get("validation_budget") if isinstance(contract, dict) else None
+    if not isinstance(budget, dict):
+        return args.max_attempts, args.ac_timeout
+
+    max_attempts = budget.get("max_attempts")
+    command_timeout = budget.get("command_timeout_seconds")
+    return (
+        max_attempts if isinstance(max_attempts, int) and max_attempts > 0 else args.max_attempts,
+        command_timeout if isinstance(command_timeout, int) and command_timeout > 0 else args.ac_timeout,
+    )
+
+
 def build_prompt(
     root: Path,
     task_path: Path,
@@ -319,7 +363,22 @@ You are executing one phase for `{task_index.get("project")}`.
 Task: `{task_index.get("task")}`
 Phase: `{phase_number} - {phase.get("name")}`
 
-Rules:
+## Goal
+
+Deliver only the outcome required by this phase contract.
+
+## Success Criteria
+
+{markdown_bullets(contract_data.get("success_criteria"))}
+
+The runner also requires:
+
+- Codex exits successfully.
+- Contract acceptance commands pass.
+- Required outputs exist.
+- Changed files stay within `scope.allowed_paths`.
+
+## Hard Invariants
 
 - Implement only this phase.
 - Read the included context before editing.
@@ -327,9 +386,29 @@ Rules:
 - Do not mark the phase completed.
 - Do not decide the next phase.
 - Do not spawn subagents for implementation.
+- Do not edit runner-owned runtime proof files.
+
+## Output Contract
+
 - Write `tasks/{task_path.name}/context-pack/handoffs/phase{phase_number}.md`.
 - Run useful local checks when possible.
-- Report changed files and remaining risk.
+- Return only the structured final output requested by the active output schema.
+
+## Stop Rules
+
+{markdown_bullets(contract_data.get("stop_rules"))}
+
+## Fallback Behavior
+
+{fallback_behavior_text(contract_data)}
+
+## Validation Budget
+
+{validation_budget_text(contract_data)}
+
+## Missing Evidence Behavior
+
+{contract_data.get("missing_evidence_behavior")}
 
 The runner will decide success by process exit code, required outputs, and AC commands.
 The runner will generate `tasks/{task_path.name}/context-pack/runtime/phase{phase_number}-result.json`.
@@ -735,6 +814,7 @@ def run_codex(
     idle_timeout: int,
 ) -> int:
     command = [codex_bin, "exec", "--json"]
+    add_output_schema(command, SCHEMA_DIR / "phase-final.schema.json")
     if yolo:
         command.append("--dangerously-bypass-approvals-and-sandbox")
     elif full_auto:
@@ -1115,6 +1195,11 @@ def contract_summary(contract: dict | None, phase: dict, required_outputs: list[
         "allowed_paths": contract_allowed_paths(contract),
         "acceptance_commands": contract_ac_commands(phase, contract),
         "required_outputs": required_outputs,
+        "success_criteria": contract.get("success_criteria") or [],
+        "stop_rules": contract.get("stop_rules") or [],
+        "fallback_behavior": contract.get("fallback_behavior") or {},
+        "validation_budget": contract.get("validation_budget") or {},
+        "missing_evidence_behavior": contract.get("missing_evidence_behavior"),
         "instructions": [
             {
                 "id": item.get("id"),
@@ -1413,13 +1498,32 @@ def execute_phase(
     prompt_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-prompt.md"
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text(prompt, encoding="utf-8")
+    try:
+        initial_contract = runtime_phase_contract(task_path, phase_number)
+    except (FileNotFoundError, ValueError):
+        initial_contract = None
+    max_attempts, ac_timeout = contract_validation_budget(initial_contract, args)
 
     if args.dry_run:
         print(prompt_path)
         return False
 
+    if attempts >= max_attempts:
+        message = (
+            "Phase attempt budget exhausted: "
+            f"attempts={attempts}, max_attempts={max_attempts}."
+        )
+        write_last_error(task_path, phase_number, message)
+        task_index = read_json(index_path)
+        set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
+        write_json(index_path, task_index)
+        update_top_index(root, task_path.name, "error")
+        print(message, file=sys.stderr)
+        args.failed = True
+        return False
+
     phase_start_snapshot: dict[str, str] | None = None
-    for attempt in range(attempts + 1, args.max_attempts + 1):
+    for attempt in range(attempts + 1, max_attempts + 1):
         task_index = read_json(index_path)
         set_phase_status(
             task_index,
@@ -1479,14 +1583,14 @@ def execute_phase(
                     attempt,
                     "codex_exec",
                     message,
-                    retryable=attempt < args.max_attempts,
+                    retryable=attempt < max_attempts,
                     contract=contract,
                     codex_exit_code=returncode,
                     stderr_path=stderr_path,
                     required_outputs=required_outputs,
                 ),
             )
-            if attempt < args.max_attempts:
+            if attempt < max_attempts:
                 prompt = build_prompt(root, task_path, read_json(index_path), phase)
                 continue
             task_index = read_json(index_path)
@@ -1523,7 +1627,7 @@ def execute_phase(
         required_outputs = contract_outputs(phase, contract)
         command_results: list[dict[str, object]] = []
         for command in contract_ac_commands(phase, contract):
-            ac_returncode, ac_output = run_shell(command, root, args.ac_timeout)
+            ac_returncode, ac_output = run_shell(command, root, ac_timeout)
             command_results.append(
                 {
                     "command": command,
@@ -1545,13 +1649,13 @@ def execute_phase(
                         attempt,
                         "acceptance_commands",
                         message,
-                        retryable=attempt < args.max_attempts,
+                        retryable=attempt < max_attempts,
                         contract=contract,
                         command_results=command_results,
                         required_outputs=required_outputs,
                     ),
                 )
-                if attempt < args.max_attempts:
+                if attempt < max_attempts:
                     prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     break
                 task_index = read_json(index_path)
@@ -1577,14 +1681,14 @@ def execute_phase(
                         attempt,
                         "required_outputs",
                         message,
-                        retryable=attempt < args.max_attempts,
+                        retryable=attempt < max_attempts,
                         contract=contract,
                         command_results=command_results,
                         required_outputs=required_outputs,
                         missing_outputs=missing_outputs,
                     ),
                 )
-                if attempt < args.max_attempts:
+                if attempt < max_attempts:
                     prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     continue
                 task_index = read_json(index_path)
@@ -1621,7 +1725,7 @@ def execute_phase(
                         attempt,
                         "gate",
                         message,
-                        retryable=attempt < args.max_attempts,
+                        retryable=attempt < max_attempts,
                         contract=contract,
                         command_results=command_results,
                         required_outputs=required_outputs,
@@ -1630,7 +1734,7 @@ def execute_phase(
                         reconciliation=reconciliation,
                     ),
                 )
-                if attempt < args.max_attempts:
+                if attempt < max_attempts:
                     prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     continue
                 task_index = read_json(index_path)
