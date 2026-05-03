@@ -1,4 +1,4 @@
-docs/
+docs/harness/
 tasks/*
 !tasks/.gitkeep
 _workspace/*
