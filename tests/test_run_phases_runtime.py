@@ -27,6 +27,32 @@ SPEC.loader.exec_module(RUN_PHASES)
 
 
 class RunCodexRuntimeTest(unittest.TestCase):
+    def static_content(self, filename: str) -> str:
+        values = {
+            "decisions.json": {"decisions": [{"id": "D-001", "status": "approved", "summary": "Approved."}]},
+            "open-decisions.json": {"decisions": []},
+            "architecture.json": {
+                "nodes": [{"id": "A-001", "name": "docs", "responsibility": "docs"}],
+                "allowed_edges": [],
+                "decisions": [{"id": "A-001", "summary": "Approved architecture."}],
+                "forbid_cycles": True,
+            },
+            "dependency-policy.json": {
+                "new_dependencies": "forbidden",
+                "approved_new_dependencies": [],
+                "approved_dependency_manifest_changes": [],
+            },
+            "context-gathering-budget.json": {
+                "search_batches": 1,
+                "max_files_to_read": 1,
+                "stop_when": ["target files are known"],
+                "escalate_when": ["scope boundary is unclear"],
+            },
+        }
+        if filename in values:
+            return json.dumps(values[filename]) + "\n"
+        return "content\n"
+
     def make_fake_codex(self, tmp: Path, body: str) -> Path:
         path = tmp / "fake-codex.py"
         path.write_text(
@@ -244,7 +270,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             for static_file in RUN_PHASES.MANDATORY_STATIC_FILES:
                 target = task_path / "context-pack" / "static" / static_file
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text("content\n", encoding="utf-8")
+                target.write_text(self.static_content(static_file), encoding="utf-8")
             docs = []
             for index in range(5):
                 doc_path = root / f"doc{index}.md"
@@ -265,6 +291,13 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 "read_first": {"docs": docs, "previous_outputs": []},
                 "scope": {"layer": "docs", "allowed_paths": ["src"]},
                 "interfaces": [],
+                "decision_refs": ["D-001"],
+                "architecture_refs": ["A-001"],
+                "dependency_policy": {
+                    "new_dependencies": "forbidden",
+                    "approved_new_dependencies": [],
+                    "approved_dependency_manifest_changes": [],
+                },
                 "instructions": [
                     {
                         "id": "P0-001",
@@ -359,7 +392,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             for static_file in RUN_PHASES.MANDATORY_STATIC_FILES:
                 target = task_path / "context-pack" / "static" / static_file
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text("content\n", encoding="utf-8")
+                target.write_text(self.static_content(static_file), encoding="utf-8")
             docs = []
             for index in range(5):
                 doc_path = root / f"doc{index}.md"
@@ -373,6 +406,13 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 "read_first": {"docs": docs, "previous_outputs": []},
                 "scope": {"layer": "docs", "allowed_paths": ["src"]},
                 "interfaces": [],
+                "decision_refs": ["D-001"],
+                "architecture_refs": ["A-001"],
+                "dependency_policy": {
+                    "new_dependencies": "forbidden",
+                    "approved_new_dependencies": [],
+                    "approved_dependency_manifest_changes": [],
+                },
                 "instructions": [
                     {
                         "id": "P0-001",

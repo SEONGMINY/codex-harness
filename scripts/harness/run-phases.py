@@ -15,6 +15,12 @@ from pathlib import Path
 from typing import Iterable
 
 from codex_exec import CODEX_IDLE_EXIT_CODE, add_output_schema, run_codex_exec
+from decision_registry import (
+    load_decision_registry,
+    validate_decision_files,
+    validate_dependency_changes,
+    validate_open_decisions,
+)
 from phase_contract import (
     checklist_markdown,
     contract_acceptance_commands,
@@ -34,6 +40,11 @@ MANDATORY_STATIC_FILES = [
     "original-prompt.md",
     "product.md",
     "decisions.md",
+    "decisions.json",
+    "open-decisions.json",
+    "architecture.json",
+    "dependency-policy.json",
+    "context-gathering-budget.json",
     "rejected-options.md",
     "constraints.md",
     "test-policy.md",
@@ -46,6 +57,8 @@ PLACEHOLDER_PATTERNS = [
     re.compile(r"^\s*TODO\b", re.MULTILINE),
     re.compile(r"\[TODO", re.IGNORECASE),
     re.compile(r"PLACEHOLDER", re.IGNORECASE),
+    re.compile(r"Replace this", re.IGNORECASE),
+    re.compile(r"Replace with", re.IGNORECASE),
 ]
 
 
@@ -62,6 +75,13 @@ def write_json(path: Path, data: dict) -> None:
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def append_progress(task_path: Path, message: str) -> None:
+    path = task_path / "context-pack" / "runtime" / "progress.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"- `{now()}` {message}\n")
 
 
 def harness_install_errors(root: Path) -> list[str]:
@@ -382,6 +402,9 @@ The runner also requires:
 
 - Implement only this phase.
 - Read the included context before editing.
+- Follow only approved `decision_refs` and `architecture_refs`.
+- Do not introduce new dependencies unless `dependency_policy` explicitly allows them.
+- If the phase needs an unapproved architecture, dependency, data model, or public interface decision, stop blocked and explain the missing decision in the handoff.
 - Do not update any `tasks/*/index.json` file.
 - Do not mark the phase completed.
 - Do not decide the next phase.
@@ -529,6 +552,11 @@ def require_real_file(root: Path, path: Path, label: str) -> list[str]:
 def preflight_phase(root: Path, task_path: Path, task_index: dict, phase: dict) -> list[str]:
     errors = []
     phase_number = int(phase["phase"])
+    decision_registry, registry_errors = load_decision_registry(task_path)
+    errors.extend(registry_errors)
+    if not registry_errors:
+        errors.extend(validate_decision_files(decision_registry))
+        errors.extend(validate_open_decisions(decision_registry))
     phase_path = phase_file(task_path, phase_number)
     phase_markdown = phase_path.read_text(encoding="utf-8")
     contract, contract_errors = validate_phase_contract(
@@ -538,6 +566,7 @@ def preflight_phase(root: Path, task_path: Path, task_index: dict, phase: dict) 
         phase.get("name"),
         phase_markdown,
         require_previous_outputs=True,
+        decision_registry=decision_registry if not registry_errors else None,
     )
     errors.extend(contract_errors)
 
@@ -944,6 +973,7 @@ def required_output_repo_paths(task_path: Path, required_outputs: list[str]) -> 
 
 
 def build_gate(
+    root: Path,
     task_path: Path,
     phase_number: int,
     contract: dict,
@@ -958,6 +988,7 @@ def build_gate(
         contract_allowed_paths(contract),
         required_output_repo_paths(task_path, required_outputs),
     )
+    dependency_errors = validate_dependency_changes(contract, changed_files, root)
     blocking_reasons: list[str] = []
     if failed_commands:
         blocking_reasons.append("One or more acceptance commands failed.")
@@ -965,6 +996,8 @@ def build_gate(
         blocking_reasons.append("One or more required outputs are missing.")
     if violations:
         blocking_reasons.append("Changed files include paths outside Contract.scope.allowed_paths.")
+    if dependency_errors:
+        blocking_reasons.extend(dependency_errors)
 
     checks = [
         {
@@ -981,6 +1014,11 @@ def build_gate(
             "name": "scope",
             "status": "passed" if not violations else "failed",
             "violations": violations,
+        },
+        {
+            "name": "dependency_policy",
+            "status": "passed" if not dependency_errors else "failed",
+            "errors": dependency_errors,
         },
     ]
     return {
@@ -1200,6 +1238,9 @@ def contract_summary(contract: dict | None, phase: dict, required_outputs: list[
         "fallback_behavior": contract.get("fallback_behavior") or {},
         "validation_budget": contract.get("validation_budget") or {},
         "missing_evidence_behavior": contract.get("missing_evidence_behavior"),
+        "decision_refs": contract.get("decision_refs") or [],
+        "architecture_refs": contract.get("architecture_refs") or [],
+        "dependency_policy": contract.get("dependency_policy") or {},
         "instructions": [
             {
                 "id": item.get("id"),
@@ -1477,6 +1518,8 @@ def execute_phase(
 
     phase_number = int(phase["phase"])
     attempts = int(phase.get("attempts", 0) or 0)
+    if not args.dry_run:
+        append_progress(task_path, f"phase {phase_number}: preflight started")
     if attempts <= 0 and not args.dry_run:
         clear_repair_packet(task_path, phase_number)
 
@@ -1484,6 +1527,8 @@ def execute_phase(
     if preflight_errors:
         message = "Preflight failed:\n" + "\n".join(f"- {error}" for error in preflight_errors)
         write_last_error(task_path, phase_number, message)
+        if not args.dry_run:
+            append_progress(task_path, f"phase {phase_number}: preflight failed")
         print(message, file=sys.stderr)
         args.failed = True
         return False
@@ -1524,6 +1569,7 @@ def execute_phase(
 
     phase_start_snapshot: dict[str, str] | None = None
     for attempt in range(attempts + 1, max_attempts + 1):
+        append_progress(task_path, f"phase {phase_number}: attempt {attempt} started")
         task_index = read_json(index_path)
         set_phase_status(
             task_index,
@@ -1554,6 +1600,7 @@ def execute_phase(
         )
         if returncode != 0:
             message = f"codex exec failed with exit code {returncode}. See {stderr_path}."
+            append_progress(task_path, f"phase {phase_number}: attempt {attempt} codex failed")
             write_last_error(task_path, phase_number, message)
             try:
                 contract = runtime_phase_contract(task_path, phase_number)
@@ -1637,6 +1684,7 @@ def execute_phase(
             )
             if ac_returncode != 0:
                 message = f"AC command failed: {command}\n\n{ac_output}"
+                append_progress(task_path, f"phase {phase_number}: attempt {attempt} acceptance command failed")
                 write_last_error(task_path, phase_number, message)
                 write_ac_results(task_path, phase_number, attempt, command_results)
                 write_repair_packet(
@@ -1670,6 +1718,7 @@ def execute_phase(
             missing_outputs = verify_required_outputs(task_path, required_outputs)
             if missing_outputs:
                 message = "Missing required outputs: " + ", ".join(missing_outputs)
+                append_progress(task_path, f"phase {phase_number}: attempt {attempt} required outputs missing")
                 write_last_error(task_path, phase_number, message)
                 write_repair_packet(
                     task_path,
@@ -1709,11 +1758,12 @@ def execute_phase(
                 required_outputs,
                 task_path,
             )
-            gate = build_gate(task_path, phase_number, contract, changed_files, command_results, required_outputs)
+            gate = build_gate(root, task_path, phase_number, contract, changed_files, command_results, required_outputs)
             reconciliation = write_runtime_review_artifacts(task_path, phase_number, contract, evidence, gate)
             if gate.get("status") != "passed":
                 reasons = list(gate.get("blocking_reasons") or [])
                 message = "Phase gate failed: " + "; ".join(reasons)
+                append_progress(task_path, f"phase {phase_number}: attempt {attempt} gate failed")
                 write_last_error(task_path, phase_number, message)
                 write_repair_packet(
                     task_path,
@@ -1758,6 +1808,7 @@ def execute_phase(
                 stderr_path=stderr_path,
                 ac_results=ac_results,
             )
+            append_progress(task_path, f"phase {phase_number}: attempt {attempt} completed")
 
             task_index = read_json(index_path)
             set_phase_status(

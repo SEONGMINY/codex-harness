@@ -46,6 +46,13 @@ class PhaseContractValidationTest(unittest.TestCase):
                 "allowed_paths": ["docs/runner.md"],
             },
             "interfaces": [],
+            "decision_refs": ["D-001"],
+            "architecture_refs": ["A-001"],
+            "dependency_policy": {
+                "new_dependencies": "forbidden",
+                "approved_new_dependencies": [],
+                "approved_dependency_manifest_changes": [],
+            },
             "instructions": [
                 {
                     "id": "P0-001",
@@ -84,6 +91,9 @@ class PhaseContractValidationTest(unittest.TestCase):
                 "fallback_behavior",
                 "validation_budget",
                 "missing_evidence_behavior",
+                "decision_refs",
+                "architecture_refs",
+                "dependency_policy",
             ]:
                 broken = dict(contract)
                 broken.pop(field)

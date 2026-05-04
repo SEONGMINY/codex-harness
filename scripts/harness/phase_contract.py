@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from decision_registry import validate_contract_refs
+
 
 CONTRACT_BLOCK_RE = re.compile(
     r"## Contract\s*```json\s*(?P<json>.*?)```",
@@ -99,6 +101,29 @@ def _validate_validation_budget(value: Any) -> list[str]:
         errors.append("`validation_budget.max_attempts` must be a positive integer.")
     if not isinstance(command_timeout, int) or command_timeout < 1:
         errors.append("`validation_budget.command_timeout_seconds` must be a positive integer.")
+    return errors
+
+
+def _validate_decision_policy_shape(contract: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for field in ["decision_refs", "architecture_refs"]:
+        value = contract.get(field)
+        if not isinstance(value, list) or not value:
+            errors.append(f"`{field}` must be a non-empty list.")
+        elif not all(isinstance(item, str) and item.strip() for item in value):
+            errors.append(f"`{field}` entries must be non-empty strings.")
+    policy = contract.get("dependency_policy")
+    if not isinstance(policy, dict):
+        errors.append("`dependency_policy` must be an object.")
+    else:
+        if policy.get("new_dependencies") not in {"forbidden", "approved_only", "allowed"}:
+            errors.append("`dependency_policy.new_dependencies` must be forbidden, approved_only, or allowed.")
+        approved = policy.get("approved_new_dependencies", [])
+        if not isinstance(approved, list) or not all(isinstance(item, str) for item in approved):
+            errors.append("`dependency_policy.approved_new_dependencies` must be a string list.")
+        approved_manifests = policy.get("approved_dependency_manifest_changes", [])
+        if not isinstance(approved_manifests, list) or not all(isinstance(item, str) for item in approved_manifests):
+            errors.append("`dependency_policy.approved_dependency_manifest_changes` must be a string list.")
     return errors
 
 
@@ -200,6 +225,7 @@ def validate_phase_contract(
     phase_name: str | None,
     markdown: str,
     require_previous_outputs: bool,
+    decision_registry: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     contract, errors = parse_phase_contract(markdown)
     errors.extend(forbidden_reference_errors(markdown))
@@ -215,6 +241,9 @@ def validate_phase_contract(
     errors.extend(_validate_non_empty_string_list(contract.get("stop_rules"), "stop_rules"))
     errors.extend(_validate_fallback_behavior(contract.get("fallback_behavior")))
     errors.extend(_validate_validation_budget(contract.get("validation_budget")))
+    errors.extend(_validate_decision_policy_shape(contract))
+    if decision_registry is not None:
+        errors.extend(validate_contract_refs(contract, decision_registry))
     missing_evidence = contract.get("missing_evidence_behavior")
     if not isinstance(missing_evidence, str) or not missing_evidence.strip():
         errors.append("`missing_evidence_behavior` must be a non-empty string.")
@@ -343,6 +372,23 @@ def checklist_markdown(contract: dict[str, Any]) -> str:
         lines.append(f"- [ ] Layer: `{scope['layer']}`")
     for raw_path in scope.get("allowed_paths") or []:
         lines.append(f"- [ ] Only edit `{raw_path}`")
+
+    lines.extend(["", "## Decision Refs", ""])
+    for ref in contract.get("decision_refs") or []:
+        lines.append(f"- [ ] `{ref}`")
+
+    lines.extend(["", "## Architecture Refs", ""])
+    for ref in contract.get("architecture_refs") or []:
+        lines.append(f"- [ ] `{ref}`")
+
+    dependency_policy = contract.get("dependency_policy") if isinstance(contract.get("dependency_policy"), dict) else {}
+    lines.extend(["", "## Dependency Policy", ""])
+    if dependency_policy:
+        lines.append(f"- [ ] new_dependencies: `{dependency_policy.get('new_dependencies')}`")
+        for item in dependency_policy.get("approved_new_dependencies") or []:
+            lines.append(f"  - Approved: `{item}`")
+        for item in dependency_policy.get("approved_dependency_manifest_changes") or []:
+            lines.append(f"  - Approved manifest change: `{item}`")
 
     lines.extend(["", "## Interfaces", ""])
     for item in contract.get("interfaces") or []:

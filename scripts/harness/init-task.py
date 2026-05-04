@@ -168,6 +168,46 @@ TODO: List intentionally ignored files or areas and why.
 """,
 }
 
+STATIC_JSON_TEMPLATES = {
+    "decisions.json": {
+        "decisions": []
+    },
+    "open-decisions.json": {
+        "decisions": [
+            {
+                "id": "OD-001",
+                "question": "Approve implementation-shaping decisions before Plan.",
+                "blocking_stage": "plan",
+                "status": "open",
+            }
+        ]
+    },
+    "architecture.json": {
+        "nodes": [],
+        "allowed_edges": [],
+        "decisions": [],
+        "forbid_cycles": True,
+    },
+    "dependency-policy.json": {
+        "new_dependencies": "forbidden",
+        "approved_new_dependencies": [],
+        "approved_dependency_manifest_changes": [],
+    },
+    "context-gathering-budget.json": {
+        "search_batches": 2,
+        "max_files_to_read": 12,
+        "stop_when": [
+            "target files are known",
+            "architecture boundary is known",
+            "test command is known",
+        ],
+        "escalate_when": [
+            "signals conflict",
+            "scope boundary is unclear",
+        ],
+    },
+}
+
 
 def now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
@@ -257,6 +297,11 @@ def phase_template(
                 "context-pack/static/original-prompt.md",
                 "context-pack/static/product.md",
                 "context-pack/static/decisions.md",
+                "context-pack/static/decisions.json",
+                "context-pack/static/open-decisions.json",
+                "context-pack/static/architecture.json",
+                "context-pack/static/dependency-policy.json",
+                "context-pack/static/context-gathering-budget.json",
                 "context-pack/static/rejected-options.md",
                 "context-pack/static/constraints.md",
                 "context-pack/static/context-gathering.md",
@@ -268,6 +313,13 @@ def phase_template(
             "allowed_paths": [],
         },
         "interfaces": [],
+        "decision_refs": [],
+        "architecture_refs": [],
+        "dependency_policy": {
+            "new_dependencies": "forbidden",
+            "approved_new_dependencies": [],
+            "approved_dependency_manifest_changes": [],
+        },
         "instructions": [
             {
                 "id": f"P{phase}-001",
@@ -432,6 +484,10 @@ def main() -> int:
     )
     for filename, template in STATIC_TEMPLATES.items():
         write_text_if_missing(context_path / "static" / filename, template)
+    for filename, template in STATIC_JSON_TEMPLATES.items():
+        target = context_path / "static" / filename
+        if not target.exists():
+            write_json(target, template)
     write_text_if_missing(
         context_path / "static" / "docs-index.md",
         docs_index(task_dir, common_docs, docs),

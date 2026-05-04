@@ -9,6 +9,12 @@ import re
 import sys
 from pathlib import Path
 
+from decision_registry import (
+    load_decision_registry,
+    validate_decision_files,
+    validate_dependency_changes,
+    validate_open_decisions,
+)
 from phase_contract import (
     contract_acceptance_commands,
     contract_required_outputs,
@@ -22,6 +28,11 @@ MANDATORY_STATIC_FILES = [
     "original-prompt.md",
     "product.md",
     "decisions.md",
+    "decisions.json",
+    "open-decisions.json",
+    "architecture.json",
+    "dependency-policy.json",
+    "context-gathering-budget.json",
     "rejected-options.md",
     "constraints.md",
     "test-policy.md",
@@ -41,6 +52,8 @@ PLACEHOLDER_PATTERNS = [
     re.compile(r"^\s*TODO\b", re.MULTILINE),
     re.compile(r"\[TODO", re.IGNORECASE),
     re.compile(r"PLACEHOLDER", re.IGNORECASE),
+    re.compile(r"Replace this", re.IGNORECASE),
+    re.compile(r"Replace with", re.IGNORECASE),
 ]
 
 
@@ -497,6 +510,11 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
 
     task_index = read_json(task_index_path)
     task_dir = task_path.name
+    decision_registry, registry_errors = load_decision_registry(task_path)
+    errors.extend(registry_errors)
+    if not registry_errors:
+        errors.extend(validate_decision_files(decision_registry))
+        errors.extend(validate_open_decisions(decision_registry))
 
     common_docs = [root / raw for raw in task_index.get("common_docs") or []]
     if not common_docs:
@@ -544,6 +562,7 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
                 phase.get("name"),
                 markdown,
                 require_previous_outputs=phase.get("status") == "completed",
+                decision_registry=decision_registry if not registry_errors else None,
             )
             errors.extend([f"Phase {phase_number} contract: {error}" for error in contract_errors])
             expected_commands = expected_ac_commands(phase, markdown)
@@ -623,6 +642,28 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
         )
         errors.extend(require_file(root, runtime_dir / "evaluation-prompt.md", "evaluation prompt"))
         errors.extend(require_file(root, runtime_dir / "evaluation-output.jsonl", "evaluation output", False))
+
+    if not registry_errors:
+        for phase in phases:
+            phase_number = int(phase["phase"])
+            evidence_path = runtime_dir / f"phase{phase_number}-evidence.json"
+            contract_path = runtime_dir / f"phase{phase_number}-contract.json"
+            if not evidence_path.exists() or not contract_path.exists():
+                continue
+            try:
+                evidence = read_json(evidence_path)
+                contract = read_json(contract_path)
+            except (json.JSONDecodeError, OSError) as exc:
+                errors.append(f"Cannot read runtime dependency validation inputs for phase {phase_number}: {exc}")
+                continue
+            changed_files = evidence.get("changed_files") if isinstance(evidence, dict) else []
+            if isinstance(changed_files, list) and all(isinstance(item, str) for item in changed_files):
+                errors.extend(
+                    [
+                        f"Phase {phase_number}: {error}"
+                        for error in validate_dependency_changes(contract, changed_files, root)
+                    ]
+                )
 
     return errors
 
