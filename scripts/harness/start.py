@@ -143,14 +143,20 @@ def build_prompt(
         else "- Harness session reasoning effort follows the active Codex config."
     )
     if docs_approved:
-        interaction_contract = f"""## Interaction Contract
+        interaction_contract = f"""## Allowed Next State
 
 Docs are approved in this launcher run.
 
-- Create or update the task files required by the skill.
-- Record approval in the task context.
-- Validate with `python3 scripts/harness/verify-task.py <task-dir>`.
-- Validate prompt construction with `python3 scripts/harness/run-phases.py <task-dir> --dry-run`.
+Produce `planned`, `generated`, or `blocked`.
+
+Required before `planned`:
+
+- Mandatory task docs and context-pack files exist.
+- `decisions.json`, `architecture.json`, and `dependency-policy.json` contain the approved implementation-shaping decisions.
+- `open-decisions.json` has no blocking open item.
+- Phase contracts reference only approved decisions and architecture refs.
+- `python3 scripts/harness/verify-task.py <task-dir>` passes.
+- `python3 scripts/harness/run-phases.py <task-dir> --dry-run` passes.
 """
         generate_contract = f"""## Generate
 
@@ -165,14 +171,14 @@ Use this command shape:
 ```
 """
     else:
-        interaction_contract = f"""## Pre-Approval Contract
+        interaction_contract = f"""## Allowed Next State
 
 Docs are not approved in this launcher run.
 
-You may only do one of these:
+Produce exactly one of these:
 
-- Write concise questions to `{rel(run_dir / "questions.md", root)}` and stop.
-- Write the docs approval request to `{rel(run_dir / "docs-approval-request.md", root)}` and stop.
+- `questions_needed`: write `{rel(run_dir / "questions.md", root)}` when a blocking decision is missing.
+- `docs_approval_needed`: write `{rel(run_dir / "docs-approval-request.md", root)}` when Clarify and Review pass.
 
 Do not create task docs, task indexes, context-pack files, phase files, or implementation changes.
 Do not run Context Gathering, Plan, Generate, Evaluate, `verify-task.py`, or `run-phases.py`.
@@ -185,13 +191,26 @@ Generate is disabled in this launcher run.
 
 You are the isolated codex-harness orchestration session.
 
-Goal: turn the request into the next durable harness state.
+Goal: create exactly one next-state artifact.
 
-Hard invariants:
+Allowed states:
+
+- questions_needed
+- docs_approval_needed
+- planned
+- generated
+- blocked
+
+Decision rule:
 
 - Do not act as the parent chat.
 - Do not ask the parent chat to reason through this task.
 - Do not invoke `scripts/harness/start.py` again.
+- If a Plan-impacting decision is not approved, do not plan.
+- Before docs approval, write missing decisions to `questions.md`.
+- After task context exists, write unresolved blocking decisions to `open-decisions.json`.
+- Store approved decisions in `decisions.json`, `architecture.json`, and `dependency-policy.json`.
+- Keep the response short. Files and runner proof carry the detail.
 
 ## Required Inputs
 
@@ -206,7 +225,7 @@ Hard invariants:
 ## First Steps
 
 1. Read `{rel(skill_path, root)}`.
-2. Follow the `Harness Session Mode` section in that skill.
+2. Follow the `Harness Session Mode` and outcome rules in that skill.
 3. Read the request file and answer files before making any task files.
 4. Treat the parent chat as unavailable context.
 
