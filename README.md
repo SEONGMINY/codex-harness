@@ -73,6 +73,7 @@ codex-harness는 대화를 실행 상태로 쓰지 않습니다.
 codex-harness는 구현 요청을 다음 구조로 바꿉니다.
 
 - 요구사항과 범위를 정리한 task 문서
+- 승인된 기술 결정과 미결정 항목을 담은 decision registry
 - phase마다 필요한 컨텍스트 묶음
 - 수정 범위와 확인 명령이 들어간 phase contract
 - runner가 실행한 확인 명령
@@ -113,6 +114,14 @@ cat .codex-harness/sessions/<run-id>/last-message.md
 
 `questions.md`가 있으면 답을 추가합니다.
 `docs-approval-request.md`가 있으면 승인한 뒤 다시 실행합니다.
+
+launcher 상태는 항상 하나입니다.
+
+- `questions_needed`
+- `docs_approval_needed`
+- `planned`
+- `generated`
+- `blocked`
 
 task 경로도 위 두 파일에서 확인합니다.
 경로를 확인한 뒤 검증합니다.
@@ -179,6 +188,9 @@ tasks/<task-dir>/
 
 runner가 검증하는 것:
 
+- blocking open decision이 남아 있지 않은가
+- phase contract가 승인된 decision과 architecture를 참조하는가
+- 새 dependency가 승인된 정책을 따르는가
 - phase가 독립 실행됐는가
 - 상태를 runner만 바꿨는가
 - 변경 파일이 `scope.allowed_paths` 안에 있는가

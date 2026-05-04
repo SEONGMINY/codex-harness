@@ -36,6 +36,14 @@ phase<N>-repair-packet.json
 phase<N>-repair-packet.md
 ```
 
+긴 실행 중에는 진행 기록도 남깁니다.
+
+```text
+progress.md
+```
+
+이 파일은 현재 phase, attempt, gate 실패, 완료 같은 runner 이벤트를 사람이 확인하기 위한 로그입니다.
+
 ## 프롬프트
 
 `phase<N>-prompt.md`는 Codex에게 실제로 전달된 프롬프트입니다.

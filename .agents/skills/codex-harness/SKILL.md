@@ -10,7 +10,11 @@ version: 0.1.0
 
 Use this skill to launch a separate codex-harness orchestration session. The parent chat should stay small: save the user's request, run `scripts/harness/start.py`, and report the launcher result.
 
-The harness session turns an ambiguous implementation request into concise agent-facing docs, a reviewed scope decision, a reusable context-pack, and phase files that can be executed by `scripts/harness/run-phases.py`.
+The harness session moves a request to exactly one durable state: `questions_needed`, `docs_approval_needed`, `planned`, `generated`, or `blocked`.
+
+Each state must be backed by files. Do not rely on a long final explanation.
+
+Clarify is a decision gate. Implementation-shaping decisions such as architecture, data model, public interface, module boundary, dependency changes, technology stack, and user-visible behavior must be approved before Plan. If a decision is unclear, write a targeted question or an open decision instead of guessing.
 
 The harness does not chain long Codex conversations. It captures decisions as files, runs orchestration in a separate `codex exec` session, then runs each implementation phase in another fresh `codex exec` session while the runner owns status, retries, and failure decisions.
 
@@ -97,17 +101,18 @@ Do not invoke `scripts/harness/start.py` from this mode.
 
 1. Ensure the harness is installed in the current repository.
 2. Read `references/workflow.md`, `references/review-gates.md`, `references/context-pack.md`, and `references/task-format.md`.
-3. Clarify the request.
-4. Review the request with the correct gate:
+3. Move the request to exactly one next state.
+4. During Clarify, ask only for blocking implementation-shaping decisions.
+5. Review the request with the correct gate:
    - product feature gate for customer-facing features
    - internal tooling gate for automation and developer workflow tools
-5. Ask for approval before writing Clarify docs.
-6. After approval, create all mandatory docs, context-pack files, task indexes, and phase files.
-7. Gather code and project context into the context-pack.
-8. Plan work into self-contained task/phase files.
-9. Validate the task with `scripts/harness/verify-task.py <task-dir>` and `scripts/harness/run-phases.py <task-dir> --dry-run`.
-10. Run phases with `scripts/harness/run-phases.py`.
-11. Evaluate from fresh context.
+6. Ask for approval before writing task docs.
+7. After approval, create all mandatory docs, context-pack files, task indexes, and phase files.
+8. Gather only the code and project context needed for the approved task.
+9. Plan work into self-contained task/phase files.
+10. Validate the task with `scripts/harness/verify-task.py <task-dir>` and `scripts/harness/run-phases.py <task-dir> --dry-run`.
+11. Run phases with `scripts/harness/run-phases.py`.
+12. Evaluate from fresh context.
 
 ## Hard Rules
 
@@ -120,6 +125,8 @@ Do not invoke `scripts/harness/start.py` from this mode.
 - Let the runner decide phase success, retry, failure, and next phase.
 - Treat conversation as source material, not execution state.
 - Store durable decisions in files under the task context-pack.
+- Store runner-enforced decisions in `decisions.json`, `open-decisions.json`, `architecture.json`, and `dependency-policy.json`.
+- Do not let Plan or Generate invent implementation-shaping decisions.
 - Do not stop after approval until mandatory docs, context-pack files, task indexes, and phase files exist.
 - Do not run Generate when phase files still contain placeholders or missing AC commands.
 - Do not manually mark phases or tasks completed.
@@ -129,8 +136,11 @@ Do not invoke `scripts/harness/start.py` from this mode.
 
 ## Stop Conditions
 
-- During Clarify, stop only to ask targeted questions or to present Clarify Review.
-- After Clarify Review passes, stop and ask the user to approve docs creation.
+- Stop with `questions_needed` when a blocking decision is missing.
+- Stop with `docs_approval_needed` when Clarify Review passes and task docs are not approved yet.
+- Stop with `planned` only after task docs, context-pack files, indexes, phase files, `verify-task.py`, and `run-phases.py --dry-run` pass.
+- Stop with `generated` only after requested phases run and runtime proof passes verification.
+- Stop with `blocked` only when the next durable state cannot be produced safely.
 - After the user approves docs creation, do not stop until these exist:
   - `docs/harness/runner-contract.md`
   - `docs/harness/testing.md`
@@ -142,6 +152,11 @@ Do not invoke `scripts/harness/start.py` from this mode.
   - `tasks/<task-dir>/docs/adr.md`
   - `tasks/index.json`
   - `tasks/<task-dir>/index.json`
+  - `tasks/<task-dir>/context-pack/static/decisions.json`
+  - `tasks/<task-dir>/context-pack/static/open-decisions.json`
+  - `tasks/<task-dir>/context-pack/static/architecture.json`
+  - `tasks/<task-dir>/context-pack/static/dependency-policy.json`
+  - `tasks/<task-dir>/context-pack/static/context-gathering-budget.json`
   - `tasks/<task-dir>/context-pack/static/*`
   - `tasks/<task-dir>/phases/phase<N>.md`
 - After Plan, run `python3 scripts/harness/verify-task.py <task-dir>` and `python3 scripts/harness/run-phases.py <task-dir> --dry-run`. Fix failures before stopping.

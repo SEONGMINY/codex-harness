@@ -118,6 +118,17 @@ tasks/<task-dir>/phases/phase<N>.md
       ]
     }
   ],
+  "decision_refs": [
+    "D-001"
+  ],
+  "architecture_refs": [
+    "A-001"
+  ],
+  "dependency_policy": {
+    "new_dependencies": "forbidden",
+    "approved_new_dependencies": [],
+    "approved_dependency_manifest_changes": []
+  },
   "instructions": [
     {
       "id": "P0-001",
@@ -164,6 +175,13 @@ tasks/<task-dir>/phases/phase<N>.md
 - phase N > 0이면 `read_first.previous_outputs`가 있어야 합니다.
 - `scope.allowed_paths`는 저장소 루트 기준의 수정 가능 경로입니다.
 - 문서 작업이 아닌 phase는 `interfaces`를 채웁니다.
+- `decision_refs`는 `decisions.json`의 승인된 결정만 참조합니다.
+- `architecture_refs`는 `architecture.json`의 승인된 구조 참조만 나열합니다.
+- `dependency_policy.new_dependencies`는 `forbidden`, `approved_only`, `allowed` 중 하나입니다.
+- phase contract의 `dependency_policy`는 `dependency-policy.json`보다 더 넓게 허용할 수 없습니다.
+- `approved_only`일 때는 허용된 패키지와 변경 가능한 manifest 경로를 함께 적습니다.
+- 이름 검증을 지원하는 manifest는 `package.json`, `pyproject.toml`, `requirements*.txt`입니다.
+- lockfile은 대응되는 source manifest가 함께 변경되고 검증될 때만 허용됩니다.
 - `instructions[*].id`는 phase 안에서 고유해야 합니다.
 - `instructions[*].expected_evidence`는 관찰 가능한 증거여야 합니다.
 - `success_criteria`는 결과 기준입니다.

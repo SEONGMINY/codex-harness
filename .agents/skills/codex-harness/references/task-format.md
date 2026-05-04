@@ -123,6 +123,17 @@ Required sections:
       ]
     }
   ],
+  "decision_refs": [
+    "D-001"
+  ],
+  "architecture_refs": [
+    "A-001"
+  ],
+  "dependency_policy": {
+    "new_dependencies": "forbidden",
+    "approved_new_dependencies": [],
+    "approved_dependency_manifest_changes": []
+  },
   "instructions": [
     {
       "id": "P0-001",
@@ -198,6 +209,13 @@ Contract rules:
 - `read_first.previous_outputs` must list prior phase reconciliation, gate, or handoff files for phase N > 0.
 - `scope.allowed_paths` must list every implementation path the phase may change.
 - `interfaces` must describe function/class signatures for non-documentation phases.
+- `decision_refs` must list approved decisions from `decisions.json`.
+- `architecture_refs` must list approved architecture refs from `architecture.json`.
+- `dependency_policy.new_dependencies` must be `forbidden`, `approved_only`, or `allowed`.
+- A phase contract dependency policy must not be more permissive than `dependency-policy.json`.
+- If `new_dependencies` is `approved_only`, list both the approved packages and the approved dependency manifest paths.
+- Dependency name validation is supported for `package.json`, `pyproject.toml`, and `requirements*.txt`.
+- Lockfiles are allowed only when the corresponding source manifest is changed and validated in the same phase.
 - `instructions[*].id` must be stable and unique within the phase.
 - `instructions[*].expected_evidence` must describe observable proof.
 - `success_criteria` must list observable outcomes, not implementation wishes.

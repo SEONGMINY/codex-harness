@@ -9,6 +9,14 @@ The harness is a state machine, not a long conversation.
 - Runner scripts decide state transitions.
 - Tests and required outputs decide completion.
 
+Every launcher run must produce exactly one next state:
+
+- `questions_needed`
+- `docs_approval_needed`
+- `planned`
+- `generated`
+- `blocked`
+
 ## Stage Order
 
 1. Clarify
@@ -22,18 +30,41 @@ The harness is a state machine, not a long conversation.
 
 ## Clarify
 
-Goal: define the work precisely enough that another Codex session can implement it without relying on the original chat.
+Outcome: either ask for missing decisions, request docs approval, or record a blocking decision.
 
-Discuss:
+Clarify is a decision gate, not only a requirements interview.
 
-- customer or operator problem
-- user flow
-- implementation feasibility
+Clarify passes only when these are explicit or intentionally not applicable:
+
+- functional scope and non-scope
+- technology stack
+- runtime and execution environment
 - data model
-- architecture
-- constraints
-- completion criteria
-- alternatives that avoid building
+- external interface
+- internal interface
+- module boundary
+- dependency direction
+- object graph and cycle policy
+- design pattern
+- new dependency policy
+- test strategy
+- error handling
+- migration, compatibility, performance, security, and operations constraints
+
+If any item is missing, do one of these:
+
+- write one targeted question to `questions.md`
+- write a blocking item to `open-decisions.json` after task context exists
+
+Do not decide these automatically. You may propose a default only when it is grounded in an explicit existing repository pattern, and the user must approve it before Plan.
+
+Local implementation choices may stay inside a phase when they do not add dependencies, layers, public interfaces, data model changes, user-visible behavior, or architecture edges.
+
+Clarify should produce only one of these outcomes:
+
+- `questions_needed`: `questions.md` exists.
+- `docs_approval_needed`: Clarify Review passed and `docs-approval-request.md` exists.
+- `blocked`: the request cannot be made safe or coherent.
 
 Do not create docs until the user approves.
 
@@ -45,6 +76,8 @@ Choose the product feature gate for customer-facing product work.
 Choose the internal tooling gate for automation, harness, dev workflow, scripts, and repo operations.
 
 One failed checklist item rejects the proposal unless the gate says otherwise.
+
+Clarify Review passes only when it can point to the accepted scope, non-scope, completion criteria, and implementation-shaping decisions.
 
 ## Docs And Context-Pack
 
@@ -71,6 +104,11 @@ Mandatory task context:
 - `tasks/<task-dir>/context-pack/static/original-prompt.md`
 - `tasks/<task-dir>/context-pack/static/product.md`
 - `tasks/<task-dir>/context-pack/static/decisions.md`
+- `tasks/<task-dir>/context-pack/static/decisions.json`
+- `tasks/<task-dir>/context-pack/static/open-decisions.json`
+- `tasks/<task-dir>/context-pack/static/architecture.json`
+- `tasks/<task-dir>/context-pack/static/dependency-policy.json`
+- `tasks/<task-dir>/context-pack/static/context-gathering-budget.json`
 - `tasks/<task-dir>/context-pack/static/rejected-options.md`
 - `tasks/<task-dir>/context-pack/static/constraints.md`
 - `tasks/<task-dir>/context-pack/static/test-policy.md`
@@ -82,9 +120,17 @@ Mandatory task context:
 Docs should be compact. Preserve intent, tradeoffs, and rejected options.
 Do not leave placeholders in mandatory docs or context files before Generate.
 
+Markdown explains decisions for people.
+JSON enforces decisions for the runner.
+
 ## Context Gathering
 
 Find only context needed for the approved task.
+
+Use `context-gathering-budget.json`.
+
+Stop gathering when the target files, architecture boundary, and test command are known.
+Escalate once if signals conflict or the scope boundary is unclear.
 
 Record:
 
@@ -98,7 +144,15 @@ Do not dump the whole repository into context-pack.
 
 ## Plan
 
-Split work into phases.
+Outcome: phase contracts that translate approved decisions into executable work.
+
+Plan may run only when:
+
+- `open-decisions.json` has no blocking open decision.
+- `decisions.json` contains approved implementation decisions.
+- `architecture.json` contains approved architecture refs.
+- `dependency-policy.json` is valid.
+- Mandatory task docs and context-pack files have no placeholders.
 
 Rules:
 
@@ -109,6 +163,9 @@ Rules:
 - Each phase contract must list `read_first.docs` and, for phase N > 0, `read_first.previous_outputs`.
 - Each phase contract must list `scope.allowed_paths`.
 - Each non-documentation phase should describe function/class signatures in `interfaces`.
+- Each phase contract must list approved `decision_refs`.
+- Each phase contract must list approved `architecture_refs`.
+- Each phase contract must define `dependency_policy`.
 - Each phase contract must list outcome-first `success_criteria`.
 - Each phase contract must define `stop_rules`, `fallback_behavior`, `validation_budget`, and `missing_evidence_behavior`.
 - Each forbidden rule must include a concrete reason.
@@ -118,6 +175,8 @@ Rules:
 - Result JSON is generated by the runner, not Codex.
 - Phase files must be self-contained.
 - Phase files must not contain `TODO` placeholders before Generate.
+- Plan must not create new decisions. It translates approved decisions into phase contracts.
+- Blocking `open-decisions.json` entries must be resolved before Plan can pass.
 
 Before stopping after Plan, run:
 
@@ -136,6 +195,9 @@ Do not use subagents for implementation phases.
 Do not use long conversation resume as the default.
 Do not implement phase work directly in the orchestrator session.
 The orchestrator runs the runner; the phase agent launched by the runner edits implementation files.
+
+Generate must not make implementation-shaping decisions.
+If the phase needs an unapproved architecture, dependency, data model, external interface, module boundary, or user-visible behavior decision, it must stop blocked and write the missing decision to the handoff.
 
 Allowed exception:
 

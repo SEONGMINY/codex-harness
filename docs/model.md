@@ -10,10 +10,21 @@ Codex가 긴 대화를 계속 이어받으면 기준이 흐려집니다.
 
 codex-harness는 이 문제를 대화가 아니라 파일 구조로 풉니다.
 
+launcher는 매번 하나의 상태만 만듭니다.
+
+- `questions_needed`
+- `docs_approval_needed`
+- `planned`
+- `generated`
+- `blocked`
+
+상태는 마지막 응답이 아니라 파일로 증명합니다.
+
 ## 기본 원칙
 
 - 사용자의 요청은 작업을 시작하는 입력입니다.
 - 확정된 기준은 task 문서에 남깁니다.
+- 구현 방향을 바꾸는 결정은 승인된 JSON에 남깁니다.
 - phase는 독립된 Codex 세션에서 실행합니다.
 - 완료 여부는 runner가 만든 실행 증거로 판단합니다.
 - 실패 이유는 repair packet으로 다음 시도에 넘깁니다.
@@ -76,6 +87,9 @@ phase contract는 한 phase의 실행 계약입니다.
 - 먼저 읽을 문서
 - 수정 가능한 파일 범위
 - 인터페이스와 비즈니스 규칙
+- 승인된 결정 참조
+- 승인된 아키텍처 참조
+- 의존성 정책
 - 구체적인 작업 지시
 - 성공 기준
 - 중단 조건
@@ -85,6 +99,22 @@ phase contract는 한 phase의 실행 계약입니다.
 - 금지 규칙
 
 runner는 이 계약을 기준으로 프롬프트, 체크리스트, 실행 증거, gate, 결과 파일을 만듭니다.
+
+## decision registry
+
+Markdown 문서는 사람이 읽기 위한 설명입니다.
+JSON 파일은 runner가 검증하기 위한 기준입니다.
+
+필수 decision 파일:
+
+- `decisions.json`
+- `open-decisions.json`
+- `architecture.json`
+- `dependency-policy.json`
+- `context-gathering-budget.json`
+
+blocking open decision이 남아 있으면 Plan과 Generate는 진행할 수 없습니다.
+phase contract는 승인된 `decision_refs`와 `architecture_refs`만 참조해야 합니다.
 
 ## runner proof
 
