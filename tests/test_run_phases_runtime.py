@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -257,6 +258,130 @@ class RunCodexRuntimeTest(unittest.TestCase):
         args = argparse.Namespace(max_attempts=3, ac_timeout=600)
 
         self.assertEqual(RUN_PHASES.contract_validation_budget({}, args), (3, 600))
+
+    def test_gate_rejects_task_index_changes_after_phase_start(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            handoff = task_path / "context-pack" / "handoffs" / "phase0.md"
+            handoff.parent.mkdir(parents=True, exist_ok=True)
+            handoff.write_text("handoff\n", encoding="utf-8")
+            gate = RUN_PHASES.build_gate(
+                root,
+                task_path,
+                0,
+                {"scope": {"allowed_paths": ["src/**"]}, "dependency_policy": {"new_dependencies": "allowed"}},
+                [f"tasks/{task_path.name}/index.json"],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                [],
+            )
+
+            scope_check = next(check for check in gate["checks"] if check["name"] == "scope")
+            self.assertEqual(gate["status"], "failed", gate)
+            self.assertIn(f"tasks/{task_path.name}/index.json", scope_check["violations"])
+
+    def test_gate_fails_when_required_repo_output_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            gate = RUN_PHASES.build_gate(
+                root,
+                task_path,
+                0,
+                {"scope": {"allowed_paths": ["apps/api/src/**"]}, "dependency_policy": {"new_dependencies": "allowed"}},
+                [],
+                [{"command": "true", "exit_code": 0}],
+                [],
+                ["apps/api/src/server.ts"],
+                [],
+            )
+
+            self.assertEqual(gate["status"], "failed")
+            self.assertIn("One or more required repo outputs are missing.", gate["blocking_reasons"])
+
+    def test_gate_fails_when_handoff_reports_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            gate = RUN_PHASES.build_gate(
+                root,
+                task_path,
+                0,
+                {"scope": {"allowed_paths": ["src/**"]}, "dependency_policy": {"new_dependencies": "allowed"}},
+                [],
+                [{"command": "true", "exit_code": 0}],
+                [],
+                [],
+                ["handoff matched blocked/partial marker: Status: blocked"],
+            )
+
+            self.assertEqual(gate["status"], "failed")
+            self.assertIn("Handoff reports blocked, partial, skipped, or workaround status.", gate["blocking_reasons"])
+
+    def test_resume_repair_resets_from_earliest_repair_packet_without_deleting_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (root / "tasks").mkdir(parents=True, exist_ok=True)
+            (root / "tasks" / "index.json").write_text(
+                json.dumps({"tasks": [{"dir": "demo", "status": "error"}]}) + "\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "phases": [
+                            {"phase": 0, "name": "docs", "status": "completed", "attempts": 1},
+                            {"phase": 1, "name": "api", "status": "error", "attempts": 1},
+                            {"phase": 2, "name": "web", "status": "pending", "attempts": 0},
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            repair_packet = task_path / "context-pack" / "runtime" / "phase1-repair-packet.json"
+            repair_packet.write_text('{"phase":1}\n', encoding="utf-8")
+
+            RUN_PHASES.apply_repair_resume(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(task_index["phases"][0]["status"], "completed")
+            self.assertEqual(task_index["phases"][1]["status"], "pending")
+            self.assertEqual(task_index["phases"][1]["attempts"], 0)
+            self.assertEqual(task_index["phases"][2]["status"], "pending")
+            self.assertTrue(repair_packet.exists())
+
+    def test_install_preflight_runs_once_even_when_node_modules_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (root / "package.json").write_text('{"packageManager":"pnpm@9.0.0"}\n', encoding="utf-8")
+            (root / "pnpm-workspace.yaml").write_text("packages: []\n", encoding="utf-8")
+            (root / "node_modules").mkdir()
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            marker = tmp / "pnpm-runs.txt"
+            pnpm = fake_bin / "pnpm"
+            pnpm.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('run\\n', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            pnpm.chmod(pnpm.stat().st_mode | 0o111)
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{fake_bin}:{old_path}"
+            try:
+                args = argparse.Namespace(skip_install=False, install_preflight_done=False, install_timeout=10)
+                self.assertEqual(RUN_PHASES.run_install_preflight(root, task_path, args), [])
+                self.assertEqual(RUN_PHASES.run_install_preflight(root, task_path, args), [])
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertEqual(marker.read_text(encoding="utf-8"), "run\n")
 
     def test_execute_phase_uses_contract_attempt_budget(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

@@ -222,6 +222,8 @@ Generate completion requires runtime proof:
 
 The runner-generated phase result JSON is the machine-readable completion contract.
 The runner-generated gate JSON decides whether the phase may complete.
+For implementation phases, `required_repo_outputs` must name concrete repository files, and the gate checks that they exist.
+The gate fails if the handoff reports blocked, partial, skipped, workaround, or equivalent Korean wording.
 The runner-generated repair packet tells the next attempt exactly what failed.
 The reconciliation summary is included in later phase context.
 Unverified reconciliation items are QA notes, not retry triggers. Retry only when the gate fails.

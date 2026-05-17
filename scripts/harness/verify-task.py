@@ -18,6 +18,8 @@ from decision_registry import (
 from phase_contract import (
     contract_acceptance_commands,
     contract_required_outputs,
+    contract_required_repo_outputs,
+    handoff_block_reasons,
     parse_phase_contract,
     scope_violations,
     validate_phase_contract,
@@ -123,6 +125,18 @@ def resolve_task_relative_path(
     return target, []
 
 
+def resolve_repo_relative_path(root: Path, raw_path: str, label: str) -> tuple[Path | None, list[str]]:
+    path = Path(raw_path)
+    if path.is_absolute():
+        return None, [f"`{label}` must be relative to the repository root: {raw_path}"]
+    target = (root / path).resolve()
+    try:
+        target.relative_to(root.resolve())
+    except ValueError:
+        return None, [f"`{label}` must not escape the repository root: {raw_path}"]
+    return target, []
+
+
 def phase_ac_commands(markdown: str) -> list[str]:
     match = re.search(
         r"## Acceptance Criteria(?P<body>.*?)(?:\n## |\Z)",
@@ -165,6 +179,13 @@ def expected_required_outputs(phase: dict, markdown: str) -> list[str]:
         if outputs:
             return outputs
     return list(phase.get("required_outputs") or [])
+
+
+def expected_required_repo_outputs(markdown: str) -> list[str]:
+    contract, _ = parse_phase_contract(markdown)
+    if contract is None:
+        return []
+    return contract_required_repo_outputs(contract)
 
 
 def phase_attempts(phase: dict) -> list[int]:
@@ -242,6 +263,42 @@ def validate_required_outputs(
     if actual_outputs != expected_outputs:
         errors.append(
             "`required_outputs` must match phase required_outputs. "
+            f"expected={expected_outputs!r} actual={actual_outputs!r}"
+        )
+    return errors
+
+
+def validate_required_repo_outputs(
+    root: Path,
+    value: object,
+    expected_outputs: list[str],
+) -> list[str]:
+    if not isinstance(value, list):
+        return ["`required_repo_outputs` must be a list."]
+    errors: list[str] = []
+    actual_outputs = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            errors.append(f"`required_repo_outputs[{index}]` must be an object.")
+            continue
+        if not isinstance(item.get("path"), str) or not item.get("path", "").strip():
+            errors.append(f"`required_repo_outputs[{index}].path` must be a non-empty string.")
+            continue
+        raw_path = item["path"]
+        actual_outputs.append(raw_path)
+        if item.get("exists") is not True:
+            errors.append(f"`required_repo_outputs[{index}].exists` must be true.")
+        target, path_errors = resolve_repo_relative_path(
+            root,
+            raw_path,
+            f"required_repo_outputs[{index}].path",
+        )
+        errors.extend(path_errors)
+        if target is not None and not target.exists():
+            errors.append(f"`required_repo_outputs[{index}].path` does not exist: {rel(root, target)}")
+    if actual_outputs != expected_outputs:
+        errors.append(
+            "`required_repo_outputs` must match phase required_repo_outputs. "
             f"expected={expected_outputs!r} actual={actual_outputs!r}"
         )
     return errors
@@ -346,6 +403,7 @@ def validate_runtime_contract_bundle(
     phase_number: int,
     expected_commands: list[str],
     expected_outputs: list[str],
+    expected_repo_outputs: list[str],
 ) -> list[str]:
     runtime_dir = task_path / "context-pack" / "runtime"
     contract_path = runtime_dir / f"phase{phase_number}-contract.json"
@@ -381,6 +439,11 @@ def validate_runtime_contract_bundle(
             "Runtime contract required_outputs must match phase contract. "
             f"expected={expected_outputs!r} actual={contract_required_outputs(contract)!r}"
         )
+    if contract_required_repo_outputs(contract) != expected_repo_outputs:
+        errors.append(
+            "Runtime contract required_repo_outputs must match phase contract. "
+            f"expected={expected_repo_outputs!r} actual={contract_required_repo_outputs(contract)!r}"
+        )
 
     commands = evidence.get("commands") if isinstance(evidence, dict) else None
     actual_commands = [
@@ -406,6 +469,18 @@ def validate_runtime_contract_bundle(
             f"expected={expected_outputs!r} actual={actual_outputs!r}"
         )
 
+    repo_output_entries = evidence.get("required_repo_outputs") if isinstance(evidence, dict) else None
+    actual_repo_outputs = [
+        item.get("path")
+        for item in repo_output_entries or []
+        if isinstance(item, dict)
+    ]
+    if actual_repo_outputs != expected_repo_outputs:
+        errors.append(
+            "Evidence required_repo_outputs must match phase contract. "
+            f"expected={expected_repo_outputs!r} actual={actual_repo_outputs!r}"
+        )
+
     changed_files = evidence.get("changed_files") if isinstance(evidence, dict) else []
     if not isinstance(changed_files, list) or not all(isinstance(item, str) for item in changed_files):
         errors.append("Evidence changed_files must be a string list.")
@@ -413,7 +488,9 @@ def validate_runtime_contract_bundle(
     violations = scope_violations(
         changed_files,
         contract_allowed_paths(contract),
-        required_output_repo_paths(task_path, expected_outputs),
+        [
+            *required_output_repo_paths(task_path, expected_outputs),
+        ],
     )
     if violations:
         errors.append(f"Evidence changed_files include paths outside scope: {violations!r}")
@@ -452,6 +529,7 @@ def validate_phase_result(
     phase_number: int,
     expected_commands: list[str],
     expected_outputs: list[str],
+    expected_repo_outputs: list[str],
 ) -> list[str]:
     result_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-result.json"
     if not result_path.exists():
@@ -476,6 +554,8 @@ def validate_phase_result(
         "required_outputs",
         "artifacts",
     }
+    if expected_repo_outputs or "required_repo_outputs" in result:
+        required_fields.add("required_repo_outputs")
     missing = sorted(required_fields - set(result))
     if missing:
         errors.append(f"Phase result missing fields: {', '.join(missing)}")
@@ -494,6 +574,8 @@ def validate_phase_result(
     if result.get("tests_passed") is not True:
         errors.append("`tests_passed` must be true for a completed phase.")
     errors.extend(validate_required_outputs(root, task_path, result.get("required_outputs"), expected_outputs))
+    if expected_repo_outputs or "required_repo_outputs" in result:
+        errors.extend(validate_required_repo_outputs(root, result.get("required_repo_outputs"), expected_repo_outputs))
     errors.extend(validate_artifacts(root, task_path, result.get("artifacts"), phase_number, attempt))
     artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
     if artifacts.get("handoff") != f"context-pack/handoffs/phase{phase_number}.md":
@@ -553,6 +635,7 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
         errors.extend(require_file(root, phase_path, "phase file"))
         expected_commands = list(phase.get("ac_commands") or [])
         expected_outputs = list(phase.get("required_outputs") or [])
+        expected_repo_outputs: list[str] = []
         if phase_path.exists():
             markdown = phase_path.read_text(encoding="utf-8", errors="replace")
             _, contract_errors = validate_phase_contract(
@@ -567,6 +650,7 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
             errors.extend([f"Phase {phase_number} contract: {error}" for error in contract_errors])
             expected_commands = expected_ac_commands(phase, markdown)
             expected_outputs = expected_required_outputs(phase, markdown)
+            expected_repo_outputs = expected_required_repo_outputs(markdown)
             if phase.get("ac_commands") and list(phase.get("ac_commands") or []) != expected_commands:
                 errors.append(
                     f"Phase {phase_number} index ac_commands must match Contract.acceptance_commands."
@@ -581,7 +665,16 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
                 errors.append(f"Missing required outputs for phase {phase_number}.")
 
         if phase.get("status") == "completed":
-            errors.extend(require_file(root, handoff_dir / f"phase{phase_number}.md", "handoff"))
+            handoff_path = handoff_dir / f"phase{phase_number}.md"
+            errors.extend(require_file(root, handoff_path, "handoff"))
+            if handoff_path.exists():
+                handoff_reasons = handoff_block_reasons(
+                    handoff_path.read_text(encoding="utf-8", errors="replace")
+                )
+                if handoff_reasons:
+                    errors.append(
+                        f"Phase {phase_number} handoff reports blocked/partial status: {handoff_reasons!r}"
+                    )
             errors.extend(
                 validate_phase_result(
                     root,
@@ -589,6 +682,7 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
                     phase_number,
                     expected_commands,
                     expected_outputs,
+                    expected_repo_outputs,
                 )
             )
             errors.extend(require_file(root, runtime_dir / f"phase{phase_number}-prompt.md", "runtime prompt"))
@@ -613,6 +707,7 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
                     phase_number,
                     expected_commands,
                     expected_outputs,
+                    expected_repo_outputs,
                 )
             )
             for attempt in phase_attempts(phase):

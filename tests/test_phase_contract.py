@@ -120,6 +120,72 @@ class PhaseContractValidationTest(unittest.TestCase):
             )
             self.assertEqual(errors, [])
 
+    def test_glob_allowed_paths_match_nested_files(self) -> None:
+        self.assertTrue(
+            PHASE_CONTRACT.path_allowed(
+                "apps/web/src/features/animations/useInvitationAnimations.ts",
+                ["apps/web/src/**"],
+            )
+        )
+        self.assertFalse(
+            PHASE_CONTRACT.path_allowed(
+                "apps/api/src/server.ts",
+                ["apps/web/src/**"],
+            )
+        )
+
+    def test_single_star_glob_does_not_cross_path_segments(self) -> None:
+        self.assertTrue(
+            PHASE_CONTRACT.path_allowed(
+                "apps/web/package.json",
+                ["apps/*/package.json"],
+            )
+        )
+        self.assertFalse(
+            PHASE_CONTRACT.path_allowed(
+                "apps/web/src/package.json",
+                ["apps/*/package.json"],
+            )
+        )
+
+    def test_handoff_block_reasons_detect_blocked_status(self) -> None:
+        reasons = PHASE_CONTRACT.handoff_block_reasons(
+            "# Handoff\n\nStatus: blocked\n\nCould not implement backend files."
+        )
+
+        self.assertTrue(reasons)
+
+    def test_required_repo_outputs_are_validated_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["required_repo_outputs"] = ["docs/runner.md"]
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+            self.assertEqual(errors, [])
+
+    def test_required_repo_outputs_must_be_inside_allowed_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["required_repo_outputs"] = ["src/server.ts"]
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any("required_repo_outputs" in error for error in errors), errors)
+
 
 if __name__ == "__main__":
     unittest.main()

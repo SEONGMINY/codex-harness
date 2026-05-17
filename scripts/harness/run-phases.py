@@ -26,6 +26,8 @@ from phase_contract import (
     contract_acceptance_commands,
     contract_allowed_paths,
     contract_required_outputs,
+    contract_required_repo_outputs,
+    handoff_block_reasons,
     parse_phase_contract,
     scope_violations,
     validate_phase_contract,
@@ -120,6 +122,78 @@ def run_capture(args: list[str], cwd: Path) -> str:
     )
     output = (result.stdout + result.stderr).strip()
     return output or "(no output)"
+
+
+def package_manager_install_command(root: Path) -> list[str] | None:
+    package_json = root / "package.json"
+    if not package_json.exists():
+        return None
+    try:
+        package_data = json.loads(package_json.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        package_data = {}
+    package_manager = package_data.get("packageManager") if isinstance(package_data, dict) else ""
+    if (root / "pnpm-workspace.yaml").exists() or str(package_manager).startswith("pnpm@"):
+        return ["pnpm", "install"]
+    if (root / "yarn.lock").exists() or str(package_manager).startswith("yarn@"):
+        return ["yarn", "install"]
+    if (root / "package-lock.json").exists() or (root / "npm-shrinkwrap.json").exists():
+        return ["npm", "install"]
+    return None
+
+
+def install_preflight_needed(root: Path) -> bool:
+    if not (root / "package.json").exists():
+        return False
+    return package_manager_install_command(root) is not None
+
+
+def install_preflight_path(task_path: Path) -> Path:
+    return task_path / "context-pack" / "runtime" / "install-preflight.json"
+
+
+def run_install_preflight(root: Path, task_path: Path, args: argparse.Namespace) -> list[str]:
+    if getattr(args, "skip_install", False) or getattr(args, "install_preflight_done", False):
+        return []
+    args.install_preflight_done = True
+    if not install_preflight_needed(root):
+        return []
+    command = package_manager_install_command(root)
+    if command is None:
+        return []
+    started_at = now()
+    try:
+        result = subprocess.run(
+            command,
+            cwd=root,
+            text=True,
+            capture_output=True,
+            timeout=getattr(args, "install_timeout", 600),
+            check=False,
+        )
+        exit_code = result.returncode
+        output = (result.stdout + result.stderr).strip()
+    except subprocess.TimeoutExpired as exc:
+        exit_code = 124
+        output = ((exc.stdout or "") + (exc.stderr or "")).strip()
+        output = (output + f"\nTimed out after {getattr(args, 'install_timeout', 600)} seconds.").strip()
+    payload = {
+        "command": command,
+        "started_at": started_at,
+        "completed_at": now(),
+        "exit_code": exit_code,
+        "output_tail": truncate_text(output, 6_000),
+    }
+    install_path = install_preflight_path(task_path)
+    install_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(install_path, payload)
+    if exit_code != 0:
+        return [
+            "Install preflight failed: "
+            f"{' '.join(command)} exited {exit_code}. "
+            f"See {install_preflight_path(task_path).relative_to(root)}"
+        ]
+    return []
 
 
 def resolve_task_path(root: Path, task_arg: str) -> Path:
@@ -396,6 +470,8 @@ The runner also requires:
 - Codex exits successfully.
 - Contract acceptance commands pass.
 - Required outputs exist.
+- Required repo outputs exist when the contract lists them.
+- The phase handoff does not report blocked, partial, skipped, or workaround status.
 - Changed files stay within `scope.allowed_paths`.
 
 ## Hard Invariants
@@ -415,6 +491,7 @@ The runner also requires:
 
 - Write `tasks/{task_path.name}/context-pack/handoffs/phase{phase_number}.md`.
 - Run useful local checks when possible.
+- If you are blocked, write that honestly in the handoff. The runner will fail the phase instead of treating a blocked handoff as success.
 - Return only the structured final output requested by the active output schema.
 
 ## Stop Rules
@@ -511,6 +588,13 @@ def phase_required_outputs(phase: dict, phase_markdown: str) -> list[str]:
     return list(phase.get("required_outputs") or [])
 
 
+def phase_required_repo_outputs(phase_markdown: str) -> list[str]:
+    contract, _ = parse_phase_contract(phase_markdown)
+    if contract is None:
+        return []
+    return contract_required_repo_outputs(contract)
+
+
 def contract_ac_commands(phase: dict, contract: dict) -> list[str]:
     commands = contract_acceptance_commands(contract)
     if commands:
@@ -523,6 +607,10 @@ def contract_outputs(phase: dict, contract: dict) -> list[str]:
     if outputs:
         return outputs
     return list(phase.get("required_outputs") or [])
+
+
+def contract_repo_outputs(contract: dict) -> list[str]:
+    return contract_required_repo_outputs(contract)
 
 
 def phase_contract_hash(contract: dict) -> str:
@@ -578,6 +666,14 @@ def preflight_phase(root: Path, task_path: Path, task_index: dict, phase: dict) 
 
     if not phase_required_outputs(phase, phase_markdown):
         errors.append(f"Missing required_outputs for phase {phase_number}.")
+    if contract is not None:
+        scope = contract.get("scope") if isinstance(contract.get("scope"), dict) else {}
+        layer = str(scope.get("layer") or "").lower()
+        if layer not in {"docs", "documentation", "planning", "test", "tests", "qa"}:
+            if not contract_required_repo_outputs(contract):
+                errors.append(
+                    f"Missing required_repo_outputs for implementation phase {phase_number}."
+                )
     if contract is not None and phase.get("required_outputs"):
         contract_outputs = contract_required_outputs(contract)
         if list(phase.get("required_outputs") or []) != contract_outputs:
@@ -678,6 +774,12 @@ def phase_changed_paths(task_path: Path, before: dict[str, str], after: dict[str
         path
         for path in changed_paths(before, after)
         if not path.startswith(runtime_prefix)
+    ]
+
+
+def ignored_gate_paths(task_path: Path, required_outputs: list[str]) -> list[str]:
+    return [
+        *required_output_repo_paths(task_path, required_outputs),
     ]
 
 
@@ -885,6 +987,15 @@ def verify_required_outputs(task_path: Path, required_outputs: list[str]) -> lis
     return missing
 
 
+def verify_required_repo_outputs(root: Path, required_outputs: list[str]) -> list[str]:
+    missing = []
+    for raw_path in required_outputs:
+        target = root / raw_path
+        if not target.exists():
+            missing.append(raw_path)
+    return missing
+
+
 def required_output_results(task_path: Path, required_outputs: list[str]) -> list[dict[str, object]]:
     return [
         {
@@ -893,6 +1004,23 @@ def required_output_results(task_path: Path, required_outputs: list[str]) -> lis
         }
         for raw_path in required_outputs
     ]
+
+
+def required_repo_output_results(root: Path, required_outputs: list[str]) -> list[dict[str, object]]:
+    return [
+        {
+            "path": raw_path,
+            "exists": (root / raw_path).exists(),
+        }
+        for raw_path in required_outputs
+    ]
+
+
+def handoff_blockers(task_path: Path, phase_number: int) -> list[str]:
+    path = phase_handoff_path(task_path, phase_number)
+    if not path.exists():
+        return []
+    return handoff_block_reasons(path.read_text(encoding="utf-8", errors="replace"))
 
 
 def task_relative(path: Path, task_path: Path) -> str:
@@ -918,6 +1046,7 @@ def write_ac_results(
 
 
 def write_phase_result(
+    root: Path,
     task_path: Path,
     phase_number: int,
     attempt: int,
@@ -925,6 +1054,7 @@ def write_phase_result(
     changed_files: list[str],
     command_results: list[dict[str, object]],
     required_outputs: list[str],
+    required_repo_outputs: list[str],
     prompt_path: Path,
     output_path: Path,
     stderr_path: Path,
@@ -945,6 +1075,7 @@ def write_phase_result(
         ],
         "tests_passed": all(item["exit_code"] == 0 for item in command_results),
         "required_outputs": required_output_results(task_path, required_outputs),
+        "required_repo_outputs": required_repo_output_results(root, required_repo_outputs),
         "artifacts": {
             "contract": task_relative(phase_contract_path(task_path, phase_number), task_path),
             "checklist": task_relative(phase_checklist_path(task_path, phase_number), task_path),
@@ -980,13 +1111,16 @@ def build_gate(
     changed_files: list[str],
     command_results: list[dict[str, object]],
     required_outputs: list[str],
+    required_repo_outputs: list[str],
+    handoff_reasons: list[str],
 ) -> dict[str, object]:
     failed_commands = [item for item in command_results if item.get("exit_code") != 0]
     missing_outputs = verify_required_outputs(task_path, required_outputs)
+    missing_repo_outputs = verify_required_repo_outputs(root, required_repo_outputs)
     violations = scope_violations(
         changed_files,
         contract_allowed_paths(contract),
-        required_output_repo_paths(task_path, required_outputs),
+        ignored_gate_paths(task_path, required_outputs),
     )
     dependency_errors = validate_dependency_changes(contract, changed_files, root)
     blocking_reasons: list[str] = []
@@ -994,8 +1128,12 @@ def build_gate(
         blocking_reasons.append("One or more acceptance commands failed.")
     if missing_outputs:
         blocking_reasons.append("One or more required outputs are missing.")
+    if missing_repo_outputs:
+        blocking_reasons.append("One or more required repo outputs are missing.")
     if violations:
         blocking_reasons.append("Changed files include paths outside Contract.scope.allowed_paths.")
+    if handoff_reasons:
+        blocking_reasons.append("Handoff reports blocked, partial, skipped, or workaround status.")
     if dependency_errors:
         blocking_reasons.extend(dependency_errors)
 
@@ -1009,6 +1147,16 @@ def build_gate(
             "name": "required_outputs",
             "status": "passed" if not missing_outputs else "failed",
             "missing_outputs": missing_outputs,
+        },
+        {
+            "name": "required_repo_outputs",
+            "status": "passed" if not missing_repo_outputs else "failed",
+            "missing_outputs": missing_repo_outputs,
+        },
+        {
+            "name": "handoff_status",
+            "status": "passed" if not handoff_reasons else "failed",
+            "reasons": handoff_reasons,
         },
         {
             "name": "scope",
@@ -1030,11 +1178,13 @@ def build_gate(
 
 
 def build_evidence(
+    root: Path,
     phase_number: int,
     attempt: int,
     changed_files: list[str],
     command_results: list[dict[str, object]],
     required_outputs: list[str],
+    required_repo_outputs: list[str],
     task_path: Path,
 ) -> dict[str, object]:
     return {
@@ -1043,6 +1193,7 @@ def build_evidence(
         "changed_files": changed_files,
         "commands": command_results,
         "required_outputs": required_output_results(task_path, required_outputs),
+        "required_repo_outputs": required_repo_output_results(root, required_repo_outputs),
     }
 
 
@@ -1073,6 +1224,14 @@ def expected_evidence_matched(expected: object, evidence: dict[str, object]) -> 
             return True
 
     for item in evidence.get("required_outputs", []) or []:
+        if (
+            isinstance(item, dict)
+            and item.get("exists") is True
+            and item.get("path") == expected_text
+        ):
+            return True
+
+    for item in evidence.get("required_repo_outputs", []) or []:
         if (
             isinstance(item, dict)
             and item.get("exists") is True
@@ -1223,7 +1382,12 @@ def failed_instruction_results(reconciliation: dict[str, object] | None) -> list
     ]
 
 
-def contract_summary(contract: dict | None, phase: dict, required_outputs: list[str]) -> dict[str, object] | None:
+def contract_summary(
+    contract: dict | None,
+    phase: dict,
+    required_outputs: list[str],
+    required_repo_outputs: list[str],
+) -> dict[str, object] | None:
     if contract is None:
         return None
     return {
@@ -1233,6 +1397,7 @@ def contract_summary(contract: dict | None, phase: dict, required_outputs: list[
         "allowed_paths": contract_allowed_paths(contract),
         "acceptance_commands": contract_ac_commands(phase, contract),
         "required_outputs": required_outputs,
+        "required_repo_outputs": required_repo_outputs,
         "success_criteria": contract.get("success_criteria") or [],
         "stop_rules": contract.get("stop_rules") or [],
         "fallback_behavior": contract.get("fallback_behavior") or {},
@@ -1267,13 +1432,16 @@ def build_repair_packet(
     stderr_path: Path | None = None,
     command_results: list[dict[str, object]] | None = None,
     required_outputs: list[str] | None = None,
+    required_repo_outputs: list[str] | None = None,
     missing_outputs: list[str] | None = None,
+    missing_repo_outputs: list[str] | None = None,
     changed_files: list[str] | None = None,
     gate: dict[str, object] | None = None,
     reconciliation: dict[str, object] | None = None,
 ) -> dict[str, object]:
     commands = command_results or []
     outputs = required_outputs or []
+    repo_outputs = required_repo_outputs or []
     stderr_tail = ""
     if stderr_path and stderr_path.exists():
         stderr_tail = truncate_text(stderr_path.read_text(encoding="utf-8", errors="replace"), 4_000)
@@ -1289,7 +1457,7 @@ def build_repair_packet(
             "codex_exit_code": codex_exit_code,
             "stderr_tail": stderr_tail,
         },
-        "contract": contract_summary(contract, phase, outputs),
+        "contract": contract_summary(contract, phase, outputs, repo_outputs),
         "failed_commands": [
             item
             for item in compact_command_results(commands)
@@ -1297,7 +1465,9 @@ def build_repair_packet(
         ],
         "commands": compact_command_results(commands),
         "required_outputs": required_output_results(task_path, outputs),
+        "required_repo_outputs": required_repo_output_results(task_path.parent.parent, repo_outputs),
         "missing_outputs": missing_outputs or [],
+        "missing_repo_outputs": missing_repo_outputs or [],
         "changed_files": changed_files or [],
         "failed_gate_checks": failed_gate_checks(gate),
         "blocking_reasons": list(gate.get("blocking_reasons") or []) if gate else [],
@@ -1352,6 +1522,14 @@ def repair_packet_markdown(packet: dict[str, object]) -> str:
     else:
         lines.append("- none")
 
+    missing_repo_outputs = packet.get("missing_repo_outputs") or []
+    lines.extend(["", "## Missing Repo Outputs", ""])
+    if missing_repo_outputs:
+        for path in missing_repo_outputs:
+            lines.append(f"- `{path}`")
+    else:
+        lines.append("- none")
+
     failed_checks = packet.get("failed_gate_checks") or []
     lines.extend(["", "## Failed Gate Checks", ""])
     if failed_checks:
@@ -1379,6 +1557,11 @@ def repair_packet_markdown(packet: dict[str, object]) -> str:
         lines.extend(["", "Required outputs:"])
         for path in contract.get("required_outputs") or []:
             lines.append(f"- `{path}`")
+        repo_outputs = contract.get("required_repo_outputs") or []
+        if repo_outputs:
+            lines.extend(["", "Required repo outputs:"])
+            for path in repo_outputs:
+                lines.append(f"- `{path}`")
     else:
         lines.append("- contract unavailable")
     lines.append("")
@@ -1497,6 +1680,35 @@ def apply_phase_reset(
     return None
 
 
+def earliest_repair_phase(task_path: Path, task_index: dict) -> int | None:
+    candidates: list[int] = []
+    runtime_dir = task_path / "context-pack" / "runtime"
+    for phase in task_index.get("phases", []):
+        phase_number = int(phase["phase"])
+        if phase.get("status") in {"error", "repair_required"}:
+            candidates.append(phase_number)
+        if (runtime_dir / f"phase{phase_number}-repair-packet.json").exists():
+            candidates.append(phase_number)
+    return min(candidates) if candidates else None
+
+
+def apply_repair_resume(root: Path, task_path: Path, dry_run: bool) -> dict | None:
+    index_path = task_path / "index.json"
+    task_index = read_json(index_path)
+    from_phase = earliest_repair_phase(task_path, task_index)
+    if from_phase is None:
+        print("No repair packet or failed phase found.")
+        return task_index if dry_run else None
+    reset_results = reset_phase_statuses(task_index, from_phase, now())
+    print_reset_summary(from_phase, reset_results, dry_run)
+    if dry_run:
+        return task_index
+    if reset_results:
+        write_json(index_path, task_index)
+        update_top_index(root, task_path.name, "pending")
+    return None
+
+
 def execute_phase(
     root: Path,
     task_path: Path,
@@ -1520,7 +1732,7 @@ def execute_phase(
     attempts = int(phase.get("attempts", 0) or 0)
     if not args.dry_run:
         append_progress(task_path, f"phase {phase_number}: preflight started")
-    if attempts <= 0 and not args.dry_run:
+    if attempts <= 0 and not args.dry_run and not getattr(args, "resume_repair", False):
         clear_repair_packet(task_path, phase_number)
 
     preflight_errors = preflight_phase(root, task_path, task_index, phase)
@@ -1538,7 +1750,7 @@ def execute_phase(
         task_path,
         task_index,
         phase,
-        include_repair_packet=attempts > 0,
+        include_repair_packet=attempts > 0 or phase_repair_packet_summary_path(task_path, phase_number).exists(),
     )
     prompt_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-prompt.md"
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1551,6 +1763,42 @@ def execute_phase(
 
     if args.dry_run:
         print(prompt_path)
+        return False
+
+    install_errors = run_install_preflight(root, task_path, args)
+    if install_errors:
+        message = "\n".join(install_errors)
+        write_last_error(task_path, phase_number, message)
+        task_index = read_json(index_path)
+        set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
+        write_json(index_path, task_index)
+        update_top_index(root, task_path.name, "error")
+        try:
+            contract = runtime_phase_contract(task_path, phase_number)
+            required_outputs = contract_outputs(phase, contract)
+            required_repo_outputs = contract_repo_outputs(contract)
+        except (FileNotFoundError, ValueError):
+            contract = None
+            required_outputs = []
+            required_repo_outputs = []
+        write_repair_packet(
+            task_path,
+            phase_number,
+            build_repair_packet(
+                task_path,
+                phase_number,
+                phase,
+                attempts,
+                "install_preflight",
+                message,
+                retryable=False,
+                contract=contract,
+                required_outputs=required_outputs,
+                required_repo_outputs=required_repo_outputs,
+            ),
+        )
+        print(message, file=sys.stderr)
+        args.failed = True
         return False
 
     if attempts >= max_attempts:
@@ -1605,9 +1853,11 @@ def execute_phase(
             try:
                 contract = runtime_phase_contract(task_path, phase_number)
                 required_outputs = contract_outputs(phase, contract)
+                required_repo_outputs = contract_repo_outputs(contract)
             except (FileNotFoundError, ValueError):
                 contract = None
                 required_outputs = []
+                required_repo_outputs = []
             if contract is not None:
                 contract_tamper_errors = verify_phase_contract_unchanged(task_path, phase_number, contract)
                 if contract_tamper_errors:
@@ -1635,6 +1885,7 @@ def execute_phase(
                     codex_exit_code=returncode,
                     stderr_path=stderr_path,
                     required_outputs=required_outputs,
+                    required_repo_outputs=required_repo_outputs,
                 ),
             )
             if attempt < max_attempts:
@@ -1672,6 +1923,7 @@ def execute_phase(
             args.failed = True
             return False
         required_outputs = contract_outputs(phase, contract)
+        required_repo_outputs = contract_repo_outputs(contract)
         command_results: list[dict[str, object]] = []
         for command in contract_ac_commands(phase, contract):
             ac_returncode, ac_output = run_shell(command, root, ac_timeout)
@@ -1701,6 +1953,7 @@ def execute_phase(
                         contract=contract,
                         command_results=command_results,
                         required_outputs=required_outputs,
+                        required_repo_outputs=required_repo_outputs,
                     ),
                 )
                 if attempt < max_attempts:
@@ -1734,7 +1987,42 @@ def execute_phase(
                         contract=contract,
                         command_results=command_results,
                         required_outputs=required_outputs,
+                        required_repo_outputs=required_repo_outputs,
                         missing_outputs=missing_outputs,
+                    ),
+                )
+                if attempt < max_attempts:
+                    prompt = build_prompt(root, task_path, read_json(index_path), phase)
+                    continue
+                task_index = read_json(index_path)
+                set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
+                write_json(index_path, task_index)
+                update_top_index(root, task_path.name, "error")
+                print(message, file=sys.stderr)
+                args.failed = True
+                return False
+
+            missing_repo_outputs = verify_required_repo_outputs(root, required_repo_outputs)
+            if missing_repo_outputs:
+                message = "Missing required repo outputs: " + ", ".join(missing_repo_outputs)
+                append_progress(task_path, f"phase {phase_number}: attempt {attempt} required repo outputs missing")
+                write_last_error(task_path, phase_number, message)
+                write_repair_packet(
+                    task_path,
+                    phase_number,
+                    build_repair_packet(
+                        task_path,
+                        phase_number,
+                        phase,
+                        attempt,
+                        "required_repo_outputs",
+                        message,
+                        retryable=attempt < max_attempts,
+                        contract=contract,
+                        command_results=command_results,
+                        required_outputs=required_outputs,
+                        required_repo_outputs=required_repo_outputs,
+                        missing_repo_outputs=missing_repo_outputs,
                     ),
                 )
                 if attempt < max_attempts:
@@ -1751,14 +2039,27 @@ def execute_phase(
             final_snapshot = worktree_snapshot(root)
             changed_files = phase_changed_paths(task_path, phase_start_snapshot, final_snapshot)
             evidence = build_evidence(
+                root,
                 phase_number,
                 attempt,
                 changed_files,
                 command_results,
                 required_outputs,
+                required_repo_outputs,
                 task_path,
             )
-            gate = build_gate(root, task_path, phase_number, contract, changed_files, command_results, required_outputs)
+            handoff_reasons = handoff_blockers(task_path, phase_number)
+            gate = build_gate(
+                root,
+                task_path,
+                phase_number,
+                contract,
+                changed_files,
+                command_results,
+                required_outputs,
+                required_repo_outputs,
+                handoff_reasons,
+            )
             reconciliation = write_runtime_review_artifacts(task_path, phase_number, contract, evidence, gate)
             if gate.get("status") != "passed":
                 reasons = list(gate.get("blocking_reasons") or [])
@@ -1779,6 +2080,7 @@ def execute_phase(
                         contract=contract,
                         command_results=command_results,
                         required_outputs=required_outputs,
+                        required_repo_outputs=required_repo_outputs,
                         changed_files=changed_files,
                         gate=gate,
                         reconciliation=reconciliation,
@@ -1796,6 +2098,7 @@ def execute_phase(
                 return False
 
             write_phase_result(
+                root=root,
                 task_path=task_path,
                 phase_number=phase_number,
                 attempt=attempt,
@@ -1803,6 +2106,7 @@ def execute_phase(
                 changed_files=changed_files,
                 command_results=command_results,
                 required_outputs=required_outputs,
+                required_repo_outputs=required_repo_outputs,
                 prompt_path=prompt_path,
                 output_path=output_path,
                 stderr_path=stderr_path,
@@ -1843,6 +2147,11 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Only build the next prompt.")
     parser.add_argument("--one", action="store_true", help="Run only one pending phase.")
     parser.add_argument(
+        "--resume-repair",
+        action="store_true",
+        help="Reset from the earliest failed phase or repair packet and rerun with the packet in context.",
+    )
+    parser.add_argument(
         "--from",
         dest="from_phase",
         type=non_negative_int,
@@ -1850,6 +2159,8 @@ def main() -> int:
     )
     parser.add_argument("--evaluate", action="store_true", help="Run fresh evaluation after all phases complete.")
     parser.add_argument("--eval-command", action="append", default=[], help="Evaluation command.")
+    parser.add_argument("--skip-install", action="store_true", help="Skip package-manager install preflight.")
+    parser.add_argument("--install-timeout", type=non_negative_int, default=600)
     parser.add_argument("--full-auto", action="store_true", help="Pass --full-auto to codex exec.")
     parser.add_argument(
         "--yolo",
@@ -1858,6 +2169,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     args.failed = False
+    args.install_preflight_done = False
 
     root = Path(args.root).resolve()
     install_errors = harness_install_errors(root)
@@ -1873,7 +2185,14 @@ def main() -> int:
         print(str(exc), file=sys.stderr)
         return 1
     try:
-        task_index_override = apply_phase_reset(root, task_path, args.from_phase, args.dry_run)
+        if args.from_phase is not None and args.resume_repair:
+            print("--from and --resume-repair cannot be used together.", file=sys.stderr)
+            return 1
+        task_index_override = (
+            apply_repair_resume(root, task_path, args.dry_run)
+            if args.resume_repair
+            else apply_phase_reset(root, task_path, args.from_phase, args.dry_run)
+        )
 
         while True:
             progressed = execute_phase(root, task_path, args, task_index_override)

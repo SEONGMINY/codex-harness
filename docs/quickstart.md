@@ -142,6 +142,12 @@ python3 scripts/harness/run-phases.py <task-dir> --full-auto --evaluate
 python3 scripts/harness/run-phases.py <task-dir> --from 1 --full-auto
 ```
 
+가장 이른 repair packet 또는 실패 phase부터 재개하려면:
+
+```bash
+python3 scripts/harness/run-phases.py <task-dir> --resume-repair --full-auto
+```
+
 ## 평가
 
 새 컨텍스트에서 평가합니다.

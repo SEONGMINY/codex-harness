@@ -65,6 +65,8 @@ cat tasks/<task-dir>/context-pack/runtime/phase<N>-repair-packet.md
 
 - 확인 명령 실패
 - 필수 산출물 누락
+- 구현 산출물(`required_repo_outputs`) 누락
+- handoff가 blocked/partial/skipped/workaround 상태를 보고함
 - 허용 범위 밖 파일 변경
 
 runner는 다시 시도할 수 있는 실패를 repair packet으로 정리합니다.
@@ -91,6 +93,7 @@ cat tasks/<task-dir>/context-pack/runtime/phase<N>-repair-packet.json
 - `failure.retryable`
 - `failed_commands`
 - `missing_outputs`
+- `missing_repo_outputs`
 - `failed_gate_checks`
 - `instruction_results_to_repair`
 
@@ -109,6 +112,12 @@ python3 scripts/harness/run-phases.py <task-dir> --from <N> --full-auto
 ```
 
 `--from`은 해당 phase부터 끝난 상태를 `pending`으로 되돌립니다.
+
+repair packet을 유지한 채 가장 이른 실패 지점부터 재개하려면:
+
+```bash
+python3 scripts/harness/run-phases.py <task-dir> --resume-repair --full-auto
+```
 
 ## 시도 예산이 소진됐습니다
 

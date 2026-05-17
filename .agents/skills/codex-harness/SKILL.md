@@ -129,10 +129,12 @@ Do not invoke `scripts/harness/start.py` from this mode.
 - Do not let Plan or Generate invent implementation-shaping decisions.
 - Do not stop after approval until mandatory docs, context-pack files, task indexes, and phase files exist.
 - Do not run Generate when phase files still contain placeholders or missing AC commands.
+- Do not run Generate for implementation phases unless the contract lists concrete `required_repo_outputs` in addition to the handoff.
+- Let `run-phases.py` perform its package-manager install preflight before phase Codex execution. If install fails, treat the phase as environment-blocked instead of weakening checks.
 - Do not manually mark phases or tasks completed.
 - Do not manually create runner-owned runtime proof files.
-- Do not claim Generate or Evaluate is complete unless the required runtime proof exists.
-- Do not bypass installed codex-harness hooks. If a hook blocks a tool call, fix the phase work or contract instead of weakening the hook.
+- Do not claim Generate or Evaluate is complete unless the required runtime proof exists, acceptance commands pass, required files exist, and the handoff does not report blocked, partial, skipped, or workaround status.
+- Do not bypass installed codex-harness hooks. If a hook blocks a path that should match `scope.allowed_paths`, report/fix the harness path rule. Do not weaken typecheck, shrink tsconfig includes, or remove validation to pass around the block.
 
 ## Stop Conditions
 
@@ -186,6 +188,8 @@ Generate is not complete unless these files exist:
 `phase<N>-gate.json` is runner-owned. It must pass before the phase can be marked completed.
 `phase<N>-repair-packet.*` is runner-owned. It summarizes retryable failures for the next attempt.
 
+For implementation phases, the contract must list repository files under `required_repo_outputs`; every entry must also be covered by `scope.allowed_paths`. The runner checks those files exist separately from task-relative `required_outputs`. A handoff that says blocked, partial, skipped, workaround, or equivalent Korean wording is a failed phase even if files and commands exist.
+
 Evaluate is not complete unless these files exist:
 
 - `tasks/<task-dir>/context-pack/runtime/evaluation-command-results.json`
@@ -234,6 +238,12 @@ Run pending phases:
 
 ```bash
 python3 scripts/harness/run-phases.py <task-dir> --full-auto --evaluate
+```
+
+Resume from the earliest failed phase or repair packet:
+
+```bash
+python3 scripts/harness/run-phases.py <task-dir> --resume-repair --full-auto
 ```
 
 Evaluate from fresh context:

@@ -167,6 +167,10 @@ Required sections:
   "required_outputs": [
     "context-pack/handoffs/phase0.md"
   ],
+  "required_repo_outputs": [
+    "scripts/harness/run-phases.py",
+    "scripts/harness/verify-task.py"
+  ],
   "forbidden": [
     {
       "rule": "Do not update `tasks/*/index.json`.",
@@ -225,6 +229,7 @@ Contract rules:
 - `missing_evidence_behavior` must explain how to handle unproven expected evidence.
 - `acceptance_commands` must contain executable commands only.
 - `required_outputs` must contain task-relative paths.
+- `required_repo_outputs` must contain repository-relative implementation files for non-documentation phases, and every entry must be covered by `scope.allowed_paths`.
 - `forbidden[*]` must include both `rule` and `reason`.
 - Phase files must not refer to prior chat context such as "as discussed" or "이전 대화".
 
@@ -236,6 +241,7 @@ Phase agents must:
 - write the required handoff
 - run useful local checks when possible
 - report what changed
+- report blocked or partial status honestly in the handoff when work could not be completed
 
 Phase agents must not:
 
@@ -246,6 +252,7 @@ Phase agents must not:
 - spawn subagents for Generate
 - commit unless the phase explicitly requires it
 - bypass codex-harness hooks when a hook blocks a tool call
+- weaken acceptance commands, tsconfig includes, or validation to work around a hook block
 
 ## Completion Proof
 
@@ -258,3 +265,4 @@ find tasks/<task-dir>/context-pack/handoffs -maxdepth 1 -type f | sort
 
 The runtime directory must include runner output files.
 If it does not, report failure even if `tasks/<task-dir>/index.json` says `completed`.
+If the handoff says blocked, partial, skipped, workaround, or equivalent Korean wording, the phase is not complete even when commands pass.

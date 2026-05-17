@@ -160,6 +160,9 @@ tasks/<task-dir>/phases/phase<N>.md
   "required_outputs": [
     "context-pack/handoffs/phase0.md"
   ],
+  "required_repo_outputs": [
+    "scripts/harness/run-phases.py"
+  ],
   "forbidden": [
     {
       "rule": "`tasks/*/index.json`을 직접 수정하지 않는다.",
@@ -191,6 +194,7 @@ tasks/<task-dir>/phases/phase<N>.md
 - `validation_budget.command_timeout_seconds`는 확인 명령 제한 시간입니다.
 - `acceptance_commands`는 실행 가능한 명령만 둡니다.
 - `required_outputs`는 task 경로 기준입니다.
+- `required_repo_outputs`는 저장소 루트 기준의 구현 산출물입니다. 문서/계획 phase에서는 생략할 수 있지만, 구현 phase에서는 구체적인 파일을 나열해야 하며 `scope.allowed_paths` 안에 있어야 합니다.
 - `forbidden[*]`는 `rule`과 `reason`을 모두 포함합니다.
 
 ## validation_budget
@@ -221,6 +225,8 @@ phase는 다음 phase를 위한 전달 메모를 남깁니다.
 ```text
 tasks/<task-dir>/context-pack/handoffs/phase<N>.md
 ```
+
+handoff가 `blocked`, `partial`, `skipped`, `workaround`, `우회`, `막힘`, `차단`, `부분 구현`처럼 미완료 상태를 말하면 runner gate가 실패합니다. 파일 존재와 확인 명령이 통과해도 완료로 보지 않습니다.
 
 권장 구조:
 

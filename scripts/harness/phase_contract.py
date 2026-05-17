@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,17 @@ GENERIC_FORBIDDEN_RULE_PATTERNS = [
         r"careful",
         r"be\s+careful",
     ]
+]
+HANDOFF_BLOCK_PATTERNS = [
+    re.compile(r"(?im)^\s*(?:status|state)\s*:\s*(blocked|partial|skipped|failed)\b"),
+    re.compile(r"(?im)^\s*##\s*(?:status|state)\s*\n+\s*(blocked|partial|skipped|failed)\b"),
+    re.compile(
+        r"(?i)\b("
+        r"blocked by|could not implement|unable to implement|not implemented|"
+        r"partial implementation|skipped|workaround|rejected paths?"
+        r")\b"
+    ),
+    re.compile(r"(막힘|막혔|차단|우회|구현하지 못|부분 구현|일부 구현)"),
 ]
 
 
@@ -137,6 +149,12 @@ def contract_required_outputs(contract: dict[str, Any] | None) -> list[str]:
     if not contract:
         return []
     return string_list(contract.get("required_outputs"))
+
+
+def contract_required_repo_outputs(contract: dict[str, Any] | None) -> list[str]:
+    if not contract:
+        return []
+    return string_list(contract.get("required_repo_outputs"))
 
 
 def contract_allowed_paths(contract: dict[str, Any] | None) -> list[str]:
@@ -333,6 +351,21 @@ def validate_phase_contract(
     else:
         errors.extend(_validate_path_list(root, task_path, outputs, "required_outputs", False, task_relative=True))
 
+    repo_outputs = contract.get("required_repo_outputs")
+    if repo_outputs is not None:
+        repo_output_values = contract_required_repo_outputs(contract)
+        if not repo_output_values:
+            errors.append("`required_repo_outputs` must be a non-empty list when present.")
+        else:
+            errors.extend(_validate_repo_relative_path_list(root, repo_outputs, "required_repo_outputs"))
+            allowed_paths = contract_allowed_paths(contract)
+            for raw_path in repo_output_values:
+                if not path_allowed(raw_path, allowed_paths):
+                    errors.append(
+                        "`required_repo_outputs` entries must also be covered by "
+                        f"`scope.allowed_paths`: {raw_path}"
+                    )
+
     forbidden = contract.get("forbidden")
     if not isinstance(forbidden, list) or not forbidden:
         errors.append("`forbidden` must be a non-empty list.")
@@ -434,6 +467,12 @@ def checklist_markdown(contract: dict[str, Any]) -> str:
     for raw_path in contract_required_outputs(contract):
         lines.append(f"- [ ] `{raw_path}`")
 
+    repo_outputs = contract_required_repo_outputs(contract)
+    if repo_outputs:
+        lines.extend(["", "## Required Repo Outputs", ""])
+        for raw_path in repo_outputs:
+            lines.append(f"- [ ] `{raw_path}`")
+
     lines.extend(["", "## Forbidden", ""])
     for item in contract.get("forbidden") or []:
         lines.append(f"- [ ] {item.get('rule')}")
@@ -447,6 +486,16 @@ def path_allowed(path: str, allowed_paths: list[str]) -> bool:
     normalized = path.strip("/")
     for raw_allowed in allowed_paths:
         allowed = raw_allowed.strip("/")
+        if not allowed:
+            continue
+        if _path_glob_match(normalized, allowed):
+            return True
+        if any(char in allowed for char in "*?["):
+            if allowed.endswith("/**"):
+                prefix = allowed[:-3].rstrip("/")
+                if normalized == prefix or normalized.startswith(prefix + "/"):
+                    return True
+            continue
         if normalized == allowed:
             return True
         if raw_allowed.endswith("/") and normalized.startswith(allowed + "/"):
@@ -454,6 +503,26 @@ def path_allowed(path: str, allowed_paths: list[str]) -> bool:
         if normalized.startswith(allowed + "/") and "." not in Path(allowed).name:
             return True
     return False
+
+
+def _path_glob_match(path: str, pattern: str) -> bool:
+    if not any(char in pattern for char in "*?["):
+        return False
+
+    def match_parts(path_parts: list[str], pattern_parts: list[str]) -> bool:
+        if not pattern_parts:
+            return not path_parts
+        head = pattern_parts[0]
+        tail = pattern_parts[1:]
+        if head == "**":
+            return match_parts(path_parts, tail) or (
+                bool(path_parts) and match_parts(path_parts[1:], pattern_parts)
+            )
+        if not path_parts:
+            return False
+        return fnmatchcase(path_parts[0], head) and match_parts(path_parts[1:], tail)
+
+    return match_parts(path.split("/") if path else [], pattern.split("/") if pattern else [])
 
 
 def scope_violations(
@@ -468,3 +537,12 @@ def scope_violations(
         if not path_allowed(path, allowed_paths):
             violations.append(path)
     return sorted(violations)
+
+
+def handoff_block_reasons(text: str) -> list[str]:
+    reasons: list[str] = []
+    for pattern in HANDOFF_BLOCK_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            reasons.append(f"handoff matched blocked/partial marker: {match.group(0).strip()}")
+    return reasons
