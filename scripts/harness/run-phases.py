@@ -783,6 +783,21 @@ def ignored_gate_paths(task_path: Path, required_outputs: list[str]) -> list[str
     ]
 
 
+def attempt_scope_violations(
+    contract: dict | None,
+    task_path: Path,
+    changed_files: list[str],
+    required_outputs: list[str],
+) -> list[str]:
+    if contract is None:
+        return []
+    return scope_violations(
+        changed_files,
+        contract_allowed_paths(contract),
+        ignored_gate_paths(task_path, required_outputs),
+    )
+
+
 def set_phase_status(task_index: dict, phase_number: int, status: str, **fields: object) -> None:
     for phase in task_index["phases"]:
         if int(phase["phase"]) == phase_number:
@@ -1372,6 +1387,18 @@ def failed_gate_checks(gate: dict[str, object] | None) -> list[dict[str, object]
     ]
 
 
+def gate_scope_violations(gate: dict[str, object] | None) -> list[str]:
+    if not gate:
+        return []
+    return [
+        violation
+        for check in gate.get("checks", [])
+        if isinstance(check, dict) and check.get("name") == "scope"
+        for violation in check.get("violations", [])
+        if isinstance(violation, str)
+    ]
+
+
 def failed_instruction_results(reconciliation: dict[str, object] | None) -> list[dict[str, object]]:
     if not reconciliation:
         return []
@@ -1435,6 +1462,7 @@ def build_repair_packet(
     required_repo_outputs: list[str] | None = None,
     missing_outputs: list[str] | None = None,
     missing_repo_outputs: list[str] | None = None,
+    contaminating_changes: list[str] | None = None,
     changed_files: list[str] | None = None,
     gate: dict[str, object] | None = None,
     reconciliation: dict[str, object] | None = None,
@@ -1468,6 +1496,7 @@ def build_repair_packet(
         "required_repo_outputs": required_repo_output_results(task_path.parent.parent, repo_outputs),
         "missing_outputs": missing_outputs or [],
         "missing_repo_outputs": missing_repo_outputs or [],
+        "contaminating_changes": contaminating_changes or [],
         "changed_files": changed_files or [],
         "failed_gate_checks": failed_gate_checks(gate),
         "blocking_reasons": list(gate.get("blocking_reasons") or []) if gate else [],
@@ -1526,6 +1555,16 @@ def repair_packet_markdown(packet: dict[str, object]) -> str:
     lines.extend(["", "## Missing Repo Outputs", ""])
     if missing_repo_outputs:
         for path in missing_repo_outputs:
+            lines.append(f"- `{path}`")
+    else:
+        lines.append("- none")
+
+    contaminating_changes = packet.get("contaminating_changes") or []
+    lines.extend(["", "## Cleanup Required", ""])
+    if contaminating_changes:
+        lines.append("These out-of-scope changes were observed in the failed attempt.")
+        lines.append("The runner will not auto-retry this phase until they are reviewed or cleaned up.")
+        for path in contaminating_changes:
             lines.append(f"- `{path}`")
     else:
         lines.append("- none")
@@ -1815,7 +1854,6 @@ def execute_phase(
         args.failed = True
         return False
 
-    phase_start_snapshot: dict[str, str] | None = None
     for attempt in range(attempts + 1, max_attempts + 1):
         append_progress(task_path, f"phase {phase_number}: attempt {attempt} started")
         task_index = read_json(index_path)
@@ -1831,9 +1869,8 @@ def execute_phase(
         output_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-output-attempt{attempt}.jsonl"
         stderr_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-stderr-attempt{attempt}.txt"
         clear_attempt_artifacts(task_path, phase_number)
-        if phase_start_snapshot is None:
-            phase_start_snapshot = worktree_snapshot(root)
         prompt_path.write_text(prompt, encoding="utf-8")
+        attempt_start_snapshot = worktree_snapshot(root)
         returncode = run_codex(
             root,
             task_path,
@@ -1849,7 +1886,6 @@ def execute_phase(
         if returncode != 0:
             message = f"codex exec failed with exit code {returncode}. See {stderr_path}."
             append_progress(task_path, f"phase {phase_number}: attempt {attempt} codex failed")
-            write_last_error(task_path, phase_number, message)
             try:
                 contract = runtime_phase_contract(task_path, phase_number)
                 required_outputs = contract_outputs(phase, contract)
@@ -1858,6 +1894,20 @@ def execute_phase(
                 contract = None
                 required_outputs = []
                 required_repo_outputs = []
+            failed_snapshot = worktree_snapshot(root)
+            changed_files = phase_changed_paths(task_path, attempt_start_snapshot, failed_snapshot)
+            contaminating_changes = attempt_scope_violations(
+                contract,
+                task_path,
+                changed_files,
+                required_outputs,
+            )
+            retryable = attempt < max_attempts and not contaminating_changes
+            if contaminating_changes:
+                message += (
+                    " Out-of-scope changes require cleanup before retry: "
+                    + ", ".join(contaminating_changes)
+                )
             if contract is not None:
                 contract_tamper_errors = verify_phase_contract_unchanged(task_path, phase_number, contract)
                 if contract_tamper_errors:
@@ -1870,6 +1920,7 @@ def execute_phase(
                     print(message, file=sys.stderr)
                     args.failed = True
                     return False
+            write_last_error(task_path, phase_number, message)
             write_repair_packet(
                 task_path,
                 phase_number,
@@ -1880,15 +1931,17 @@ def execute_phase(
                     attempt,
                     "codex_exec",
                     message,
-                    retryable=attempt < max_attempts,
+                    retryable=retryable,
                     contract=contract,
                     codex_exit_code=returncode,
                     stderr_path=stderr_path,
                     required_outputs=required_outputs,
                     required_repo_outputs=required_repo_outputs,
+                    contaminating_changes=contaminating_changes,
+                    changed_files=changed_files,
                 ),
             )
-            if attempt < max_attempts:
+            if retryable:
                 prompt = build_prompt(root, task_path, read_json(index_path), phase)
                 continue
             task_index = read_json(index_path)
@@ -1937,8 +1990,22 @@ def execute_phase(
             if ac_returncode != 0:
                 message = f"AC command failed: {command}\n\n{ac_output}"
                 append_progress(task_path, f"phase {phase_number}: attempt {attempt} acceptance command failed")
-                write_last_error(task_path, phase_number, message)
                 write_ac_results(task_path, phase_number, attempt, command_results)
+                failed_snapshot = worktree_snapshot(root)
+                changed_files = phase_changed_paths(task_path, attempt_start_snapshot, failed_snapshot)
+                contaminating_changes = attempt_scope_violations(
+                    contract,
+                    task_path,
+                    changed_files,
+                    required_outputs,
+                )
+                retryable = attempt < max_attempts and not contaminating_changes
+                if contaminating_changes:
+                    message += (
+                        "\n\nOut-of-scope changes require cleanup before retry: "
+                        + ", ".join(contaminating_changes)
+                    )
+                write_last_error(task_path, phase_number, message)
                 write_repair_packet(
                     task_path,
                     phase_number,
@@ -1949,14 +2016,16 @@ def execute_phase(
                         attempt,
                         "acceptance_commands",
                         message,
-                        retryable=attempt < max_attempts,
+                        retryable=retryable,
                         contract=contract,
                         command_results=command_results,
                         required_outputs=required_outputs,
                         required_repo_outputs=required_repo_outputs,
+                        contaminating_changes=contaminating_changes,
+                        changed_files=changed_files,
                     ),
                 )
-                if attempt < max_attempts:
+                if retryable:
                     prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     break
                 task_index = read_json(index_path)
@@ -1972,6 +2041,20 @@ def execute_phase(
             if missing_outputs:
                 message = "Missing required outputs: " + ", ".join(missing_outputs)
                 append_progress(task_path, f"phase {phase_number}: attempt {attempt} required outputs missing")
+                failed_snapshot = worktree_snapshot(root)
+                changed_files = phase_changed_paths(task_path, attempt_start_snapshot, failed_snapshot)
+                contaminating_changes = attempt_scope_violations(
+                    contract,
+                    task_path,
+                    changed_files,
+                    required_outputs,
+                )
+                retryable = attempt < max_attempts and not contaminating_changes
+                if contaminating_changes:
+                    message += (
+                        " Out-of-scope changes require cleanup before retry: "
+                        + ", ".join(contaminating_changes)
+                    )
                 write_last_error(task_path, phase_number, message)
                 write_repair_packet(
                     task_path,
@@ -1983,15 +2066,17 @@ def execute_phase(
                         attempt,
                         "required_outputs",
                         message,
-                        retryable=attempt < max_attempts,
+                        retryable=retryable,
                         contract=contract,
                         command_results=command_results,
                         required_outputs=required_outputs,
                         required_repo_outputs=required_repo_outputs,
                         missing_outputs=missing_outputs,
+                        contaminating_changes=contaminating_changes,
+                        changed_files=changed_files,
                     ),
                 )
-                if attempt < max_attempts:
+                if retryable:
                     prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     continue
                 task_index = read_json(index_path)
@@ -2006,6 +2091,20 @@ def execute_phase(
             if missing_repo_outputs:
                 message = "Missing required repo outputs: " + ", ".join(missing_repo_outputs)
                 append_progress(task_path, f"phase {phase_number}: attempt {attempt} required repo outputs missing")
+                failed_snapshot = worktree_snapshot(root)
+                changed_files = phase_changed_paths(task_path, attempt_start_snapshot, failed_snapshot)
+                contaminating_changes = attempt_scope_violations(
+                    contract,
+                    task_path,
+                    changed_files,
+                    required_outputs,
+                )
+                retryable = attempt < max_attempts and not contaminating_changes
+                if contaminating_changes:
+                    message += (
+                        " Out-of-scope changes require cleanup before retry: "
+                        + ", ".join(contaminating_changes)
+                    )
                 write_last_error(task_path, phase_number, message)
                 write_repair_packet(
                     task_path,
@@ -2017,15 +2116,17 @@ def execute_phase(
                         attempt,
                         "required_repo_outputs",
                         message,
-                        retryable=attempt < max_attempts,
+                        retryable=retryable,
                         contract=contract,
                         command_results=command_results,
                         required_outputs=required_outputs,
                         required_repo_outputs=required_repo_outputs,
                         missing_repo_outputs=missing_repo_outputs,
+                        contaminating_changes=contaminating_changes,
+                        changed_files=changed_files,
                     ),
                 )
-                if attempt < max_attempts:
+                if retryable:
                     prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     continue
                 task_index = read_json(index_path)
@@ -2037,7 +2138,7 @@ def execute_phase(
                 return False
 
             final_snapshot = worktree_snapshot(root)
-            changed_files = phase_changed_paths(task_path, phase_start_snapshot, final_snapshot)
+            changed_files = phase_changed_paths(task_path, attempt_start_snapshot, final_snapshot)
             evidence = build_evidence(
                 root,
                 phase_number,
@@ -2064,6 +2165,13 @@ def execute_phase(
             if gate.get("status") != "passed":
                 reasons = list(gate.get("blocking_reasons") or [])
                 message = "Phase gate failed: " + "; ".join(reasons)
+                contaminating_changes = gate_scope_violations(gate)
+                retryable = attempt < max_attempts and not contaminating_changes
+                if contaminating_changes:
+                    message += (
+                        " Cleanup required for out-of-scope changes: "
+                        + ", ".join(contaminating_changes)
+                    )
                 append_progress(task_path, f"phase {phase_number}: attempt {attempt} gate failed")
                 write_last_error(task_path, phase_number, message)
                 write_repair_packet(
@@ -2076,17 +2184,18 @@ def execute_phase(
                         attempt,
                         "gate",
                         message,
-                        retryable=attempt < max_attempts,
+                        retryable=retryable,
                         contract=contract,
                         command_results=command_results,
                         required_outputs=required_outputs,
                         required_repo_outputs=required_repo_outputs,
+                        contaminating_changes=contaminating_changes,
                         changed_files=changed_files,
                         gate=gate,
                         reconciliation=reconciliation,
                     ),
                 )
-                if attempt < max_attempts:
+                if retryable:
                     prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     continue
                 task_index = read_json(index_path)

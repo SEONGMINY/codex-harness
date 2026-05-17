@@ -282,6 +282,43 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(gate["status"], "failed", gate)
             self.assertIn(f"tasks/{task_path.name}/index.json", scope_check["violations"])
 
+    def test_phase_changed_paths_uses_attempt_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            _, task_path = self.make_task(tmp)
+            before = {
+                "docs/product/dependency-policy.md": "existing-contamination",
+            }
+            after = {
+                "docs/product/dependency-policy.md": "existing-contamination",
+                "tasks/demo/context-pack/handoffs/phase0.md": "new-handoff",
+            }
+
+            self.assertEqual(
+                RUN_PHASES.phase_changed_paths(task_path, before, after),
+                ["tasks/demo/context-pack/handoffs/phase0.md"],
+            )
+
+    def test_repair_packet_records_cleanup_required_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            _, task_path = self.make_task(tmp)
+            packet = RUN_PHASES.build_repair_packet(
+                task_path,
+                0,
+                {"name": "docs"},
+                1,
+                "gate",
+                "Phase gate failed.",
+                retryable=False,
+                contaminating_changes=["docs/product/dependency-policy.md"],
+            )
+            markdown = RUN_PHASES.repair_packet_markdown(packet)
+
+            self.assertEqual(packet["contaminating_changes"], ["docs/product/dependency-policy.md"])
+            self.assertIn("## Cleanup Required", markdown)
+            self.assertIn("docs/product/dependency-policy.md", markdown)
+
     def test_gate_fails_when_required_repo_output_missing(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -479,6 +516,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                         "handoff\\n",
                         encoding="utf-8",
                     )
+                    Path.cwd().joinpath("outside.txt").write_text("outside\\n", encoding="utf-8")
                     raise SystemExit(0)
                     """
                 ),
@@ -504,6 +542,142 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 )
             )
             self.assertFalse(repair_packet["failure"]["retryable"])
+            self.assertEqual(repair_packet["contaminating_changes"], ["outside.txt"])
+            last_error = (
+                task_path / "context-pack" / "runtime" / "phase0-last-error.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn("outside.txt", last_error)
+
+    def test_execute_phase_stops_retry_when_scope_cleanup_is_required(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "repo"
+            task_path = root / "tasks" / "demo"
+            (root / "scripts" / "harness").mkdir(parents=True)
+            (task_path / "phases").mkdir(parents=True)
+            (task_path / "context-pack" / "runtime").mkdir(parents=True)
+            (task_path / "context-pack" / "handoffs").mkdir(parents=True)
+            for static_file in RUN_PHASES.MANDATORY_STATIC_FILES:
+                target = task_path / "context-pack" / "static" / static_file
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(self.static_content(static_file), encoding="utf-8")
+            docs = []
+            for index in range(5):
+                doc_path = root / f"doc{index}.md"
+                doc_path.write_text("doc\n", encoding="utf-8")
+                docs.append(doc_path.name)
+            subprocess_result = subprocess.run(
+                ["git", "init"],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(subprocess_result.returncode, 0, subprocess_result.stderr)
+
+            contract = {
+                "phase": 0,
+                "name": "demo",
+                "read_first": {"docs": docs, "previous_outputs": []},
+                "scope": {"layer": "docs", "allowed_paths": ["src"]},
+                "interfaces": [],
+                "decision_refs": ["D-001"],
+                "architecture_refs": ["A-001"],
+                "dependency_policy": {
+                    "new_dependencies": "forbidden",
+                    "approved_new_dependencies": [],
+                    "approved_dependency_manifest_changes": [],
+                },
+                "instructions": [
+                    {
+                        "id": "P0-001",
+                        "task": "Write the handoff.",
+                        "expected_evidence": ["context-pack/handoffs/phase0.md"],
+                    }
+                ],
+                "success_criteria": ["The handoff exists."],
+                "stop_rules": ["Stop if required context is missing."],
+                "fallback_behavior": {
+                    "if_blocked": "Write the blocker to the handoff.",
+                    "if_tests_fail": "Fix failures inside allowed_paths.",
+                },
+                "validation_budget": {
+                    "max_attempts": 2,
+                    "command_timeout_seconds": 600,
+                },
+                "missing_evidence_behavior": "Treat missing evidence as unresolved.",
+                "acceptance_commands": ["true"],
+                "required_outputs": ["context-pack/handoffs/phase0.md"],
+                "forbidden": [
+                    {
+                        "rule": "Do not update task status.",
+                        "reason": "The runner owns status.",
+                    }
+                ],
+            }
+            (task_path / "phases" / "phase0.md").write_text(
+                "# Phase 0: demo\n\n## Contract\n\n```json\n"
+                + json.dumps(contract, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "docs": docs,
+                        "common_docs": [],
+                        "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            attempt_counter = tmp / "attempts.txt"
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    f"""
+                    sys.stdin.read()
+                    from pathlib import Path
+                    counter = Path({str(attempt_counter)!r})
+                    count = int(counter.read_text(encoding="utf-8")) if counter.exists() else 0
+                    counter.write_text(str(count + 1), encoding="utf-8")
+                    Path.cwd().joinpath("tasks/demo/context-pack/handoffs/phase0.md").write_text(
+                        "handoff\\n",
+                        encoding="utf-8",
+                    )
+                    Path.cwd().joinpath("outside.txt").write_text("outside\\n", encoding="utf-8")
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=3,
+                ac_timeout=600,
+                codex_bin=str(fake),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+            )
+
+            self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(task_index["phases"][0]["attempts"], 1)
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertEqual(attempt_counter.read_text(encoding="utf-8"), "1")
+            repair_packet = json.loads(
+                (task_path / "context-pack" / "runtime" / "phase0-repair-packet.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(repair_packet["failure"]["type"], "gate")
+            self.assertFalse(repair_packet["failure"]["retryable"])
+            self.assertEqual(repair_packet["contaminating_changes"], ["outside.txt"])
+            self.assertIn("outside.txt", repair_packet["failure"]["message"])
 
     def test_execute_phase_marks_error_when_attempt_budget_already_exhausted(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

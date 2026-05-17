@@ -22,6 +22,8 @@ Harness `codex exec` calls use structured output schemas for launcher, phase, an
 
 When a phase fails a retryable check, the runner writes a repair packet under `context-pack/runtime/` and retries the same phase with that packet in context. The phase agent repairs only the listed failures; it does not decide the next phase.
 
+If a repair packet lists `contaminating_changes`, the runner observed changes outside `scope.allowed_paths` for that attempt. Treat this as cleanup-required: review or clean those paths, or fix the phase contract scope, before resuming. Do not auto-retry the same phase against a contaminated worktree.
+
 If repository hooks are installed, `scripts/harness/run-phases.py` passes the active task, phase, and runtime contract through `CODEX_HARNESS_*` environment variables. Required hooks then use that contract to block obvious phase-scope violations and to continue Codex when required outputs are missing.
 
 ## Installation Check
@@ -186,7 +188,7 @@ Generate is not complete unless these files exist:
 
 `phase<N>-result.json` is runner-owned. It contains measured facts: exit codes, changed files, required output status, and artifact paths. Phase agents write handoffs, not result JSON.
 `phase<N>-gate.json` is runner-owned. It must pass before the phase can be marked completed.
-`phase<N>-repair-packet.*` is runner-owned. It summarizes retryable failures for the next attempt.
+`phase<N>-repair-packet.*` is runner-owned. It summarizes retryable failures for the next attempt. If it contains `contaminating_changes`, the failure is not auto-retryable until the paths are reviewed, cleaned up, or explicitly brought into phase scope.
 
 For implementation phases, the contract must list repository files under `required_repo_outputs`; every entry must also be covered by `scope.allowed_paths`. The runner checks those files exist separately from task-relative `required_outputs`. A handoff that says blocked, partial, skipped, workaround, or equivalent Korean wording is a failed phase even if files and commands exist.
 

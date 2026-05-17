@@ -147,9 +147,13 @@ repair packet에는 다음이 들어갑니다.
 - 실패한 명령
 - 빠진 산출물
 - 빠진 구현 산출물
+- 자동 재시도를 막는 허용 범위 밖 변경(`contaminating_changes`)
 - 범위 위반
 - 다시 확인할 지시사항
 - contract 요약
+
+`contaminating_changes`가 비어 있지 않으면 runner는 해당 phase를 자동 재시도하지 않습니다.
+작업트리 오염 여부나 contract scope를 사람이 확인한 뒤 `--resume-repair` 또는 `--from <N>`으로 다시 실행해야 합니다.
 
 ## evaluation 실행 기록
 

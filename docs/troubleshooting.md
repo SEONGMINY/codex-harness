@@ -94,8 +94,26 @@ cat tasks/<task-dir>/context-pack/runtime/phase<N>-repair-packet.json
 - `failed_commands`
 - `missing_outputs`
 - `missing_repo_outputs`
+- `contaminating_changes`
 - `failed_gate_checks`
 - `instruction_results_to_repair`
+
+## Cleanup Required가 표시됩니다
+
+`phase<N>-repair-packet.md`의 `Cleanup Required` 섹션에 경로가 있으면 runner가 자동 재시도하지 않습니다.
+
+의미:
+
+- 해당 attempt에서 `scope.allowed_paths` 밖 변경이 관측됐습니다.
+- 같은 phase를 바로 재시도하면 오염된 작업트리를 기준으로 판단할 수 있습니다.
+- runner는 repair packet을 남기고 phase를 `error`로 멈춥니다.
+
+해결:
+
+1. `contaminating_changes` 경로가 phase scope에 포함돼야 하는지 확인합니다.
+2. scope가 맞다면 phase contract의 `scope.allowed_paths`와 필요 시 `required_repo_outputs`를 고칩니다.
+3. scope가 틀렸다면 해당 변경을 사람이 검토하거나 정리합니다.
+4. 정리 후 `--resume-repair` 또는 `--from <N>`으로 다시 실행합니다.
 
 ## phase가 error입니다
 
