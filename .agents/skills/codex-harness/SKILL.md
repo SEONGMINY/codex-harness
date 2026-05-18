@@ -99,6 +99,10 @@ Use this mode when the prompt or environment says this is an isolated harness se
 
 Do not invoke `.codex/harness/scripts/start.py` from this mode.
 
+When docs are not approved yet, the launcher owns files under `.codex/harness/sessions`.
+Do not use shell commands or file-edit tools to create `questions.md` or `docs-approval-request.md`.
+Return their Markdown content in the structured final output's `artifact.content`; the launcher writes the file.
+
 ## Workflow
 
 1. Ensure the harness is installed in the current repository.

@@ -57,7 +57,7 @@ class StartLauncherTest(unittest.TestCase):
         self.assertTrue(result_paths)
         return json.loads(result_paths[-1].read_text(encoding="utf-8"))
 
-    def test_questions_file_sets_questions_needed_status(self) -> None:
+    def test_questions_artifact_in_final_output_sets_questions_needed_status(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             repo = self.make_repo(tmp)
@@ -68,10 +68,15 @@ class StartLauncherTest(unittest.TestCase):
                     args = sys.argv
                     assert "--output-schema" in args, args
                     assert args[args.index("--output-schema") + 1].endswith("launcher-final.schema.json")
+                    prompt = sys.stdin.read()
+                    assert "return missing decisions through `artifact.content`" in prompt
+                    assert "Before docs approval, write missing decisions" not in prompt
                     last_message = Path(args[args.index("--output-last-message") + 1])
                     last_message.parent.mkdir(parents=True, exist_ok=True)
-                    last_message.write_text("questions written\\n", encoding="utf-8")
-                    (last_message.parent / "questions.md").write_text("Q?\\n", encoding="utf-8")
+                    last_message.write_text(
+                        '{"status":"questions_needed","task_path":null,"files_to_read_next":[".codex/harness/sessions/run/questions.md"],"blockers":[],"artifact":{"path":".codex/harness/sessions/run/questions.md","content":"Q?\\\\n"}}\\n',
+                        encoding="utf-8",
+                    )
                     print('{"type":"message","message":"fake"}')
                     raise SystemExit(0)
                     """
@@ -97,8 +102,10 @@ class StartLauncherTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["status"], "questions_needed")
+            questions_path = Path(repo, launcher_result["questions"])
+            self.assertEqual(questions_path.read_text(encoding="utf-8"), "Q?\n")
 
-    def test_docs_approval_request_sets_docs_approval_needed_status(self) -> None:
+    def test_docs_approval_artifact_in_final_output_sets_docs_approval_needed_status(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             repo = self.make_repo(tmp)
@@ -109,9 +116,8 @@ class StartLauncherTest(unittest.TestCase):
                     args = sys.argv
                     last_message = Path(args[args.index("--output-last-message") + 1])
                     last_message.parent.mkdir(parents=True, exist_ok=True)
-                    last_message.write_text("approval requested\\n", encoding="utf-8")
-                    (last_message.parent / "docs-approval-request.md").write_text(
-                        "Approve docs?\\n",
+                    last_message.write_text(
+                        '{"status":"docs_approval_needed","task_path":null,"files_to_read_next":[".codex/harness/sessions/run/docs-approval-request.md"],"blockers":[],"artifact":{"path":".codex/harness/sessions/run/docs-approval-request.md","content":"Approve docs?\\\\n"}}\\n',
                         encoding="utf-8",
                     )
                     print('{"type":"message","message":"fake"}')
@@ -139,6 +145,90 @@ class StartLauncherTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["status"], "docs_approval_needed")
+            approval_path = Path(repo, launcher_result["docs_approval_request"])
+            self.assertEqual(approval_path.read_text(encoding="utf-8"), "Approve docs?\n")
+
+    def test_blocked_final_output_sets_blocked_status(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    args = sys.argv
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    last_message.write_text(
+                        '{"status":"blocked","task_path":null,"files_to_read_next":[],"blockers":["cannot proceed"],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "blocked request",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "blocked")
+
+    def test_planned_without_task_path_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    args = sys.argv
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    last_message.write_text(
+                        '{"status":"planned","task_path":null,"files_to_read_next":[],"blockers":[],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "invalid planned request",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "blocked")
 
     def test_pre_approval_changes_outside_run_dir_fail_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

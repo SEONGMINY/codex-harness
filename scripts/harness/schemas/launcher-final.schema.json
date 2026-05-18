@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["status", "files_to_read_next"],
+  "required": ["status", "task_path", "files_to_read_next", "blockers", "artifact"],
   "properties": {
     "status": {
       "type": "string",
@@ -27,8 +27,20 @@
       "type": "array",
       "items": {
         "type": "string"
-      },
-      "default": []
+      }
+    },
+    "artifact": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["path", "content"],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        }
+      }
     }
   }
 }

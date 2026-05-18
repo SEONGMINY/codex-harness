@@ -53,7 +53,7 @@ Clarify passes only when these are explicit or intentionally not applicable:
 
 If any item is missing, do one of these:
 
-- write one targeted question to `questions.md`
+- return one targeted question as the launcher structured final output artifact
 - write a blocking item to `open-decisions.json` after task context exists
 
 Do not decide these automatically. You may propose a default only when it is grounded in an explicit existing repository pattern, and the user must approve it before Plan.
@@ -62,8 +62,8 @@ Local implementation choices may stay inside a phase when they do not add depend
 
 Clarify should produce only one of these outcomes:
 
-- `questions_needed`: `questions.md` exists.
-- `docs_approval_needed`: Clarify Review passed and `docs-approval-request.md` exists.
+- `questions_needed`: `questions.md` exists after the launcher materializes the structured final output artifact.
+- `docs_approval_needed`: Clarify Review passed and `docs-approval-request.md` exists after the launcher materializes the structured final output artifact.
 - `blocked`: the request cannot be made safe or coherent.
 
 Do not create docs until the user approves.

@@ -188,6 +188,13 @@ Produce exactly one of these:
 
 Do not create task docs, task indexes, context-pack files, phase files, or implementation changes.
 Do not run Context Gathering, Plan, Generate, Evaluate, `verify-task.py`, or `run-phases.py`.
+
+Pre-approval state artifacts live under `.codex/harness/sessions`, and the launcher owns writing them.
+Do not use shell commands or file-edit tools to create `questions.md` or `docs-approval-request.md`.
+Instead, return the requested structured final output with:
+
+- `artifact.path`: `{rel(run_dir / "questions.md", root)}` for `questions_needed`, or `{rel(run_dir / "docs-approval-request.md", root)}` for `docs_approval_needed`.
+- `artifact.content`: the full Markdown content for that artifact.
 """
         generate_contract = """## Generate
 
@@ -213,7 +220,7 @@ Decision rule:
 - Do not ask the parent chat to reason through this task.
 - Do not invoke `.codex/harness/scripts/start.py` again.
 - If a Plan-impacting decision is not approved, do not plan.
-- Before docs approval, write missing decisions to `questions.md`.
+- Before docs approval, return missing decisions through `artifact.content` for `questions.md`.
 - After task context exists, write unresolved blocking decisions to `open-decisions.json`.
 - Store approved decisions in `decisions.json`, `architecture.json`, and `dependency-policy.json`.
 - Keep the response short. Files and runner proof carry the detail.
@@ -243,6 +250,9 @@ Decision rule:
 
 Return only the structured final output requested by the active output schema.
 Use status: questions_needed | docs_approval_needed | planned | generated | blocked.
+Always include `task_path`, `files_to_read_next`, `blockers`, and `artifact`.
+Use `task_path: null` unless a task directory exists.
+Use `artifact: null` unless returning `questions_needed` or `docs_approval_needed`.
 """
 
 
@@ -372,6 +382,65 @@ def launcher_status(run_dir: Path, returncode: int | None, dry_run: bool) -> str
     return "completed"
 
 
+def parse_last_message(path: Path) -> dict[str, object] | None:
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def materialize_preapproval_artifact(run_dir: Path, final: dict[str, object] | None) -> None:
+    if final is None:
+        return
+    status = final.get("status")
+    expected_name = {
+        "questions_needed": "questions.md",
+        "docs_approval_needed": "docs-approval-request.md",
+    }.get(status)
+    if expected_name is None:
+        return
+    target = run_dir / expected_name
+    if target.exists():
+        return
+    artifact = final.get("artifact")
+    if not isinstance(artifact, dict):
+        return
+    content = artifact.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return
+    target.write_text(content.rstrip() + "\n", encoding="utf-8")
+
+
+def launcher_status_from_final(root: Path, run_dir: Path, final: dict[str, object] | None) -> str | None:
+    if final is None:
+        return None
+    status = final.get("status")
+    if status not in {"questions_needed", "docs_approval_needed", "planned", "generated", "blocked"}:
+        return None
+    if status == "questions_needed":
+        return "questions_needed" if (run_dir / "questions.md").exists() else "blocked"
+    if status == "docs_approval_needed":
+        return "docs_approval_needed" if (run_dir / "docs-approval-request.md").exists() else "blocked"
+    if status in {"planned", "generated"}:
+        task_path = final.get("task_path")
+        if not isinstance(task_path, str) or not task_path.strip():
+            return "blocked"
+        resolved = (root / task_path).resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            return "blocked"
+        return status if resolved.exists() else "blocked"
+    return "blocked"
+
+
 def create_run_dir(root: Path, request: str) -> Path:
     base = root / ".codex" / "harness" / "sessions" / f"{now_id()}-{slugify(request)}"
     for suffix in ["", *[f"-{index}" for index in range(1, 100)]]:
@@ -474,6 +543,9 @@ def main() -> int:
     if not args.dry_run:
         returncode = run_codex(root, prompt, run_dir, args)
 
+    final_output = parse_last_message(run_dir / "last-message.md")
+    materialize_preapproval_artifact(run_dir, final_output)
+
     if before_snapshot is not None:
         after_snapshot = worktree_snapshot(root)
         protocol_violations = [
@@ -491,10 +563,11 @@ def main() -> int:
                 },
             )
 
+    final_status = launcher_status_from_final(root, run_dir, final_output)
     result = {
         "status": "protocol_violation"
         if protocol_violations
-        else launcher_status(run_dir, returncode, args.dry_run),
+        else (final_status or launcher_status(run_dir, returncode, args.dry_run)),
         "returncode": returncode,
         "run_dir": rel(run_dir, root),
         "request": rel(request_path, root),
