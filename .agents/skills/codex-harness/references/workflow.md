@@ -181,8 +181,8 @@ Rules:
 Before stopping after Plan, run:
 
 ```bash
-python3 scripts/harness/verify-task.py <task-dir>
-python3 scripts/harness/run-phases.py <task-dir> --dry-run
+python3 .codex/harness/scripts/verify-task.py <task-dir>
+python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run
 ```
 
 Fix any preflight failure.
@@ -254,7 +254,7 @@ Hooks are guardrails. Runner proof remains the source of truth.
 
 If runtime proof is absent, the orchestrator must report failure or blocked status.
 It must not manually mark phases complete.
-Use `scripts/harness/verify-task.py <task-dir>` as the source of truth for artifact validity.
+Use `.codex/harness/scripts/verify-task.py <task-dir>` as the source of truth for artifact validity.
 
 ## Evaluate
 
@@ -270,7 +270,7 @@ Minimum checks:
 
 Evaluation should not trust a phase agent's success claim.
 
-When Generate completes, run `scripts/harness/evaluate-task.py` with the task's evaluation commands unless the user explicitly asks not to.
+When Generate completes, run `.codex/harness/scripts/evaluate-task.py` with the task's evaluation commands unless the user explicitly asks not to.
 
 Evaluate completion requires runtime proof:
 
@@ -278,4 +278,4 @@ Evaluate completion requires runtime proof:
 - `context-pack/runtime/evaluation-prompt.md`
 - `context-pack/runtime/evaluation-output.jsonl`
 
-Use `scripts/harness/verify-task.py <task-dir> --require-evaluation` after evaluation.
+Use `.codex/harness/scripts/verify-task.py <task-dir> --require-evaluation` after evaluation.

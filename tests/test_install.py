@@ -40,9 +40,68 @@ class InstallCodexHarnessTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertFalse(stale_skill.exists())
-            self.assertTrue((target / "scripts" / "harness" / "skill" / "SKILL.md").exists())
-            self.assertTrue((target / "scripts" / "harness" / "codex_exec.py").exists())
+            self.assertTrue((target / ".codex" / "harness" / "scripts" / "skill" / "SKILL.md").exists())
+            self.assertTrue((target / ".codex" / "harness" / "scripts" / "codex_exec.py").exists())
+            self.assertFalse((target / "scripts" / "harness").exists())
             self.assertTrue((target / "codex-harness.json").exists())
+            gitignore = (target / ".gitignore").read_text(encoding="utf-8")
+            self.assertIn(".codex/harness/", gitignore)
+            self.assertIn(".codex-harness/", gitignore)
+
+    def test_project_force_install_removes_legacy_scripts_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            target = tmp / "target"
+            legacy = target / "scripts" / "harness"
+            legacy.mkdir(parents=True)
+            (legacy / "start.py").write_text("# old\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(INSTALLER),
+                    str(target),
+                    "--scope",
+                    "project",
+                    "--force",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertFalse(legacy.exists())
+            self.assertTrue((target / ".codex" / "harness" / "scripts" / "start.py").exists())
+
+    def test_project_hook_install_ignores_local_hook_files(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            target = tmp / "target"
+            target.mkdir()
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(INSTALLER),
+                    str(target),
+                    "--scope",
+                    "project",
+                    "--force",
+                    "--with-hooks",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertTrue((target / ".codex" / "hooks.json").exists())
+            self.assertTrue((target / ".codex" / "hooks" / "codex-harness" / "harness_pre_tool_use.py").exists())
+            gitignore = (target / ".gitignore").read_text(encoding="utf-8")
+            self.assertIn(".codex/hooks/codex-harness/", gitignore)
+            self.assertIn(".codex/hooks.json", gitignore)
+            self.assertIn(".codex/hooks.optional.json", gitignore)
 
 
 if __name__ == "__main__":

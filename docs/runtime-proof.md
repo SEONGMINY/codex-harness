@@ -171,7 +171,7 @@ evaluation-stderr.txt
 평가까지 요구하려면 다음을 실행합니다.
 
 ```bash
-python3 scripts/harness/verify-task.py <task-dir> --require-evaluation
+python3 .codex/harness/scripts/verify-task.py <task-dir> --require-evaluation
 ```
 
 ## 확인 명령
@@ -179,7 +179,7 @@ python3 scripts/harness/verify-task.py <task-dir> --require-evaluation
 phase 실행 증거를 확인합니다.
 
 ```bash
-python3 scripts/harness/verify-task.py <task-dir>
+python3 .codex/harness/scripts/verify-task.py <task-dir>
 find tasks/<task-dir>/context-pack/runtime -maxdepth 1 -type f | sort
 find tasks/<task-dir>/context-pack/handoffs -maxdepth 1 -type f | sort
 ```

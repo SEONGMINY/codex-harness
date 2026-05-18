@@ -17,7 +17,6 @@ from codex_exec import add_output_schema, run_codex_exec
 
 SKIP_SNAPSHOT_DIRS = {
     ".git",
-    ".codex-harness",
     ".mypy_cache",
     ".next",
     ".pytest_cache",
@@ -28,6 +27,10 @@ SKIP_SNAPSHOT_DIRS = {
     "dist",
     "node_modules",
     "venv",
+}
+SKIP_SNAPSHOT_PATHS = {
+    ".codex-harness",
+    ".codex/harness/sessions",
 }
 HARNESS_VERSION = "0.1.0"
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
@@ -89,8 +92,11 @@ def snapshot_files(root: Path) -> list[Path]:
             continue
         for entry in entries:
             if entry.is_dir(follow_symlinks=False):
-                if entry.name not in SKIP_SNAPSHOT_DIRS:
-                    stack.append(Path(entry.path))
+                path = Path(entry.path)
+                relative = path.relative_to(root).as_posix()
+                if entry.name in SKIP_SNAPSHOT_DIRS or any(is_under(relative, skipped) for skipped in SKIP_SNAPSHOT_PATHS):
+                    continue
+                stack.append(path)
             elif entry.is_file(follow_symlinks=False) or entry.is_symlink():
                 files.append(Path(entry.path))
     return files
@@ -131,7 +137,7 @@ def build_prompt(
 ) -> str:
     answers = "\n".join(f"  - `{rel(path, root)}`" for path in answer_paths) or "  - 없음"
     approval = "approved" if docs_approved else "not_approved"
-    phase_command = "python3 scripts/harness/run-phases.py <task-dir>"
+    phase_command = "python3 .codex/harness/scripts/run-phases.py <task-dir>"
     if full_auto:
         phase_command += " --full-auto"
     if evaluate:
@@ -155,8 +161,8 @@ Required before `planned`:
 - `decisions.json`, `architecture.json`, and `dependency-policy.json` contain the approved implementation-shaping decisions.
 - `open-decisions.json` has no blocking open item.
 - Phase contracts reference only approved decisions and architecture refs.
-- `python3 scripts/harness/verify-task.py <task-dir>` passes.
-- `python3 scripts/harness/run-phases.py <task-dir> --dry-run` passes.
+- `python3 .codex/harness/scripts/verify-task.py <task-dir>` passes.
+- `python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run` passes.
 """
         generate_contract = f"""## Generate
 
@@ -205,7 +211,7 @@ Decision rule:
 
 - Do not act as the parent chat.
 - Do not ask the parent chat to reason through this task.
-- Do not invoke `scripts/harness/start.py` again.
+- Do not invoke `.codex/harness/scripts/start.py` again.
 - If a Plan-impacting decision is not approved, do not plan.
 - Before docs approval, write missing decisions to `questions.md`.
 - After task context exists, write unresolved blocking decisions to `open-decisions.json`.
@@ -300,9 +306,12 @@ def skill_version(skill_path: Path) -> str | None:
 
 
 def harness_skill_path(root: Path) -> Path | None:
-    installed = root / "scripts" / "harness" / "skill" / "SKILL.md"
+    installed = root / ".codex" / "harness" / "scripts" / "skill" / "SKILL.md"
     if installed.exists():
         return installed
+    legacy_installed = root / "scripts" / "harness" / "skill" / "SKILL.md"
+    if legacy_installed.exists():
+        return legacy_installed
     if not (root / "scripts" / "install-codex-harness.py").exists():
         return None
     source_tree = root / ".agents" / "skills" / "codex-harness" / "SKILL.md"
@@ -314,8 +323,8 @@ def harness_skill_path(root: Path) -> Path | None:
 def harness_install_errors(root: Path) -> list[str]:
     required_paths = [
         root / "codex-harness.json",
-        root / "scripts" / "harness" / "start.py",
-        root / "scripts" / "harness" / "run-phases.py",
+        root / ".codex" / "harness" / "scripts" / "start.py",
+        root / ".codex" / "harness" / "scripts" / "run-phases.py",
     ]
     missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
     if missing_required:
@@ -339,7 +348,7 @@ def harness_install_errors(root: Path) -> list[str]:
 
     skill_path = harness_skill_path(root)
     if skill_path is None:
-        errors.append("Missing harness skill instructions: scripts/harness/skill/SKILL.md")
+        errors.append("Missing harness skill instructions: .codex/harness/scripts/skill/SKILL.md")
         return errors
 
     declared_skill_version = skill_version(skill_path)
@@ -364,7 +373,7 @@ def launcher_status(run_dir: Path, returncode: int | None, dry_run: bool) -> str
 
 
 def create_run_dir(root: Path, request: str) -> Path:
-    base = root / ".codex-harness" / "sessions" / f"{now_id()}-{slugify(request)}"
+    base = root / ".codex" / "harness" / "sessions" / f"{now_id()}-{slugify(request)}"
     for suffix in ["", *[f"-{index}" for index in range(1, 100)]]:
         run_dir = Path(f"{base}{suffix}")
         try:

@@ -91,7 +91,7 @@ Runner-generated `phase<N>-result.json` schema:
     {"path": "context-pack/handoffs/phase0.md", "exists": true}
   ],
   "required_repo_outputs": [
-    {"path": "scripts/harness/run-phases.py", "exists": true}
+    {"path": ".codex/harness/scripts/run-phases.py", "exists": true}
   ],
   "artifacts": {
     "prompt": "context-pack/runtime/phase0-prompt.md",

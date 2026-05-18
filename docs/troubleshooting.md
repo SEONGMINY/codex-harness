@@ -10,7 +10,7 @@ Codex의 마지막 응답보다 runtime 실행 기록이 중요합니다.
 명령:
 
 ```bash
-python3 scripts/harness/verify-task.py <task-dir>
+python3 .codex/harness/scripts/verify-task.py <task-dir>
 ```
 
 주요 원인:
@@ -37,7 +37,7 @@ Codex의 완료 선언은 완료 증거가 아닙니다.
 확인:
 
 ```bash
-python3 scripts/harness/verify-task.py <task-dir>
+python3 .codex/harness/scripts/verify-task.py <task-dir>
 find tasks/<task-dir>/context-pack/runtime -maxdepth 1 -type f | sort
 find tasks/<task-dir>/context-pack/handoffs -maxdepth 1 -type f | sort
 ```
@@ -126,7 +126,7 @@ cat tasks/<task-dir>/context-pack/runtime/phase<N>-last-error.md
 phase를 고친 뒤 다시 실행하려면:
 
 ```bash
-python3 scripts/harness/run-phases.py <task-dir> --from <N> --full-auto
+python3 .codex/harness/scripts/run-phases.py <task-dir> --from <N> --full-auto
 ```
 
 `--from`은 해당 phase부터 끝난 상태를 `pending`으로 되돌립니다.
@@ -134,7 +134,7 @@ python3 scripts/harness/run-phases.py <task-dir> --from <N> --full-auto
 repair packet을 유지한 채 가장 이른 실패 지점부터 재개하려면:
 
 ```bash
-python3 scripts/harness/run-phases.py <task-dir> --resume-repair --full-auto
+python3 .codex/harness/scripts/run-phases.py <task-dir> --resume-repair --full-auto
 ```
 
 ## 시도 예산이 소진됐습니다
@@ -159,7 +159,7 @@ Phase attempt budget exhausted: attempts=1, max_attempts=1.
 4. 다시 실행합니다.
 
 ```bash
-python3 scripts/harness/run-phases.py <task-dir> --from <N> --full-auto
+python3 .codex/harness/scripts/run-phases.py <task-dir> --from <N> --full-auto
 ```
 
 필요하면 `validation_budget.max_attempts`를 조정합니다.

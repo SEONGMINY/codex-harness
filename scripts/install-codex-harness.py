@@ -14,19 +14,26 @@ from pathlib import Path
 
 
 INSTALL_PATHS = [
-    (Path("scripts") / "harness", Path("scripts") / "harness"),
+    (Path("scripts") / "harness", Path(".codex") / "harness" / "scripts"),
 ]
 INSTALL_FILES = [
     (Path("codex-harness.json"), Path("codex-harness.json")),
 ]
+LEGACY_PROJECT_SCRIPT_TARGET = Path("scripts") / "harness"
 PROJECT_LOCAL_SKILL_TARGET = Path(".agents") / "skills" / "codex-harness"
-PROJECT_RUNTIME_SKILL_TARGET = Path("scripts") / "harness" / "skill"
+PROJECT_RUNTIME_SKILL_TARGET = Path(".codex") / "harness" / "scripts" / "skill"
 PROJECT_HOOKS_SOURCE = Path(".codex") / "hooks"
 PROJECT_HOOKS_TARGET = Path(".codex") / "hooks" / "codex-harness"
 USER_SKILL_SOURCE = Path(".agents") / "skills" / "codex-harness"
 USER_SKILL_TARGET = Path("skills") / "codex-harness"
 USER_HOOKS_SOURCE = Path(".codex") / "hooks"
 USER_HOOKS_TARGET = Path("hooks") / "codex-harness"
+PROJECT_HARNESS_GITIGNORE_ENTRIES = [".codex/harness/", ".codex-harness/"]
+PROJECT_HOOK_GITIGNORE_ENTRIES = [
+    ".codex/hooks/codex-harness/",
+    ".codex/hooks.json",
+    ".codex/hooks.optional.json",
+]
 
 
 def repo_root() -> Path:
@@ -74,6 +81,22 @@ def copy_optional_file(source: Path, target: Path, force: bool) -> bool:
         return False
     copy_file(source, target, force)
     return True
+
+
+def ensure_gitignore_entries(target_root: Path, entries: list[str]) -> None:
+    path = target_root / ".gitignore"
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    lines = existing.splitlines()
+    existing_entries = {line.strip() for line in lines}
+    changed = False
+    for entry in entries:
+        if entry not in existing_entries:
+            lines.append(entry)
+            existing_entries.add(entry)
+            changed = True
+    if changed:
+        path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        print("updated .gitignore")
 
 
 def project_hook_command(script_name: str) -> str:
@@ -163,6 +186,16 @@ def install_project(
     if not target_root.exists() or not target_root.is_dir():
         raise FileNotFoundError(f"Target directory does not exist: {target_root}")
 
+    legacy_scripts = target_root / LEGACY_PROJECT_SCRIPT_TARGET
+    source_legacy_scripts = source_root / LEGACY_PROJECT_SCRIPT_TARGET
+    if (
+        force
+        and legacy_scripts.exists()
+        and legacy_scripts.resolve() != source_legacy_scripts.resolve()
+    ):
+        shutil.rmtree(legacy_scripts)
+        print(f"removed stale project harness scripts {LEGACY_PROJECT_SCRIPT_TARGET}")
+
     for source_rel, target_rel in INSTALL_PATHS:
         copy_tree(source_root / source_rel, target_root / target_rel, force)
         print(f"installed {target_rel}")
@@ -179,6 +212,11 @@ def install_project(
     for source_rel, target_rel in INSTALL_FILES:
         copy_file(source_root / source_rel, target_root / target_rel, True)
         print(f"installed {target_rel}")
+
+    gitignore_entries = list(PROJECT_HARNESS_GITIGNORE_ENTRIES)
+    if with_hooks:
+        gitignore_entries.extend(PROJECT_HOOK_GITIGNORE_ENTRIES)
+    ensure_gitignore_entries(target_root, gitignore_entries)
 
     for rel_path in [Path("docs"), Path("tasks")]:
         (target_root / rel_path).mkdir(parents=True, exist_ok=True)

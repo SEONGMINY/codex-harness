@@ -108,8 +108,8 @@ list-tasks.py를 만들어줘.
 다음 상태는 세션 출력에서 확인합니다.
 
 ```bash
-cat .codex-harness/sessions/<run-id>/launcher-result.json
-cat .codex-harness/sessions/<run-id>/last-message.md
+cat .codex/harness/sessions/<run-id>/launcher-result.json
+cat .codex/harness/sessions/<run-id>/last-message.md
 ```
 
 `questions.md`가 있으면 답을 추가합니다.
@@ -127,14 +127,14 @@ task 경로도 위 두 파일에서 확인합니다.
 경로를 확인한 뒤 검증합니다.
 
 ```bash
-python3 scripts/harness/verify-task.py <task-dir>
-python3 scripts/harness/run-phases.py <task-dir> --dry-run
+python3 .codex/harness/scripts/verify-task.py <task-dir>
+python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run
 ```
 
 phase를 실행합니다.
 
 ```bash
-python3 scripts/harness/run-phases.py <task-dir> --full-auto
+python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto
 ```
 
 더 자세한 설치와 실행 명령은 [docs/quickstart.md](./docs/quickstart.md)에 있습니다.

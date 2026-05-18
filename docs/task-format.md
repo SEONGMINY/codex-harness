@@ -105,12 +105,12 @@ tasks/<task-dir>/phases/phase<N>.md
   "scope": {
     "layer": "runner",
     "allowed_paths": [
-      "scripts/harness/run-phases.py"
+      ".codex/harness/scripts/run-phases.py"
     ]
   },
   "interfaces": [
     {
-      "path": "scripts/harness/run-phases.py",
+      "path": ".codex/harness/scripts/run-phases.py",
       "symbol": "execute_phase",
       "signature": "def execute_phase(...) -> bool",
       "business_rules": [
@@ -134,7 +134,7 @@ tasks/<task-dir>/phases/phase<N>.md
       "id": "P0-001",
       "task": "정해진 범위 안에서 변경을 구현한다.",
       "expected_evidence": [
-        "scripts/harness/run-phases.py"
+        ".codex/harness/scripts/run-phases.py"
       ]
     }
   ],
@@ -161,7 +161,7 @@ tasks/<task-dir>/phases/phase<N>.md
     "context-pack/handoffs/phase0.md"
   ],
   "required_repo_outputs": [
-    "scripts/harness/run-phases.py"
+    ".codex/harness/scripts/run-phases.py"
   ],
   "forbidden": [
     {

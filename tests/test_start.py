@@ -20,20 +20,20 @@ START = ROOT / "scripts" / "harness" / "start.py"
 class StartLauncherTest(unittest.TestCase):
     def make_repo(self, tmp: Path) -> Path:
         repo = tmp / "repo"
-        (repo / "scripts" / "harness" / "skill").mkdir(parents=True)
+        (repo / ".codex" / "harness" / "scripts" / "skill").mkdir(parents=True)
         (repo / "codex-harness.json").write_text(
             '{"name":"codex-harness","version":"0.1.0"}\n',
             encoding="utf-8",
         )
-        (repo / "scripts" / "harness" / "skill" / "SKILL.md").write_text(
+        (repo / ".codex" / "harness" / "scripts" / "skill" / "SKILL.md").write_text(
             "---\nname: codex-harness\nversion: 0.1.0\n---\n# skill\n",
             encoding="utf-8",
         )
-        (repo / "scripts" / "harness" / "start.py").write_text(
+        (repo / ".codex" / "harness" / "scripts" / "start.py").write_text(
             "#!/usr/bin/env python3\n",
             encoding="utf-8",
         )
-        (repo / "scripts" / "harness" / "run-phases.py").write_text(
+        (repo / ".codex" / "harness" / "scripts" / "run-phases.py").write_text(
             "#!/usr/bin/env python3\n",
             encoding="utf-8",
         )
@@ -53,7 +53,7 @@ class StartLauncherTest(unittest.TestCase):
         return path
 
     def latest_launcher_result(self, repo: Path) -> dict[str, object]:
-        result_paths = sorted((repo / ".codex-harness" / "sessions").glob("*/launcher-result.json"))
+        result_paths = sorted((repo / ".codex" / "harness" / "sessions").glob("*/launcher-result.json"))
         self.assertTrue(result_paths)
         return json.loads(result_paths[-1].read_text(encoding="utf-8"))
 

@@ -48,7 +48,7 @@ The runner updates `status`, `completed_at`, and `failed_at`.
       "phase": 0,
       "name": "docs",
       "status": "pending",
-      "ac_commands": ["python3 -m py_compile scripts/harness/run-phases.py"],
+      "ac_commands": ["python3 -m py_compile .codex/harness/scripts/run-phases.py"],
       "required_outputs": [
         "context-pack/handoffs/phase0.md"
       ]
@@ -73,7 +73,7 @@ Completed phases also require a schema-valid `phase<N>-result.json`.
 Completed phases also require runner-generated contract, checklist, evidence, reconciliation, and gate files.
 The runner generates `phase<N>-result.json`; phase agents do not.
 Failed or retried attempts may also have runner-generated `phase<N>-repair-packet.json` and `.md`.
-Use `scripts/harness/verify-task.py` to enforce this.
+Use `.codex/harness/scripts/verify-task.py` to enforce this.
 
 ## Phase Files
 
@@ -109,13 +109,13 @@ Required sections:
   "scope": {
     "layer": "runner",
     "allowed_paths": [
-      "scripts/harness/run-phases.py",
-      "scripts/harness/verify-task.py"
+      ".codex/harness/scripts/run-phases.py",
+      ".codex/harness/scripts/verify-task.py"
     ]
   },
   "interfaces": [
     {
-      "path": "scripts/harness/run-phases.py",
+      "path": ".codex/harness/scripts/run-phases.py",
       "symbol": "write_phase_result",
       "signature": "def write_phase_result(...) -> None",
       "business_rules": [
@@ -162,14 +162,14 @@ Required sections:
   },
   "missing_evidence_behavior": "Treat missing expected evidence as unresolved until command output or required files prove it.",
   "acceptance_commands": [
-    "python3 -m py_compile scripts/harness/run-phases.py scripts/harness/verify-task.py"
+    "python3 -m py_compile .codex/harness/scripts/run-phases.py .codex/harness/scripts/verify-task.py"
   ],
   "required_outputs": [
     "context-pack/handoffs/phase0.md"
   ],
   "required_repo_outputs": [
-    "scripts/harness/run-phases.py",
-    "scripts/harness/verify-task.py"
+    ".codex/harness/scripts/run-phases.py",
+    ".codex/harness/scripts/verify-task.py"
   ],
   "forbidden": [
     {

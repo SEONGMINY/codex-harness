@@ -3,3 +3,4 @@ tasks/*
 !tasks/.gitkeep
 _workspace/*
 .codex-harness/
+.codex/harness/

@@ -22,7 +22,8 @@ python3 /Users/leesm/work/side/harness/scripts/install-codex-harness.py . --all 
 
 - `~/.codex/skills/codex-harness`
 - `~/.codex/hooks/codex-harness`
-- `scripts/harness`
+- `.codex/harness/scripts`
+- `.codex/harness/sessions`
 - `codex-harness.json`
 
 ## hooks 포함 설치
@@ -57,7 +58,7 @@ list-tasks.py를 만들어줘.
 - --status 옵션으로 상태를 필터링할 수 있다.
 
 완료 조건:
-- python3 scripts/harness/list-tasks.py --status pending 이 동작한다.
+- python3 list-tasks.py --status pending 이 동작한다.
 - 테스트 또는 실행 예시가 남아 있어야 한다.
 ```
 
@@ -66,7 +67,7 @@ list-tasks.py를 만들어줘.
 launcher가 요청을 파일로 저장하고, 별도 하네스 세션을 실행합니다.
 
 ```text
-.codex-harness/sessions/<run-id>/
+.codex/harness/sessions/<run-id>/
 ```
 
 첫 실행에서는 다음 중 하나가 먼저 나올 수 있습니다.
@@ -79,8 +80,8 @@ launcher가 요청을 파일로 저장하고, 별도 하네스 세션을 실행�
 세션 상태는 다음 파일에서 확인합니다.
 
 ```bash
-cat .codex-harness/sessions/<run-id>/launcher-result.json
-cat .codex-harness/sessions/<run-id>/last-message.md
+cat .codex/harness/sessions/<run-id>/launcher-result.json
+cat .codex/harness/sessions/<run-id>/last-message.md
 ```
 
 `questions.md`가 있으면 답을 추가합니다.
@@ -92,7 +93,7 @@ task 경로도 위 파일에서 확인합니다.
 직접 실행할 수도 있습니다.
 
 ```bash
-python3 scripts/harness/start.py --request-file - --full-auto <<'EOF'
+python3 .codex/harness/scripts/start.py --request-file - --full-auto <<'EOF'
 list-tasks.py를 만들어줘.
 EOF
 ```
@@ -100,7 +101,7 @@ EOF
 문서 생성이 이미 승인된 상태로 시작하려면:
 
 ```bash
-python3 scripts/harness/start.py --request-file - --docs-approved --full-auto <<'EOF'
+python3 .codex/harness/scripts/start.py --request-file - --docs-approved --full-auto <<'EOF'
 list-tasks.py를 만들어줘.
 EOF
 ```
@@ -108,7 +109,7 @@ EOF
 phase 실행까지 요청하려면:
 
 ```bash
-python3 scripts/harness/start.py --request-file - --docs-approved --run-phases --full-auto <<'EOF'
+python3 .codex/harness/scripts/start.py --request-file - --docs-approved --run-phases --full-auto <<'EOF'
 list-tasks.py를 만들어줘.
 EOF
 ```
@@ -118,8 +119,8 @@ EOF
 task가 만들어진 뒤에는 먼저 검증합니다.
 
 ```bash
-python3 scripts/harness/verify-task.py <task-dir>
-python3 scripts/harness/run-phases.py <task-dir> --dry-run
+python3 .codex/harness/scripts/verify-task.py <task-dir>
+python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run
 ```
 
 ## phase 실행
@@ -127,25 +128,25 @@ python3 scripts/harness/run-phases.py <task-dir> --dry-run
 대기 중인 phase를 실행합니다.
 
 ```bash
-python3 scripts/harness/run-phases.py <task-dir> --full-auto
+python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto
 ```
 
 모든 phase가 끝난 뒤 평가까지 실행하려면:
 
 ```bash
-python3 scripts/harness/run-phases.py <task-dir> --full-auto --evaluate
+python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto --evaluate
 ```
 
 특정 phase부터 다시 실행하려면:
 
 ```bash
-python3 scripts/harness/run-phases.py <task-dir> --from 1 --full-auto
+python3 .codex/harness/scripts/run-phases.py <task-dir> --from 1 --full-auto
 ```
 
 가장 이른 repair packet 또는 실패 phase부터 재개하려면:
 
 ```bash
-python3 scripts/harness/run-phases.py <task-dir> --resume-repair --full-auto
+python3 .codex/harness/scripts/run-phases.py <task-dir> --resume-repair --full-auto
 ```
 
 ## 평가
@@ -153,7 +154,7 @@ python3 scripts/harness/run-phases.py <task-dir> --resume-repair --full-auto
 새 컨텍스트에서 평가합니다.
 
 ```bash
-python3 scripts/harness/evaluate-task.py <task-dir> \
+python3 .codex/harness/scripts/evaluate-task.py <task-dir> \
   --command "npm test" \
   --full-auto
 ```
@@ -161,5 +162,5 @@ python3 scripts/harness/evaluate-task.py <task-dir> \
 평가 실행 기록까지 확인합니다.
 
 ```bash
-python3 scripts/harness/verify-task.py <task-dir> --require-evaluation
+python3 .codex/harness/scripts/verify-task.py <task-dir> --require-evaluation
 ```

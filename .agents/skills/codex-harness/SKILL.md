@@ -8,7 +8,7 @@ version: 0.1.0
 
 ## Overview
 
-Use this skill to launch a separate codex-harness orchestration session. The parent chat should stay small: save the user's request, run `scripts/harness/start.py`, and report the launcher result.
+Use this skill to launch a separate codex-harness orchestration session. The parent chat should stay small: save the user's request, run `.codex/harness/scripts/start.py`, and report the launcher result.
 
 The harness session moves a request to exactly one durable state: `questions_needed`, `docs_approval_needed`, `planned`, `generated`, or `blocked`.
 
@@ -24,7 +24,7 @@ When a phase fails a retryable check, the runner writes a repair packet under `c
 
 If a repair packet lists `contaminating_changes`, the runner observed changes outside `scope.allowed_paths` for that attempt. Treat this as cleanup-required: review or clean those paths, or fix the phase contract scope, before resuming. Do not auto-retry the same phase against a contaminated worktree.
 
-If repository hooks are installed, `scripts/harness/run-phases.py` passes the active task, phase, and runtime contract through `CODEX_HARNESS_*` environment variables. Required hooks then use that contract to block obvious phase-scope violations and to continue Codex when required outputs are missing.
+If repository hooks are installed, `.codex/harness/scripts/run-phases.py` passes the active task, phase, and runtime contract through `CODEX_HARNESS_*` environment variables. Required hooks then use that contract to block obvious phase-scope violations and to continue Codex when required outputs are missing.
 
 ## Installation Check
 
@@ -37,15 +37,15 @@ from pathlib import Path
 root = Path(".")
 required = [
     root / "codex-harness.json",
-    root / "scripts" / "harness" / "skill" / "SKILL.md",
-    root / "scripts" / "harness" / "start.py",
-    root / "scripts" / "harness" / "run-phases.py",
+    root / ".codex" / "harness" / "scripts" / "skill" / "SKILL.md",
+    root / ".codex" / "harness" / "scripts" / "start.py",
+    root / ".codex" / "harness" / "scripts" / "run-phases.py",
 ]
 missing = [str(path) for path in required if not path.exists()]
 if missing:
     raise SystemExit("missing: " + ", ".join(missing))
 manifest_version = json.loads((root / "codex-harness.json").read_text(encoding="utf-8")).get("version")
-skill_text = (root / "scripts" / "harness" / "skill" / "SKILL.md").read_text(encoding="utf-8")
+skill_text = (root / ".codex" / "harness" / "scripts" / "skill" / "SKILL.md").read_text(encoding="utf-8")
 if manifest_version != "0.1.0" or "version: 0.1.0" not in skill_text:
     raise SystemExit(f"version mismatch: manifest={manifest_version}")
 PY
@@ -57,7 +57,7 @@ If it is missing or stale, install the harness into the current repository first
 python3 ~/.codex/skills/codex-harness/assets/bootstrap-install.py . --all --force
 ```
 
-Project install removes old `.agents/skills/codex-harness` copies. The project should use the global skill for invocation and `scripts/harness/skill/SKILL.md` for isolated harness sessions.
+Project install removes old `.agents/skills/codex-harness` copies. The project should use the global skill for invocation and `.codex/harness/scripts/skill/SKILL.md` for isolated harness sessions.
 
 For one-time user-wide setup, install the skill and global no-op-unless-active hooks:
 
@@ -77,7 +77,7 @@ Default to this mode when the user invokes `$codex-harness` from an ordinary cha
 4. Run:
 
 ```bash
-python3 scripts/harness/start.py --request-file - --full-auto <<'EOF'
+python3 .codex/harness/scripts/start.py --request-file - --full-auto <<'EOF'
 <user request>
 EOF
 ```
@@ -86,18 +86,18 @@ Add `--docs-approved`, `--run-phases`, or `--evaluate` only when the user explic
 
 After the command finishes, read only these launcher outputs:
 
-- `.codex-harness/sessions/<run-id>/last-message.md`
-- `.codex-harness/sessions/<run-id>/questions.md`, when present
-- `.codex-harness/sessions/<run-id>/docs-approval-request.md`, when present
-- `.codex-harness/sessions/<run-id>/launcher-result.json`
+- `.codex/harness/sessions/<run-id>/last-message.md`
+- `.codex/harness/sessions/<run-id>/questions.md`, when present
+- `.codex/harness/sessions/<run-id>/docs-approval-request.md`, when present
+- `.codex/harness/sessions/<run-id>/launcher-result.json`
 
 Report the status and next file path. Do not summarize the whole harness session unless the user asks.
 
 ## Harness Session Mode
 
-Use this mode when the prompt or environment says this is an isolated harness session launched by `scripts/harness/start.py`.
+Use this mode when the prompt or environment says this is an isolated harness session launched by `.codex/harness/scripts/start.py`.
 
-Do not invoke `scripts/harness/start.py` from this mode.
+Do not invoke `.codex/harness/scripts/start.py` from this mode.
 
 ## Workflow
 
@@ -112,8 +112,8 @@ Do not invoke `scripts/harness/start.py` from this mode.
 7. After approval, create all mandatory docs, context-pack files, task indexes, and phase files.
 8. Gather only the code and project context needed for the approved task.
 9. Plan work into self-contained task/phase files.
-10. Validate the task with `scripts/harness/verify-task.py <task-dir>` and `scripts/harness/run-phases.py <task-dir> --dry-run`.
-11. Run phases with `scripts/harness/run-phases.py`.
+10. Validate the task with `.codex/harness/scripts/verify-task.py <task-dir>` and `.codex/harness/scripts/run-phases.py <task-dir> --dry-run`.
+11. Run phases with `.codex/harness/scripts/run-phases.py`.
 12. Evaluate from fresh context.
 
 ## Hard Rules
@@ -122,7 +122,7 @@ Do not invoke `scripts/harness/start.py` from this mode.
 - Do not flatter the proposal. Challenge weak evidence, unclear value, vague urgency, and bloated scope.
 - Do not use subagents for Generate phases.
 - Do not implement Generate work directly in the orchestrator session.
-- Generate means running `scripts/harness/run-phases.py`; direct edits are only allowed while acting as a phase agent launched by the runner.
+- Generate means running `.codex/harness/scripts/run-phases.py`; direct edits are only allowed while acting as a phase agent launched by the runner.
 - Do not let phase agents update task status.
 - Let the runner decide phase success, retry, failure, and next phase.
 - Treat conversation as source material, not execution state.
@@ -163,9 +163,9 @@ Do not invoke `scripts/harness/start.py` from this mode.
   - `tasks/<task-dir>/context-pack/static/context-gathering-budget.json`
   - `tasks/<task-dir>/context-pack/static/*`
   - `tasks/<task-dir>/phases/phase<N>.md`
-- After Plan, run `python3 scripts/harness/verify-task.py <task-dir>` and `python3 scripts/harness/run-phases.py <task-dir> --dry-run`. Fix failures before stopping.
+- After Plan, run `python3 .codex/harness/scripts/verify-task.py <task-dir>` and `python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run`. Fix failures before stopping.
 - After Generate, verify runtime proof before stopping.
-- After Generate, run `python3 scripts/harness/evaluate-task.py <task-dir>` with the task's evaluation commands unless the user explicitly asks not to.
+- After Generate, run `python3 .codex/harness/scripts/evaluate-task.py <task-dir>` with the task's evaluation commands unless the user explicitly asks not to.
 
 ## Runtime Proof
 
@@ -203,7 +203,7 @@ If runtime proof is missing, report the task as blocked or failed. Do not infer 
 Before final reporting, run:
 
 ```bash
-python3 scripts/harness/verify-task.py <task-dir> --require-evaluation
+python3 .codex/harness/scripts/verify-task.py <task-dir> --require-evaluation
 find tasks/<task-dir>/context-pack/runtime -maxdepth 1 -type f | sort
 find tasks/<task-dir>/context-pack/handoffs -maxdepth 1 -type f | sort
 ```
@@ -221,7 +221,7 @@ find tasks/<task-dir>/context-pack/handoffs -maxdepth 1 -type f | sort
 Create a task skeleton after Clarify, Review, docs approval, Context Gathering, and Plan:
 
 ```bash
-python3 scripts/harness/init-task.py <task-name> \
+python3 .codex/harness/scripts/init-task.py <task-name> \
   --project "<project-name>" \
   --prompt-file <prompt-file> \
   --phase docs \
@@ -232,24 +232,24 @@ python3 scripts/harness/init-task.py <task-name> \
 Build the next phase prompt without running Codex:
 
 ```bash
-python3 scripts/harness/verify-task.py <task-dir>
-python3 scripts/harness/run-phases.py <task-dir> --dry-run
+python3 .codex/harness/scripts/verify-task.py <task-dir>
+python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run
 ```
 
 Run pending phases:
 
 ```bash
-python3 scripts/harness/run-phases.py <task-dir> --full-auto --evaluate
+python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto --evaluate
 ```
 
 Resume from the earliest failed phase or repair packet:
 
 ```bash
-python3 scripts/harness/run-phases.py <task-dir> --resume-repair --full-auto
+python3 .codex/harness/scripts/run-phases.py <task-dir> --resume-repair --full-auto
 ```
 
 Evaluate from fresh context:
 
 ```bash
-python3 scripts/harness/evaluate-task.py <task-dir> --command "npm test" --full-auto
+python3 .codex/harness/scripts/evaluate-task.py <task-dir> --command "npm test" --full-auto
 ```
