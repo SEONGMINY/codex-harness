@@ -15,6 +15,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -171,6 +172,84 @@ class RunCodexRuntimeTest(unittest.TestCase):
 
             self.assertEqual(returncode, RUN_PHASES.CODEX_IDLE_EXIT_CODE)
             self.assertIn("idle timeout", stderr_path.read_text(encoding="utf-8"))
+
+    def test_inherited_yolo_env_enables_phase_codex_yolo(self) -> None:
+        args = argparse.Namespace(yolo=False)
+        old_value = os.environ.get("CODEX_HARNESS_CHILD_CODEX_YOLO")
+        os.environ["CODEX_HARNESS_CHILD_CODEX_YOLO"] = "1"
+        try:
+            RUN_PHASES.apply_inherited_yolo(args)
+        finally:
+            if old_value is None:
+                os.environ.pop("CODEX_HARNESS_CHILD_CODEX_YOLO", None)
+            else:
+                os.environ["CODEX_HARNESS_CHILD_CODEX_YOLO"] = old_value
+
+        self.assertTrue(args.yolo)
+        self.assertTrue(args.yolo_inherited)
+
+    def test_nested_codex_preflight_blocks_without_yolo(self) -> None:
+        args = argparse.Namespace(dry_run=False, yolo=False)
+        old_session = os.environ.get("CODEX_HARNESS_SESSION")
+        old_child_yolo = os.environ.get("CODEX_HARNESS_CHILD_CODEX_YOLO")
+        os.environ["CODEX_HARNESS_SESSION"] = "1"
+        os.environ.pop("CODEX_HARNESS_CHILD_CODEX_YOLO", None)
+        try:
+            errors = RUN_PHASES.nested_codex_preflight_errors(args)
+        finally:
+            if old_session is None:
+                os.environ.pop("CODEX_HARNESS_SESSION", None)
+            else:
+                os.environ["CODEX_HARNESS_SESSION"] = old_session
+            if old_child_yolo is None:
+                os.environ.pop("CODEX_HARNESS_CHILD_CODEX_YOLO", None)
+            else:
+                os.environ["CODEX_HARNESS_CHILD_CODEX_YOLO"] = old_child_yolo
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("phase child codex exec is not configured with --yolo", errors[0])
+
+    def test_runner_uses_installed_script_dir_for_verify_and_evaluate(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "repo"
+            task_path = root / "tasks" / "demo"
+            task_path.mkdir(parents=True)
+            installed_scripts = root / ".codex" / "harness" / "scripts"
+            installed_scripts.mkdir(parents=True)
+            original_script_dir = RUN_PHASES.SCRIPT_DIR
+            calls: list[list[str]] = []
+
+            class FakeResult:
+                returncode = 0
+
+            def fake_run(command, **kwargs):
+                calls.append([str(item) for item in command])
+                return FakeResult()
+
+            args = argparse.Namespace(
+                eval_command=["npm test"],
+                full_auto=True,
+                yolo=True,
+            )
+
+            try:
+                RUN_PHASES.SCRIPT_DIR = installed_scripts
+                with mock.patch.object(RUN_PHASES.subprocess, "run", side_effect=fake_run):
+                    self.assertEqual(RUN_PHASES.verify_task(root, task_path), 0)
+                    self.assertEqual(RUN_PHASES.verify_task(root, task_path, require_evaluation=True), 0)
+                    self.assertEqual(RUN_PHASES.run_evaluation(root, task_path, args), 0)
+            finally:
+                RUN_PHASES.SCRIPT_DIR = original_script_dir
+
+            self.assertEqual(calls[0][1], str(installed_scripts / "verify-task.py"))
+            self.assertEqual(calls[1][1], str(installed_scripts / "verify-task.py"))
+            self.assertIn("--require-evaluation", calls[1])
+            self.assertEqual(calls[2][1], str(installed_scripts / "evaluate-task.py"))
+            self.assertIn("--command", calls[2])
+            self.assertIn("npm test", calls[2])
+            self.assertIn("--full-auto", calls[2])
+            self.assertIn("--yolo", calls[2])
 
     def test_codex_idle_timeout_covers_blocked_stdin_write(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

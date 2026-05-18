@@ -16,7 +16,7 @@ Each state must be backed by files. Do not rely on a long final explanation.
 
 Clarify is a decision gate. Implementation-shaping decisions such as architecture, data model, public interface, module boundary, dependency changes, technology stack, and user-visible behavior must be approved before Plan. If a decision is unclear, write a targeted question or an open decision instead of guessing.
 
-The harness does not chain long Codex conversations. It captures decisions as files, runs orchestration in a separate `codex exec` session, then runs each implementation phase in another fresh `codex exec` session while the runner owns status, retries, and failure decisions.
+The harness does not chain long Codex conversations. It captures decisions as files, runs planning orchestration in a separate `codex exec` session, then the launcher process calls the runner, and each implementation phase runs in another fresh `codex exec` session while the runner owns status, retries, and failure decisions.
 
 Harness `codex exec` calls use structured output schemas for launcher, phase, and evaluation final responses. Treat those final responses as summaries only. Runtime proof files and command results remain the source of truth.
 
@@ -83,6 +83,7 @@ EOF
 ```
 
 Add `--docs-approved`, `--run-phases`, or `--evaluate` only when the user explicitly requested that state.
+When `--run-phases` is present, `start.py` must first obtain a valid `planned` result from the orchestration session, then call `.codex/harness/scripts/run-phases.py` itself. The orchestration session must not run Generate directly.
 
 After the command finishes, read only these launcher outputs:
 
@@ -90,6 +91,9 @@ After the command finishes, read only these launcher outputs:
 - `.codex/harness/sessions/<run-id>/questions.md`, when present
 - `.codex/harness/sessions/<run-id>/docs-approval-request.md`, when present
 - `.codex/harness/sessions/<run-id>/launcher-result.json`
+- `.codex/harness/sessions/<run-id>/run-phases-output.txt`, when `runner_returncode` is non-zero
+- `.codex/harness/sessions/<run-id>/run-phases-stderr.txt`, when `runner_returncode` is non-zero
+- `.codex/harness/sessions/<run-id>/orchestration-violation.json`, when present
 
 Report the status and next file path. Do not summarize the whole harness session unless the user asks.
 
@@ -126,7 +130,7 @@ Return their Markdown content in the structured final output's `artifact.content
 - Do not flatter the proposal. Challenge weak evidence, unclear value, vague urgency, and bloated scope.
 - Do not use subagents for Generate phases.
 - Do not implement Generate work directly in the orchestrator session.
-- Generate means running `.codex/harness/scripts/run-phases.py`; direct edits are only allowed while acting as a phase agent launched by the runner.
+- Generate means the launcher or user runs `.codex/harness/scripts/run-phases.py`; direct edits are only allowed while acting as a phase agent launched by the runner.
 - Do not let phase agents update task status.
 - Let the runner decide phase success, retry, failure, and next phase.
 - Treat conversation as source material, not execution state.

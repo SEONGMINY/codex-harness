@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -131,17 +132,10 @@ def build_prompt(
     answer_paths: list[Path],
     docs_approved: bool,
     run_phases: bool,
-    evaluate: bool,
-    full_auto: bool,
     reasoning_effort: str | None,
 ) -> str:
     answers = "\n".join(f"  - `{rel(path, root)}`" for path in answer_paths) or "  - 없음"
     approval = "approved" if docs_approved else "not_approved"
-    phase_command = "python3 .codex/harness/scripts/run-phases.py <task-dir>"
-    if full_auto:
-        phase_command += " --full-auto"
-    if evaluate:
-        phase_command += " --evaluate"
     generate_state = "requested" if run_phases else "not_requested"
     effort_line = (
         f"- Harness session reasoning effort is forced to `{reasoning_effort}` by the launcher."
@@ -153,7 +147,7 @@ def build_prompt(
 
 Docs are approved in this launcher run.
 
-Produce `planned`, `generated`, or `blocked`.
+Produce `planned` or `blocked`.
 
 Required before `planned`:
 
@@ -166,15 +160,10 @@ Required before `planned`:
 """
         generate_contract = f"""## Generate
 
-Run Generate only when phase files are valid and Generate state is `requested`.
+Do not run Generate from this Codex orchestration session.
 
-If Generate state is `not_requested`, stop after docs, context gathering, planning, `verify-task.py`, and `run-phases.py --dry-run`.
-
-Use this command shape:
-
-```bash
-{phase_command}
-```
+If Generate state is `requested`, still stop after docs, context gathering, planning, `verify-task.py`, and `run-phases.py --dry-run`.
+The Python launcher process will run `.codex/harness/scripts/run-phases.py` after it receives a valid `planned` result.
 """
     else:
         interaction_contract = f"""## Allowed Next State
@@ -208,11 +197,8 @@ Goal: create exactly one next-state artifact.
 
 Allowed states:
 
-- questions_needed
-- docs_approval_needed
-- planned
-- generated
-- blocked
+- Before docs approval: questions_needed | docs_approval_needed | blocked
+- After docs approval: planned | blocked
 
 Decision rule:
 
@@ -249,7 +235,7 @@ Decision rule:
 ## Final Output
 
 Return only the structured final output requested by the active output schema.
-Use status: questions_needed | docs_approval_needed | planned | generated | blocked.
+Use only the status values allowed for this launcher run.
 Always include `task_path`, `files_to_read_next`, `blockers`, and `artifact`.
 Use `task_path: null` unless a task directory exists.
 Use `artifact: null` unless returning `questions_needed` or `docs_approval_needed`.
@@ -283,6 +269,7 @@ def run_codex(
             "CODEX_HARNESS_SESSION": "1",
             "CODEX_HARNESS_LAUNCH_ROOT": str(root),
             "CODEX_HARNESS_LAUNCH_DIR": str(run_dir),
+            "CODEX_HARNESS_CHILD_CODEX_YOLO": "0",
         }
     )
     activity_paths = [run_dir]
@@ -298,6 +285,50 @@ def run_codex(
         idle_timeout=args.codex_idle_timeout,
         activity_paths=activity_paths,
     )
+
+
+def installed_harness_script(root: Path, name: str) -> Path:
+    return root / ".codex" / "harness" / "scripts" / name
+
+
+def resolve_task_path(root: Path, final: dict[str, object] | None) -> Path | None:
+    if final is None:
+        return None
+    task_path = final.get("task_path")
+    if not isinstance(task_path, str) or not task_path.strip():
+        return None
+    resolved = (root / task_path).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None
+    return resolved if resolved.exists() else None
+
+
+def run_phases(root: Path, task_path: Path, run_dir: Path, args: argparse.Namespace) -> int:
+    output_path = run_dir / "run-phases-output.txt"
+    stderr_path = run_dir / "run-phases-stderr.txt"
+    command = [
+        sys.executable,
+        str(installed_harness_script(root, "run-phases.py")),
+        rel(task_path, root),
+        "--root",
+        str(root),
+        "--codex-bin",
+        args.codex_bin,
+        "--codex-idle-timeout",
+        str(args.codex_idle_timeout),
+    ]
+    if args.full_auto:
+        command.append("--full-auto")
+    if args.evaluate:
+        command.append("--evaluate")
+    if args.yolo:
+        command.append("--yolo")
+
+    with output_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+        result = subprocess.run(command, cwd=root, text=True, stdout=stdout, stderr=stderr, check=False)
+    return int(result.returncode)
 
 
 def write_json(path: Path, data: dict[str, object]) -> None:
@@ -429,15 +460,7 @@ def launcher_status_from_final(root: Path, run_dir: Path, final: dict[str, objec
     if status == "docs_approval_needed":
         return "docs_approval_needed" if (run_dir / "docs-approval-request.md").exists() else "blocked"
     if status in {"planned", "generated"}:
-        task_path = final.get("task_path")
-        if not isinstance(task_path, str) or not task_path.strip():
-            return "blocked"
-        resolved = (root / task_path).resolve()
-        try:
-            resolved.relative_to(root)
-        except ValueError:
-            return "blocked"
-        return status if resolved.exists() else "blocked"
+        return status if resolve_task_path(root, final) is not None else "blocked"
     return "blocked"
 
 
@@ -527,8 +550,6 @@ def main() -> int:
         answer_paths,
         args.docs_approved,
         args.run_phases,
-        args.evaluate,
-        args.full_auto,
         reasoning_effort,
     )
     prompt_path = run_dir / "harness-prompt.md"
@@ -564,25 +585,55 @@ def main() -> int:
             )
 
     final_status = launcher_status_from_final(root, run_dir, final_output)
+    if args.docs_approved and final_output and final_output.get("status") == "generated":
+        final_status = "blocked"
+        write_json(
+            run_dir / "orchestration-violation.json",
+            {
+                "status": "orchestration_violation",
+                "reason": "Generate is runner-owned. The launcher Codex session must stop at planned.",
+            },
+        )
+    runner_returncode: int | None = None
+    if (
+        args.run_phases
+        and not args.dry_run
+        and not protocol_violations
+        and returncode == 0
+        and final_status == "planned"
+    ):
+        task_path = resolve_task_path(root, final_output)
+        if task_path is None:
+            final_status = "blocked"
+        else:
+            runner_returncode = run_phases(root, task_path, run_dir, args)
+            final_status = "generated" if runner_returncode == 0 else "blocked"
+
     result = {
         "status": "protocol_violation"
         if protocol_violations
         else (final_status or launcher_status(run_dir, returncode, args.dry_run)),
         "returncode": returncode,
+        "runner_returncode": runner_returncode,
         "run_dir": rel(run_dir, root),
         "request": rel(request_path, root),
         "prompt": rel(prompt_path, root),
         "last_message": rel(run_dir / "last-message.md", root),
         "output": rel(run_dir / "harness-output.jsonl", root),
         "stderr": rel(run_dir / "harness-stderr.txt", root),
+        "run_phases_output": rel(run_dir / "run-phases-output.txt", root),
+        "run_phases_stderr": rel(run_dir / "run-phases-stderr.txt", root),
         "questions": rel(run_dir / "questions.md", root),
         "docs_approval_request": rel(run_dir / "docs-approval-request.md", root),
+        "orchestration_violation": rel(run_dir / "orchestration-violation.json", root),
         "protocol_violations": protocol_violations,
     }
     write_json(run_dir / "launcher-result.json", result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if protocol_violations:
         return 1
+    if runner_returncode is not None and runner_returncode != 0:
+        return runner_returncode
     return 0 if returncode in (None, 0) else int(returncode)
 
 

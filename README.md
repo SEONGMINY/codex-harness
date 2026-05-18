@@ -156,7 +156,7 @@ python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto
 
 요구사항 확인과 검토는 무엇을 만들지 정합니다.
 phase 계획은 phase contract를 만듭니다.
-phase 실행은 새 Codex 세션에서 진행합니다.
+phase 실행은 launcher가 runner를 호출한 뒤 새 Codex 세션에서 진행합니다.
 검증과 평가는 runner proof를 봅니다.
 
 ## 생성되는 파일

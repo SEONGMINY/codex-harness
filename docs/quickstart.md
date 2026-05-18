@@ -114,6 +114,9 @@ list-tasks.py를 만들어줘.
 EOF
 ```
 
+이 경우 Codex orchestration 세션은 `planned` 상태까지만 만듭니다.
+`start.py`가 `planned` 결과를 받은 뒤 `.codex/harness/scripts/run-phases.py`를 직접 실행합니다.
+
 ## task 검증
 
 task가 만들어진 뒤에는 먼저 검증합니다.

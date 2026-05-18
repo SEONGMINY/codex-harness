@@ -38,6 +38,7 @@ TEXT_EXTENSIONS = {".md", ".txt", ".json"}
 RUNNABLE_PHASE_STATUSES = {"pending", "running"}
 HARNESS_VERSION = "0.1.0"
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
+SCRIPT_DIR = Path(__file__).resolve().parent
 MANDATORY_STATIC_FILES = [
     "original-prompt.md",
     "product.md",
@@ -110,6 +111,32 @@ def non_negative_int(value: str) -> int:
     if parsed < 0:
         raise argparse.ArgumentTypeError("value must be non-negative")
     return parsed
+
+
+def env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def apply_inherited_yolo(args: argparse.Namespace) -> None:
+    args.yolo_inherited = False
+    if not getattr(args, "yolo", False) and env_flag("CODEX_HARNESS_CHILD_CODEX_YOLO"):
+        args.yolo = True
+        args.yolo_inherited = True
+
+
+def nested_codex_preflight_errors(args: argparse.Namespace) -> list[str]:
+    if getattr(args, "dry_run", False):
+        return []
+    if getattr(args, "yolo", False):
+        return []
+    if not env_flag("CODEX_HARNESS_SESSION"):
+        return []
+    return [
+        "run-phases.py is running inside a launcher Codex session, but phase child "
+        "codex exec is not configured with --yolo. Re-run the launcher with --yolo "
+        "or set CODEX_HARNESS_CHILD_CODEX_YOLO=1 so the runner can start fresh phase "
+        "Codex sessions without the parent sandbox blocking ~/.codex state files."
+    ]
 
 
 def run_capture(args: list[str], cwd: Path) -> str:
@@ -1667,7 +1694,7 @@ def generate_docs_diff(root: Path, task_path: Path, baseline: str | None) -> Non
 def run_evaluation(root: Path, task_path: Path, args: argparse.Namespace) -> int:
     command = [
         sys.executable,
-        str(root / "scripts" / "harness" / "evaluate-task.py"),
+        str(SCRIPT_DIR / "evaluate-task.py"),
         task_path.name,
         "--root",
         str(root),
@@ -1684,7 +1711,7 @@ def run_evaluation(root: Path, task_path: Path, args: argparse.Namespace) -> int
 def verify_task(root: Path, task_path: Path, require_evaluation: bool = False) -> int:
     command = [
         sys.executable,
-        str(root / "scripts" / "harness" / "verify-task.py"),
+        str(SCRIPT_DIR / "verify-task.py"),
         task_path.name,
         "--root",
         str(root),
@@ -1774,7 +1801,8 @@ def execute_phase(
     if attempts <= 0 and not args.dry_run and not getattr(args, "resume_repair", False):
         clear_repair_packet(task_path, phase_number)
 
-    preflight_errors = preflight_phase(root, task_path, task_index, phase)
+    preflight_errors = nested_codex_preflight_errors(args)
+    preflight_errors.extend(preflight_phase(root, task_path, task_index, phase))
     if preflight_errors:
         message = "Preflight failed:\n" + "\n".join(f"- {error}" for error in preflight_errors)
         write_last_error(task_path, phase_number, message)
@@ -2279,6 +2307,7 @@ def main() -> int:
     args = parser.parse_args()
     args.failed = False
     args.install_preflight_done = False
+    apply_inherited_yolo(args)
 
     root = Path(args.root).resolve()
     install_errors = harness_install_errors(root)
