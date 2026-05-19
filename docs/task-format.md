@@ -39,7 +39,8 @@ task는 실행 가능한 작업 단위입니다.
   "common_docs": [
     "docs/harness/runner-contract.md",
     "docs/harness/testing.md",
-    "docs/harness/document-scope.md"
+    "docs/harness/document-scope.md",
+    "docs/harness/implementation-quality.md"
   ],
   "docs": [
     "tasks/0-list-tasks/docs/prd.md",
@@ -97,6 +98,7 @@ tasks/<task-dir>/phases/phase<N>.md
   "read_first": {
     "docs": [
       "docs/harness/runner-contract.md",
+      "docs/harness/implementation-quality.md",
       "tasks/0-list-tasks/docs/code-architecture.md",
       "context-pack/static/context-gathering.md"
     ],
@@ -175,6 +177,7 @@ tasks/<task-dir>/phases/phase<N>.md
 ## contract 규칙
 
 - `read_first.docs`는 구체적인 문서나 컨텍스트 경로를 나열합니다.
+- 구현 phase의 `read_first.docs`는 `docs/harness/implementation-quality.md`를 포함해야 합니다.
 - phase N > 0이면 `read_first.previous_outputs`가 있어야 합니다.
 - `scope.allowed_paths`는 저장소 루트 기준의 수정 가능 경로입니다.
 - 문서 작업이 아닌 phase는 `interfaces`를 채웁니다.

@@ -34,7 +34,8 @@ The runner updates `status`, `completed_at`, and `failed_at`.
   "common_docs": [
     "docs/harness/runner-contract.md",
     "docs/harness/testing.md",
-    "docs/harness/document-scope.md"
+    "docs/harness/document-scope.md",
+    "docs/harness/implementation-quality.md"
   ],
   "docs": [
     "tasks/0-harness-mvp/docs/prd.md",
@@ -101,6 +102,7 @@ Required sections:
   "read_first": {
     "docs": [
       "docs/harness/runner-contract.md",
+      "docs/harness/implementation-quality.md",
       "tasks/0-example/docs/code-architecture.md",
       "context-pack/static/context-gathering.md"
     ],
@@ -210,6 +212,7 @@ Do not put requirements only in prose if the runner must enforce them.
 Contract rules:
 
 - `read_first.docs` must list concrete document or context paths.
+- Implementation phases must include `docs/harness/implementation-quality.md` in `read_first.docs`.
 - `read_first.previous_outputs` must list prior phase reconciliation, gate, or handoff files for phase N > 0.
 - `scope.allowed_paths` must list every implementation path the phase may change.
 - `interfaces` must describe function/class signatures for non-documentation phases.

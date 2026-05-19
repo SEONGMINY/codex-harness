@@ -16,6 +16,7 @@ from decision_registry import (
     validate_open_decisions,
 )
 from phase_contract import (
+    IMPLEMENTATION_QUALITY_DOC,
     contract_acceptance_commands,
     contract_required_outputs,
     contract_required_repo_outputs,
@@ -601,6 +602,8 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
     common_docs = [root / raw for raw in task_index.get("common_docs") or []]
     if not common_docs:
         errors.append("Task index must list common_docs.")
+    if root / IMPLEMENTATION_QUALITY_DOC not in common_docs:
+        errors.append(f"Task index common_docs must include {IMPLEMENTATION_QUALITY_DOC}")
     for path in common_docs:
         errors.extend(require_file(root, path, "common doc"))
 

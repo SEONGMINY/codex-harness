@@ -22,6 +22,7 @@ from decision_registry import (
     validate_open_decisions,
 )
 from phase_contract import (
+    IMPLEMENTATION_QUALITY_DOC,
     checklist_markdown,
     contract_acceptance_commands,
     contract_allowed_paths,
@@ -505,6 +506,7 @@ The runner also requires:
 
 - Implement only this phase.
 - Read the included context before editing.
+- Follow `docs/harness/implementation-quality.md` when it is present in the included context.
 - Follow only approved `decision_refs` and `architecture_refs`.
 - Do not introduce new dependencies unless `dependency_policy` explicitly allows them.
 - If the phase needs an unapproved architecture, dependency, data model, or public interface decision, stop blocked and explain the missing decision in the handoff.
@@ -719,7 +721,10 @@ def preflight_phase(root: Path, task_path: Path, task_index: dict, phase: dict) 
     docs = task_doc_files(root, task_index)
     if len(docs) < 5:
         errors.append("Task index must list mandatory docs.")
-    for path in common_doc_files(root, task_index):
+    common_docs = common_doc_files(root, task_index)
+    if root / IMPLEMENTATION_QUALITY_DOC not in common_docs:
+        errors.append(f"Task index common_docs must include {IMPLEMENTATION_QUALITY_DOC}")
+    for path in common_docs:
         errors.extend(require_real_file(root, path, "common doc"))
     for path in docs:
         errors.extend(require_real_file(root, path, "doc"))

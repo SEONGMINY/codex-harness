@@ -90,6 +90,7 @@ Common docs:
 - `docs/harness/runner-contract.md`
 - `docs/harness/testing.md`
 - `docs/harness/document-scope.md`
+- `docs/harness/implementation-quality.md`
 
 Task docs:
 

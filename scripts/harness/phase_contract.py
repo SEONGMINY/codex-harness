@@ -47,6 +47,8 @@ HANDOFF_BLOCK_PATTERNS = [
     ),
     re.compile(r"(막힘|막혔|차단|우회|구현하지 못|부분 구현|일부 구현)"),
 ]
+IMPLEMENTATION_QUALITY_DOC = "docs/harness/implementation-quality.md"
+NON_IMPLEMENTATION_LAYERS = {"docs", "documentation", "planning", "test", "tests", "qa"}
 
 
 def parse_phase_contract(markdown: str) -> tuple[dict[str, Any] | None, list[str]]:
@@ -304,7 +306,7 @@ def validate_phase_contract(
         errors.append("`interfaces` must be a list.")
     else:
         layer = scope.get("layer") if isinstance(scope, dict) else ""
-        if isinstance(layer, str) and layer.lower() not in {"docs", "documentation", "planning", "test", "tests", "qa"} and not interfaces:
+        if isinstance(layer, str) and layer.lower() not in NON_IMPLEMENTATION_LAYERS and not interfaces:
             errors.append("`interfaces` must describe target signatures for non-documentation phases.")
         for index, item in enumerate(interfaces):
             if not isinstance(item, dict):
@@ -338,6 +340,15 @@ def validate_phase_contract(
             expected = item.get("expected_evidence")
             if not isinstance(expected, list) or not expected:
                 errors.append(f"`instructions[{index}].expected_evidence` must be a non-empty list.")
+
+    if isinstance(scope, dict):
+        layer = scope.get("layer")
+        if isinstance(layer, str) and layer.lower() not in NON_IMPLEMENTATION_LAYERS:
+            docs = read_first.get("docs") if isinstance(read_first, dict) else []
+            if not isinstance(docs, list) or IMPLEMENTATION_QUALITY_DOC not in docs:
+                errors.append(
+                    f"`read_first.docs` must include `{IMPLEMENTATION_QUALITY_DOC}` for implementation phases."
+                )
 
     commands = contract_acceptance_commands(contract)
     if not commands:

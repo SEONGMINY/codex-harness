@@ -157,6 +157,7 @@ Return their Markdown content in the structured final output's `artifact.content
   - `docs/harness/runner-contract.md`
   - `docs/harness/testing.md`
   - `docs/harness/document-scope.md`
+  - `docs/harness/implementation-quality.md`
   - `tasks/<task-dir>/docs/prd.md`
   - `tasks/<task-dir>/docs/flow.md`
   - `tasks/<task-dir>/docs/data-schema.md`

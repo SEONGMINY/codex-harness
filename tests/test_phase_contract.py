@@ -186,6 +186,35 @@ class PhaseContractValidationTest(unittest.TestCase):
 
             self.assertTrue(any("required_repo_outputs" in error for error in errors), errors)
 
+    def test_implementation_phase_requires_quality_doc(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["scope"] = {
+                "layer": "runner",
+                "allowed_paths": ["docs/runner.md"],
+            }
+            contract["interfaces"] = [
+                {
+                    "path": "docs/runner.md",
+                    "symbol": "RunnerDoc",
+                    "signature": "Markdown document",
+                    "business_rules": ["Implementation phases read quality guidance."],
+                }
+            ]
+            contract["required_repo_outputs"] = ["docs/runner.md"]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any("implementation-quality.md" in error for error in errors), errors)
+
 
 if __name__ == "__main__":
     unittest.main()

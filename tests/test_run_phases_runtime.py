@@ -517,6 +517,9 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 doc_path = root / f"doc{index}.md"
                 doc_path.write_text("doc\n", encoding="utf-8")
                 docs.append(doc_path.name)
+            quality_doc = root / "docs" / "harness" / "implementation-quality.md"
+            quality_doc.parent.mkdir(parents=True, exist_ok=True)
+            quality_doc.write_text("quality\n", encoding="utf-8")
             subprocess_result = subprocess.run(
                 ["git", "init"],
                 cwd=root,
@@ -578,7 +581,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                         "project": "demo",
                         "task": "demo",
                         "docs": docs,
-                        "common_docs": [],
+                        "common_docs": ["docs/harness/implementation-quality.md"],
                         "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
                     }
                 )
@@ -645,6 +648,9 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 doc_path = root / f"doc{index}.md"
                 doc_path.write_text("doc\n", encoding="utf-8")
                 docs.append(doc_path.name)
+            quality_doc = root / "docs" / "harness" / "implementation-quality.md"
+            quality_doc.parent.mkdir(parents=True, exist_ok=True)
+            quality_doc.write_text("quality\n", encoding="utf-8")
             subprocess_result = subprocess.run(
                 ["git", "init"],
                 cwd=root,
@@ -706,7 +712,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                         "project": "demo",
                         "task": "demo",
                         "docs": docs,
-                        "common_docs": [],
+                        "common_docs": ["docs/harness/implementation-quality.md"],
                         "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
                     }
                 )
@@ -776,6 +782,9 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 doc_path = root / f"doc{index}.md"
                 doc_path.write_text("doc\n", encoding="utf-8")
                 docs.append(doc_path.name)
+            quality_doc = root / "docs" / "harness" / "implementation-quality.md"
+            quality_doc.parent.mkdir(parents=True, exist_ok=True)
+            quality_doc.write_text("quality\n", encoding="utf-8")
             subprocess.run(["git", "init"], cwd=root, text=True, capture_output=True, check=False)
 
             contract = {
@@ -830,7 +839,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                         "project": "demo",
                         "task": "demo",
                         "docs": docs,
-                        "common_docs": [],
+                        "common_docs": ["docs/harness/implementation-quality.md"],
                         "phases": [
                             {
                                 "phase": 0,

@@ -69,6 +69,102 @@ Task-specific docs live under `tasks/<task-dir>/docs/`.
 
 Use task docs for PRD, flow, data schema, architecture, and ADR for a single task.
 """,
+    "implementation-quality.md": """# Implementation Quality
+
+## Purpose
+
+Harness output should be simple, cohesive, and shaped by the target codebase.
+Do not optimize for generic architecture. Optimize for the smallest design that satisfies the approved task and remains easy to change.
+
+## Simplicity Rules
+
+- Do not add abstractions before there is a concrete repeated responsibility.
+- Do not create wrapper functions, helpers, mappers, managers, or handlers that only rename one call site.
+- Keep one-off logic near the code that uses it unless it crosses a real boundary.
+- Prefer existing project patterns over new local architecture.
+- If a new layer, package, shared module, dependency, public interface, state management style, or cross-domain abstraction is needed, stop and record the missing decision instead of guessing.
+
+## Responsibility Boundaries
+
+Group code by lifecycle, change reason, and domain constraints.
+
+- Keep objects and state that are created together and removed together in the same responsibility boundary.
+- Keep objects that share domain constraints in the same responsibility boundary.
+- Keep state that changes inside one domain transaction in the same responsibility boundary.
+- Treat a transaction as one user action or domain event where state must change atomically.
+- Split code when responsibilities have different lifecycles or different reasons to change.
+- A module that creates a subscription, connection, timer, file handle, or similar resource owns cleanup for that resource.
+
+## Architecture Rules
+
+- Design starts with messages and responsibilities, not folders.
+- A screen should send domain messages to hooks or domain modules instead of wiring internal setters.
+- Dependencies must flow in one direction.
+- Avoid cross-feature imports. Compose features at the app or page layer.
+- Shared code may be imported by features and app code, but shared code must not import app or feature internals.
+- Feature folders should contain only the folders they need. Do not create empty `api`, `components`, `hooks`, `types`, or `utils` folders just because a template lists them.
+- Do not add barrel exports by default. Prefer direct imports unless the existing project already uses barrels consistently.
+
+## UI Layer Roles
+
+Layer names may vary by project, but roles should stay clear.
+
+- Page or route layer: screen composition, providers, layout boundaries, suspense/error boundaries.
+- Section layer: data loading, data shaping, empty-state routing, and wiring successful data into widgets.
+- Widget layer: successful UI state and user interaction for a focused feature area.
+- Item layer: repeated single item rendering.
+- Utils: pure calculation or formatting without external library coupling.
+- Lib: integration code for external libraries, SDKs, or framework adapters.
+
+## TypeScript Rules
+
+- Prefer `as const` value maps for status-like values.
+
+```ts
+export const recordingStatus = {
+  idle: "idle",
+  recording: "recording",
+  paused: "paused",
+} as const;
+
+export type RecordingStatus =
+  (typeof recordingStatus)[keyof typeof recordingStatus];
+```
+
+- Keep related types together; use `Pick` to reuse relevant fields instead of duplicating disconnected shapes.
+- Prefer extension or composition when a type is a narrower form of another domain type.
+- Use `interface` for component props.
+- Apply these rules to TypeScript implementation broadly. Simple Node scripts and test utilities may use simpler local types when that is clearer.
+
+## React Rules
+
+- Do not add `useCallback`, `useMemo`, or `memo` by default.
+- Use memoization only when there is a concrete render stability requirement, expensive calculation, or external API contract that needs stable identity.
+- Keep component props focused on domain data and user actions, not internal state setters from other modules.
+- Hooks with setup and cleanup responsibilities should expose messages such as `start`, `stop`, `send`, or `change`, not a bag of setters for the caller to orchestrate.
+
+## Mapper And Utility Rules
+
+- Create a mapper only for a real boundary: external API response, persistence schema, native bridge, wire protocol, or third-party library options.
+- Do not create a mapper only to rename fields for one caller.
+- Do not create generic validation helpers unless multiple call sites share the same validation rule.
+- Prefer straightforward parsing near the boundary over a tree of tiny predicates when the boundary is small and local.
+
+## Testing Rules
+
+- Tests should read as requirements, not implementation copies.
+- Prefer given, when, then structure.
+- Test pure logic first.
+- Render components only when user interaction or visible UI behavior is the point.
+- Avoid tests that only assert mock calls, private implementation details, or pass-through glue code.
+- Use test names that express condition and result, such as `같은 값을 다시 선택하면 > 선택이 해제된다.`
+
+## References
+
+- Bulletproof React project structure: https://github.com/alan2207/bulletproof-react/blob/master/docs/project-structure.md
+- 우아한 객체지향 정리: https://velog.io/@codemcd/우아한테크세미나-우아한객체지향-의존성을-이용해-설계-진화시키기-By-우아한형제들-개발실장-조영호님-vkk5brh7by
+- 우아한 객체지향 세미나 영상: https://www.youtube.com/watch?v=dJ5C4qRqAgA
+""",
 }
 
 DOC_TEMPLATES = {
@@ -408,6 +504,7 @@ The runner uses `required_outputs` from the Contract block.
 - Do not write `context-pack/runtime/phase{phase}-result.json`; the runner generates it.
 - Do not spawn subagents for implementation.
 - Do not expand scope beyond this phase.
+- Follow `docs/harness/implementation-quality.md` when implementing code.
 """
 
 
