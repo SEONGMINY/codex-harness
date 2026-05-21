@@ -507,9 +507,10 @@ The runner also requires:
 - Implement only this phase.
 - Read the included context before editing.
 - Follow `docs/harness/implementation-quality.md` when it is present in the included context.
+- Follow the approved implementation design review or waiver when it is present in the included context.
 - Follow only approved `decision_refs` and `architecture_refs`.
 - Do not introduce new dependencies unless `dependency_policy` explicitly allows them.
-- If the phase needs an unapproved architecture, dependency, data model, or public interface decision, stop blocked and explain the missing decision in the handoff.
+- If the phase needs an unapproved architecture, dependency, data model, module boundary, layer boundary, public interface, API contract, DB/storage schema, state flow, lifecycle, transaction boundary, or user-visible behavior decision, stop blocked and explain the missing decision in the handoff.
 - Do not update any `tasks/*/index.json` file.
 - Do not mark the phase completed.
 - Do not decide the next phase.

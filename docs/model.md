@@ -14,6 +14,7 @@ launcher는 매번 하나의 상태만 만듭니다.
 
 - `questions_needed`
 - `docs_approval_needed`
+- `design_approval_needed`
 - `planned`
 - `generated`
 - `blocked`
@@ -57,9 +58,14 @@ codex-harness는 에이전트 사이의 대화를 넘기지 않습니다.
 요청
 → task 문서
 → context-pack
+→ 구현 설계 리뷰
 → phase contract
 → runner proof
 ```
+
+`design_approval_needed`는 문서 생성 승인 뒤, phase 계획 전에 멈추는 상태입니다.
+이 상태에서는 `tasks/<task-dir>/docs/implementation-design-review.md`를 만들고 레이어 구조, 객체/모듈 의존 방향, 공개 인터페이스, API 계약, DB/스토리지 스키마, 상태와 라이프사이클, 트랜잭션 경계를 승인받습니다.
+작고 구현 설계가 필요 없는 비구현 작업만 `tasks/<task-dir>/docs/design-review-waiver.md`로 대체할 수 있습니다.
 
 ## context-pack
 
@@ -115,6 +121,7 @@ JSON 파일은 runner가 검증하기 위한 기준입니다.
 
 blocking open decision이 남아 있으면 Plan과 Generate는 진행할 수 없습니다.
 phase contract는 승인된 `decision_refs`와 `architecture_refs`만 참조해야 합니다.
+구현 phase의 phase contract는 승인된 구현 설계 리뷰 또는 waiver를 `read_first.docs`에 포함해야 합니다.
 
 ## runner proof
 

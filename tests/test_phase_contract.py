@@ -26,8 +26,18 @@ class PhaseContractValidationTest(unittest.TestCase):
         root = tmp / "repo"
         task_path = root / "tasks" / "demo"
         (root / "docs").mkdir(parents=True)
+        (root / "docs" / "harness").mkdir(parents=True)
+        (task_path / "docs").mkdir(parents=True)
         (task_path / "context-pack" / "handoffs").mkdir(parents=True)
         (root / "docs" / "runner.md").write_text("# Runner\n", encoding="utf-8")
+        (root / "docs" / "harness" / "implementation-quality.md").write_text(
+            "# Implementation Quality\n",
+            encoding="utf-8",
+        )
+        (task_path / "docs" / "implementation-design-review.md").write_text(
+            "# Implementation Design Review\n",
+            encoding="utf-8",
+        )
         return root, task_path
 
     def markdown(self, contract: dict[str, object]) -> str:
@@ -214,6 +224,118 @@ class PhaseContractValidationTest(unittest.TestCase):
             )
 
             self.assertTrue(any("implementation-quality.md" in error for error in errors), errors)
+
+    def test_implementation_phase_requires_design_review_doc(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["read_first"] = {
+                "docs": [
+                    "docs/harness/implementation-quality.md",
+                    "docs/runner.md",
+                ],
+                "previous_outputs": [],
+            }
+            contract["scope"] = {
+                "layer": "runner",
+                "allowed_paths": ["docs/runner.md"],
+            }
+            contract["interfaces"] = [
+                {
+                    "path": "docs/runner.md",
+                    "symbol": "RunnerDoc",
+                    "signature": "Markdown document",
+                    "business_rules": ["Implementation phases read approved design."],
+                }
+            ]
+            contract["required_repo_outputs"] = ["docs/runner.md"]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any("implementation design review" in error for error in errors), errors)
+
+    def test_implementation_phase_accepts_design_review_doc(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["read_first"] = {
+                "docs": [
+                    "docs/harness/implementation-quality.md",
+                    "tasks/demo/docs/implementation-design-review.md",
+                    "docs/runner.md",
+                ],
+                "previous_outputs": [],
+            }
+            contract["scope"] = {
+                "layer": "runner",
+                "allowed_paths": ["docs/runner.md"],
+            }
+            contract["interfaces"] = [
+                {
+                    "path": "docs/runner.md",
+                    "symbol": "RunnerDoc",
+                    "signature": "Markdown document",
+                    "business_rules": ["Implementation phases read approved design."],
+                }
+            ]
+            contract["required_repo_outputs"] = ["docs/runner.md"]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertEqual(errors, [])
+
+    def test_implementation_phase_rejects_root_design_review_doc(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            root_review = root / "docs" / "implementation-design-review.md"
+            root_review.write_text("# Root Design Review\n", encoding="utf-8")
+            contract = self.valid_contract()
+            contract["read_first"] = {
+                "docs": [
+                    "docs/harness/implementation-quality.md",
+                    "docs/implementation-design-review.md",
+                    "docs/runner.md",
+                ],
+                "previous_outputs": [],
+            }
+            contract["scope"] = {
+                "layer": "runner",
+                "allowed_paths": ["docs/runner.md"],
+            }
+            contract["interfaces"] = [
+                {
+                    "path": "docs/runner.md",
+                    "symbol": "RunnerDoc",
+                    "signature": "Markdown document",
+                    "business_rules": ["Implementation phases read approved task design."],
+                }
+            ]
+            contract["required_repo_outputs"] = ["docs/runner.md"]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any("implementation design review" in error for error in errors), errors)
 
 
 if __name__ == "__main__":

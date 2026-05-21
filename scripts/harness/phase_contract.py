@@ -48,6 +48,8 @@ HANDOFF_BLOCK_PATTERNS = [
     re.compile(r"(막힘|막혔|차단|우회|구현하지 못|부분 구현|일부 구현)"),
 ]
 IMPLEMENTATION_QUALITY_DOC = "docs/harness/implementation-quality.md"
+DESIGN_REVIEW_DOC = "implementation-design-review.md"
+DESIGN_REVIEW_WAIVER_DOC = "design-review-waiver.md"
 NON_IMPLEMENTATION_LAYERS = {"docs", "documentation", "planning", "test", "tests", "qa"}
 
 
@@ -166,6 +168,14 @@ def contract_allowed_paths(contract: dict[str, Any] | None) -> list[str]:
     if not isinstance(scope, dict):
         return []
     return string_list(scope.get("allowed_paths"))
+
+
+def task_design_doc_paths(task_path: Path) -> set[str]:
+    task_dir = task_path.name
+    return {
+        f"tasks/{task_dir}/docs/{DESIGN_REVIEW_DOC}",
+        f"tasks/{task_dir}/docs/{DESIGN_REVIEW_WAIVER_DOC}",
+    }
 
 
 def repo_or_task_path(root: Path, task_path: Path, raw_path: str) -> Path:
@@ -348,6 +358,11 @@ def validate_phase_contract(
             if not isinstance(docs, list) or IMPLEMENTATION_QUALITY_DOC not in docs:
                 errors.append(
                     f"`read_first.docs` must include `{IMPLEMENTATION_QUALITY_DOC}` for implementation phases."
+                )
+            if not isinstance(docs, list) or not task_design_doc_paths(task_path).intersection(docs):
+                errors.append(
+                    "`read_first.docs` must include the approved implementation design review "
+                    "or design review waiver for implementation phases."
                 )
 
     commands = contract_acceptance_commands(contract)

@@ -9,6 +9,7 @@
       "enum": [
         "questions_needed",
         "docs_approval_needed",
+        "design_approval_needed",
         "planned",
         "generated",
         "blocked"

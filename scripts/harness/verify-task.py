@@ -16,6 +16,8 @@ from decision_registry import (
     validate_open_decisions,
 )
 from phase_contract import (
+    DESIGN_REVIEW_DOC,
+    DESIGN_REVIEW_WAIVER_DOC,
     IMPLEMENTATION_QUALITY_DOC,
     contract_acceptance_commands,
     contract_required_outputs,
@@ -51,6 +53,22 @@ MANDATORY_TASK_DOCS = [
     "code-architecture.md",
     "adr.md",
 ]
+DESIGN_REVIEW_REQUIRED_SECTIONS = [
+    "Scope Summary",
+    "Layer Plan",
+    "Object/Module Dependency",
+    "Public Interfaces",
+    "API Contract",
+    "DB/Storage Schema",
+    "State And Lifecycle",
+    "Transaction Boundaries",
+    "Files To Add/Change",
+    "Mermaid Diagrams",
+    "Open Decisions",
+    "Approval Checklist",
+]
+ALLOWED_MERMAID_DIAGRAMS = ("flowchart", "sequenceDiagram", "stateDiagram-v2")
+MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*\n(?P<body>.*?)```", re.DOTALL)
 PLACEHOLDER_PATTERNS = [
     re.compile(r"^\s*TODO\b", re.MULTILINE),
     re.compile(r"\[TODO", re.IGNORECASE),
@@ -104,6 +122,60 @@ def require_file(
         errors.append(f"Empty {label}: {rel(root, path)}")
     if check_placeholder and has_placeholder(text):
         errors.append(f"Placeholder remains in {label}: {rel(root, path)}")
+    return errors
+
+
+def validate_mermaid_blocks(text: str) -> list[str]:
+    blocks = [match.group("body").strip() for match in MERMAID_BLOCK_RE.finditer(text)]
+    if not blocks:
+        return ["Implementation design review must include at least one Mermaid block."]
+    errors: list[str] = []
+    valid_block_found = False
+    for index, block in enumerate(blocks):
+        first_line = next((line.strip() for line in block.splitlines() if line.strip()), "")
+        if first_line.startswith(ALLOWED_MERMAID_DIAGRAMS):
+            valid_block_found = True
+        else:
+            errors.append(
+                "Mermaid block "
+                f"{index + 1} must start with one of {ALLOWED_MERMAID_DIAGRAMS}: {first_line or '(empty)'}"
+            )
+    if not valid_block_found:
+        errors.append("Implementation design review must include an allowed Mermaid diagram type.")
+    return errors
+
+
+def validate_design_review(
+    root: Path,
+    task_path: Path,
+    task_docs: list[Path],
+) -> list[str]:
+    docs_dir = task_path / "docs"
+    review_path = docs_dir / DESIGN_REVIEW_DOC
+    waiver_path = docs_dir / DESIGN_REVIEW_WAIVER_DOC
+    errors: list[str] = []
+
+    if review_path.exists():
+        if review_path not in task_docs:
+            errors.append(f"Task index docs must include {rel(root, review_path)}")
+        errors.extend(require_file(root, review_path, "implementation design review"))
+        text = review_path.read_text(encoding="utf-8", errors="replace")
+        for section in DESIGN_REVIEW_REQUIRED_SECTIONS:
+            if not re.search(rf"(?m)^##\s+{re.escape(section)}\s*$", text):
+                errors.append(f"Implementation design review must include section: {section}")
+        errors.extend(validate_mermaid_blocks(text))
+        return errors
+
+    if waiver_path.exists():
+        if waiver_path not in task_docs:
+            errors.append(f"Task index docs must include {rel(root, waiver_path)}")
+        errors.extend(require_file(root, waiver_path, "design review waiver"))
+        return errors
+
+    errors.append(
+        "Task docs must include implementation design review or design review waiver: "
+        f"{rel(root, review_path)} or {rel(root, waiver_path)}"
+    )
     return errors
 
 
@@ -620,6 +692,7 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
         if not str(path).startswith(str(expected_task_doc_dir)):
             errors.append(f"Task-specific doc must live under {rel(root, expected_task_doc_dir)}: {rel(root, path)}")
         errors.extend(require_file(root, path, "task doc"))
+    errors.extend(validate_design_review(root, task_path, task_docs))
 
     static_dir = task_path / "context-pack" / "static"
     for filename in MANDATORY_STATIC_FILES:

@@ -42,7 +42,8 @@ The runner updates `status`, `completed_at`, and `failed_at`.
     "tasks/0-harness-mvp/docs/flow.md",
     "tasks/0-harness-mvp/docs/data-schema.md",
     "tasks/0-harness-mvp/docs/code-architecture.md",
-    "tasks/0-harness-mvp/docs/adr.md"
+    "tasks/0-harness-mvp/docs/adr.md",
+    "tasks/0-harness-mvp/docs/implementation-design-review.md"
   ],
   "phases": [
     {
@@ -68,6 +69,9 @@ Allowed phase statuses:
 Only runner scripts update phase status.
 
 The runner must fail before Generate if mandatory docs, static context, AC commands, or phase files are missing or contain placeholders.
+Every task must include `tasks/<task-dir>/docs/implementation-design-review.md`, or `tasks/<task-dir>/docs/design-review-waiver.md` only for tiny non-implementation work.
+The design review must include approved sections for scope summary, layer plan, object/module dependency, public interfaces, API contract, DB/storage schema, state and lifecycle, transaction boundaries, files to add/change, Mermaid diagrams, open decisions, and approval checklist.
+The Mermaid diagrams section must contain at least one `mermaid` block using `flowchart`, `sequenceDiagram`, or `stateDiagram-v2` when implementation introduces a phase, new file, public interface, layer boundary, or state flow.
 The orchestrator must treat status JSON as insufficient proof.
 Completed phases also require matching runtime output and handoff files.
 Completed phases also require a schema-valid `phase<N>-result.json`.
@@ -103,6 +107,7 @@ Required sections:
     "docs": [
       "docs/harness/runner-contract.md",
       "docs/harness/implementation-quality.md",
+      "tasks/0-example/docs/implementation-design-review.md",
       "tasks/0-example/docs/code-architecture.md",
       "context-pack/static/context-gathering.md"
     ],
@@ -213,6 +218,7 @@ Contract rules:
 
 - `read_first.docs` must list concrete document or context paths.
 - Implementation phases must include `docs/harness/implementation-quality.md` in `read_first.docs`.
+- Implementation phases must include the approved `implementation-design-review.md` or `design-review-waiver.md` in `read_first.docs`.
 - `read_first.previous_outputs` must list prior phase reconciliation, gate, or handoff files for phase N > 0.
 - `scope.allowed_paths` must list every implementation path the phase may change.
 - `interfaces` must describe function/class signatures for non-documentation phases.

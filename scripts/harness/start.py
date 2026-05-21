@@ -35,6 +35,38 @@ SKIP_SNAPSHOT_PATHS = {
 }
 HARNESS_VERSION = "0.1.0"
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
+MANDATORY_COMMON_DOCS = [
+    "docs/harness/runner-contract.md",
+    "docs/harness/testing.md",
+    "docs/harness/document-scope.md",
+    "docs/harness/implementation-quality.md",
+]
+MANDATORY_TASK_DOCS = [
+    "prd.md",
+    "flow.md",
+    "data-schema.md",
+    "code-architecture.md",
+    "adr.md",
+]
+MANDATORY_STATIC_FILES = [
+    "original-prompt.md",
+    "product.md",
+    "decisions.md",
+    "decisions.json",
+    "open-decisions.json",
+    "architecture.json",
+    "dependency-policy.json",
+    "context-gathering-budget.json",
+    "rejected-options.md",
+    "constraints.md",
+    "test-policy.md",
+    "clarify-review.md",
+    "docs-approval.md",
+    "context-gathering.md",
+    "docs-index.md",
+]
+DESIGN_REVIEW_DOC = "implementation-design-review.md"
+DESIGN_REVIEW_WAIVER_DOC = "design-review-waiver.md"
 
 
 def now_id() -> str:
@@ -131,29 +163,33 @@ def build_prompt(
     request_path: Path,
     answer_paths: list[Path],
     docs_approved: bool,
+    design_approved: bool,
     run_phases: bool,
     reasoning_effort: str | None,
 ) -> str:
     answers = "\n".join(f"  - `{rel(path, root)}`" for path in answer_paths) or "  - 없음"
     approval = "approved" if docs_approved else "not_approved"
+    design_approval = "approved" if design_approved else "not_approved"
     generate_state = "requested" if run_phases else "not_requested"
     effort_line = (
         f"- Harness session reasoning effort is forced to `{reasoning_effort}` by the launcher."
         if reasoning_effort
         else "- Harness session reasoning effort follows the active Codex config."
     )
-    if docs_approved:
+    if docs_approved and design_approved:
         interaction_contract = f"""## Allowed Next State
 
-Docs are approved in this launcher run.
+Docs and implementation design are approved in this launcher run.
 
 Produce `planned` or `blocked`.
 
 Required before `planned`:
 
 - Mandatory task docs and context-pack files exist.
+- `tasks/<task-dir>/docs/implementation-design-review.md` or `tasks/<task-dir>/docs/design-review-waiver.md` exists.
 - `decisions.json`, `architecture.json`, and `dependency-policy.json` contain the approved implementation-shaping decisions.
 - `open-decisions.json` has no blocking open item.
+- Approved implementation design is reflected in `decisions.json`, `architecture.json`, `dependency-policy.json`, and phase contracts.
 - Phase contracts reference only approved decisions and architecture refs.
 - `python3 .codex/harness/scripts/verify-task.py <task-dir>` passes.
 - `python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run` passes.
@@ -164,6 +200,44 @@ Do not run Generate from this Codex orchestration session.
 
 If Generate state is `requested`, still stop after docs, context gathering, planning, `verify-task.py`, and `run-phases.py --dry-run`.
 The Python launcher process will run `.codex/harness/scripts/run-phases.py` after it receives a valid `planned` result.
+"""
+    elif docs_approved:
+        interaction_contract = f"""## Allowed Next State
+
+Docs are approved, but implementation design is not approved in this launcher run.
+
+Produce exactly one of these:
+
+- `design_approval_needed`: create task docs, context-pack files, and `tasks/<task-dir>/docs/implementation-design-review.md`.
+- `design_approval_needed`: for tiny non-implementation work only, create `tasks/<task-dir>/docs/design-review-waiver.md` instead and explain why design review is unnecessary.
+- `blocked`: use only when task docs or design review cannot be produced safely.
+
+Do not produce `planned`.
+Do not create final phase contracts for implementation.
+Do not run `verify-task.py`, `run-phases.py`, Generate, or Evaluate.
+
+The implementation design review must include these sections:
+
+- Scope Summary
+- Layer Plan
+- Object/Module Dependency
+- Public Interfaces
+- API Contract
+- DB/Storage Schema
+- State And Lifecycle
+- Transaction Boundaries
+- Files To Add/Change
+- Mermaid Diagrams
+- Open Decisions
+- Approval Checklist
+
+When implementation introduces a phase, new file, public interface, layer boundary, or state flow, `Mermaid Diagrams` must contain at least one `mermaid` block using only `flowchart`, `sequenceDiagram`, or `stateDiagram-v2`.
+Use Mermaid to show object/module dependency direction and layer dependency direction, not decorative layout.
+If any implementation-shaping decision is unresolved, record it in the design review and `open-decisions.json` instead of guessing.
+"""
+        generate_contract = """## Generate
+
+Generate is disabled until the launcher is rerun with `--design-approved`.
 """
     else:
         interaction_contract = f"""## Allowed Next State
@@ -198,7 +272,8 @@ Goal: create exactly one next-state artifact.
 Allowed states:
 
 - Before docs approval: questions_needed | docs_approval_needed | blocked
-- After docs approval: planned | blocked
+- After docs approval before design approval: design_approval_needed | blocked
+- After docs and design approval: planned | blocked
 
 Decision rule:
 
@@ -218,6 +293,7 @@ Decision rule:
 - Answer files:
 {answers}
 - Docs approval state: `{approval}`
+- Design approval state: `{design_approval}`
 - Generate state: `{generate_state}`
 {effort_line}
 
@@ -303,6 +379,53 @@ def resolve_task_path(root: Path, final: dict[str, object] | None) -> Path | Non
     except ValueError:
         return None
     return resolved if resolved.exists() else None
+
+
+def read_json_object(path: Path) -> dict[str, object] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def design_approval_artifacts_exist(root: Path, task_path: Path) -> bool:
+    if not (root / "tasks" / "index.json").is_file():
+        return False
+    task_index = read_json_object(task_path / "index.json")
+    if task_index is None:
+        return False
+
+    common_docs = task_index.get("common_docs")
+    docs = task_index.get("docs")
+    if not isinstance(common_docs, list) or not isinstance(docs, list):
+        return False
+    if not all(isinstance(path, str) for path in common_docs + docs):
+        return False
+
+    for raw_path in MANDATORY_COMMON_DOCS:
+        if raw_path not in common_docs or not (root / raw_path).is_file():
+            return False
+
+    task_dir = task_path.name
+    for filename in MANDATORY_TASK_DOCS:
+        raw_path = f"tasks/{task_dir}/docs/{filename}"
+        if raw_path not in docs or not (root / raw_path).is_file():
+            return False
+
+    review_path = f"tasks/{task_dir}/docs/{DESIGN_REVIEW_DOC}"
+    waiver_path = f"tasks/{task_dir}/docs/{DESIGN_REVIEW_WAIVER_DOC}"
+    if review_path in docs:
+        design_doc_exists = (root / review_path).is_file()
+    elif waiver_path in docs:
+        design_doc_exists = (root / waiver_path).is_file()
+    else:
+        design_doc_exists = False
+    if not design_doc_exists:
+        return False
+
+    static_dir = task_path / "context-pack" / "static"
+    return all((static_dir / filename).is_file() for filename in MANDATORY_STATIC_FILES)
 
 
 def run_phases(root: Path, task_path: Path, run_dir: Path, args: argparse.Namespace) -> int:
@@ -453,12 +576,17 @@ def launcher_status_from_final(root: Path, run_dir: Path, final: dict[str, objec
     if final is None:
         return None
     status = final.get("status")
-    if status not in {"questions_needed", "docs_approval_needed", "planned", "generated", "blocked"}:
+    if status not in {"questions_needed", "docs_approval_needed", "design_approval_needed", "planned", "generated", "blocked"}:
         return None
     if status == "questions_needed":
         return "questions_needed" if (run_dir / "questions.md").exists() else "blocked"
     if status == "docs_approval_needed":
         return "docs_approval_needed" if (run_dir / "docs-approval-request.md").exists() else "blocked"
+    if status == "design_approval_needed":
+        task_path = resolve_task_path(root, final)
+        if task_path is None:
+            return "blocked"
+        return status if design_approval_artifacts_exist(root, task_path) else "blocked"
     if status in {"planned", "generated"}:
         return status if resolve_task_path(root, final) is not None else "blocked"
     return "blocked"
@@ -483,6 +611,7 @@ def main() -> int:
     parser.add_argument("--request", help="Request text.")
     parser.add_argument("--answer-file", action="append", default=[], help="Additional answer/context file.")
     parser.add_argument("--docs-approved", action="store_true", help="Allow the harness session to create docs.")
+    parser.add_argument("--design-approved", action="store_true", help="Allow the harness session to create phase plans after implementation design approval.")
     parser.add_argument("--run-phases", action="store_true", help="Tell the harness session to run Generate.")
     parser.add_argument("--evaluate", action="store_true", help="Tell the harness session to evaluate after Generate.")
     parser.add_argument("--codex-bin", default="codex", help="Codex executable.")
@@ -549,6 +678,7 @@ def main() -> int:
         request_path,
         answer_paths,
         args.docs_approved,
+        args.design_approved,
         args.run_phases,
         reasoning_effort,
     )
@@ -585,7 +715,16 @@ def main() -> int:
             )
 
     final_status = launcher_status_from_final(root, run_dir, final_output)
-    if args.docs_approved and final_output and final_output.get("status") == "generated":
+    if args.docs_approved and not args.design_approved and final_output and final_output.get("status") in {"planned", "generated"}:
+        final_status = "blocked"
+        write_json(
+            run_dir / "orchestration-violation.json",
+            {
+                "status": "orchestration_violation",
+                "reason": "Implementation design approval is required before planned or generated states.",
+            },
+        )
+    elif args.docs_approved and final_output and final_output.get("status") == "generated":
         final_status = "blocked"
         write_json(
             run_dir / "orchestration-violation.json",

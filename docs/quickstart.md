@@ -86,6 +86,7 @@ cat .codex/harness/sessions/<run-id>/last-message.md
 
 `questions.md`가 있으면 답을 추가합니다.
 `docs-approval-request.md`가 있으면 승인한 뒤 다시 실행합니다.
+`implementation-design-review.md`가 있으면 설계를 검토하고 승인한 뒤 다시 실행합니다.
 task 경로도 위 파일에서 확인합니다.
 
 ## 명령으로 직접 시작
@@ -106,10 +107,19 @@ list-tasks.py를 만들어줘.
 EOF
 ```
 
+이 단계는 구현 설계 리뷰를 만들고 `design_approval_needed`에서 멈춥니다.
+구현 설계가 승인된 뒤에는 `--design-approved`를 함께 넘깁니다.
+
+```bash
+python3 .codex/harness/scripts/start.py --request-file - --docs-approved --design-approved --full-auto <<'EOF'
+list-tasks.py를 만들어줘.
+EOF
+```
+
 phase 실행까지 요청하려면:
 
 ```bash
-python3 .codex/harness/scripts/start.py --request-file - --docs-approved --run-phases --full-auto <<'EOF'
+python3 .codex/harness/scripts/start.py --request-file - --docs-approved --design-approved --run-phases --full-auto <<'EOF'
 list-tasks.py를 만들어줘.
 EOF
 ```

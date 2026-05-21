@@ -50,6 +50,7 @@ codex-harness는 대화를 실행 상태로 쓰지 않습니다.
 요청
 → task 문서
 → context-pack
+→ 구현 설계 리뷰
 → phase contract
 → runner proof
 ```
@@ -73,6 +74,7 @@ codex-harness는 대화를 실행 상태로 쓰지 않습니다.
 codex-harness는 구현 요청을 다음 구조로 바꿉니다.
 
 - 요구사항과 범위를 정리한 task 문서
+- 레이어, 객체 의존성, 공개 인터페이스, API/DB/상태 흐름을 담은 구현 설계 리뷰
 - 승인된 기술 결정과 미결정 항목을 담은 decision registry
 - phase마다 필요한 컨텍스트 묶음
 - 수정 범위와 확인 명령이 들어간 phase contract
@@ -114,11 +116,13 @@ cat .codex/harness/sessions/<run-id>/last-message.md
 
 `questions.md`가 있으면 답을 추가합니다.
 `docs-approval-request.md`가 있으면 승인한 뒤 다시 실행합니다.
+`implementation-design-review.md`가 있으면 설계를 검토하고 승인한 뒤 다시 실행합니다.
 
 launcher 상태는 항상 하나입니다.
 
 - `questions_needed`
 - `docs_approval_needed`
+- `design_approval_needed`
 - `planned`
 - `generated`
 - `blocked`
@@ -148,6 +152,7 @@ python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto
 → 요구사항 검토
 → 문서 생성 승인
 → 컨텍스트 수집
+→ 구현 설계 리뷰 승인
 → phase 계획
 → phase 실행
 → 검증
@@ -155,6 +160,7 @@ python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto
 ```
 
 요구사항 확인과 검토는 무엇을 만들지 정합니다.
+구현 설계 리뷰는 어떻게 나눠 만들지 정합니다.
 phase 계획은 phase contract를 만듭니다.
 phase 실행은 launcher가 runner를 호출한 뒤 새 Codex 세션에서 진행합니다.
 검증과 평가는 runner proof를 봅니다.

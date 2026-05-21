@@ -13,6 +13,7 @@ Every launcher run must produce exactly one next state:
 
 - `questions_needed`
 - `docs_approval_needed`
+- `design_approval_needed`
 - `planned`
 - `generated`
 - `blocked`
@@ -24,9 +25,11 @@ Every launcher run must produce exactly one next state:
 3. User approval for docs
 4. Docs and context-pack creation
 5. Context Gathering
-6. Plan
-7. Generate
-8. Evaluate
+6. Implementation Design Review
+7. User approval for implementation design
+8. Plan
+9. Generate
+10. Evaluate
 
 ## Clarify
 
@@ -99,6 +102,7 @@ Task docs:
 - `tasks/<task-dir>/docs/data-schema.md`
 - `tasks/<task-dir>/docs/code-architecture.md`
 - `tasks/<task-dir>/docs/adr.md`
+- `tasks/<task-dir>/docs/implementation-design-review.md`, or `tasks/<task-dir>/docs/design-review-waiver.md` only for tiny non-implementation work
 
 Mandatory task context:
 
@@ -123,6 +127,11 @@ Do not leave placeholders in mandatory docs or context files before Generate.
 
 Markdown explains decisions for people.
 JSON enforces decisions for the runner.
+
+After docs and context gathering, stop with `design_approval_needed` unless the launcher run already has design approval.
+The implementation design review must cover scope, layer plan, object/module dependency direction, public interfaces, API contract, DB/storage schema, state and lifecycle, transaction boundaries, files to add/change, Mermaid diagrams, open decisions, and approval checklist.
+Use Mermaid `flowchart`, `sequenceDiagram`, or `stateDiagram-v2` blocks to show object/module dependency direction and layer dependency direction when implementation introduces a phase, new file, public interface, layer boundary, or state flow.
+Do not create final implementation phase contracts until the whole design review is approved.
 
 ## Context Gathering
 
@@ -149,6 +158,7 @@ Outcome: phase contracts that translate approved decisions into executable work.
 
 Plan may run only when:
 
+- `implementation-design-review.md` or `design-review-waiver.md` exists and is approved.
 - `open-decisions.json` has no blocking open decision.
 - `decisions.json` contains approved implementation decisions.
 - `architecture.json` contains approved architecture refs.
@@ -162,6 +172,7 @@ Rules:
 - Each phase must include a `## Contract` JSON block.
 - Each phase contract must be self-contained and must not reference prior chat context.
 - Each phase contract must list `read_first.docs` and, for phase N > 0, `read_first.previous_outputs`.
+- Each implementation phase contract must include the approved implementation design review or waiver in `read_first.docs`.
 - Each phase contract must list `scope.allowed_paths`.
 - Each non-documentation phase should describe function/class signatures in `interfaces`.
 - Each phase contract must list approved `decision_refs`.

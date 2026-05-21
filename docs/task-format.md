@@ -47,7 +47,8 @@ task는 실행 가능한 작업 단위입니다.
     "tasks/0-list-tasks/docs/flow.md",
     "tasks/0-list-tasks/docs/data-schema.md",
     "tasks/0-list-tasks/docs/code-architecture.md",
-    "tasks/0-list-tasks/docs/adr.md"
+    "tasks/0-list-tasks/docs/adr.md",
+    "tasks/0-list-tasks/docs/implementation-design-review.md"
   ],
   "evaluation_commands": [
     "python3 -m unittest discover -s tests"
@@ -67,6 +68,11 @@ task는 실행 가능한 작업 단위입니다.
 ```
 
 phase 상태는 runner만 바꿉니다.
+
+모든 task는 `tasks/<task-dir>/docs/implementation-design-review.md`를 포함해야 합니다.
+작고 구현 설계가 필요 없는 비구현 작업만 `tasks/<task-dir>/docs/design-review-waiver.md`로 대체할 수 있습니다.
+구현 설계 리뷰는 범위 요약, 레이어 계획, 객체/모듈 의존 방향, 공개 인터페이스, API 계약, DB/스토리지 스키마, 상태와 라이프사이클, 트랜잭션 경계, 추가/변경 파일, Mermaid 다이어그램, 미결정 사항, 승인 체크리스트를 포함해야 합니다.
+구현이 phase, 새 파일, 공개 인터페이스, 레이어 경계, 상태 흐름을 만들면 Mermaid 다이어그램은 `flowchart`, `sequenceDiagram`, `stateDiagram-v2` 중 하나로 작성합니다.
 
 허용되는 상태:
 
@@ -99,6 +105,7 @@ tasks/<task-dir>/phases/phase<N>.md
     "docs": [
       "docs/harness/runner-contract.md",
       "docs/harness/implementation-quality.md",
+      "tasks/0-list-tasks/docs/implementation-design-review.md",
       "tasks/0-list-tasks/docs/code-architecture.md",
       "context-pack/static/context-gathering.md"
     ],
@@ -178,6 +185,7 @@ tasks/<task-dir>/phases/phase<N>.md
 
 - `read_first.docs`는 구체적인 문서나 컨텍스트 경로를 나열합니다.
 - 구현 phase의 `read_first.docs`는 `docs/harness/implementation-quality.md`를 포함해야 합니다.
+- 구현 phase의 `read_first.docs`는 승인된 `implementation-design-review.md` 또는 `design-review-waiver.md`를 포함해야 합니다.
 - phase N > 0이면 `read_first.previous_outputs`가 있어야 합니다.
 - `scope.allowed_paths`는 저장소 루트 기준의 수정 가능 경로입니다.
 - 문서 작업이 아닌 phase는 `interfaces`를 채웁니다.

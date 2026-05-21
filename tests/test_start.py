@@ -282,6 +282,7 @@ class StartLauncherTest(unittest.TestCase):
                     "--request",
                     "generate with yolo",
                     "--docs-approved",
+                    "--design-approved",
                     "--run-phases",
                     "--evaluate",
                     "--full-auto",
@@ -348,6 +349,7 @@ class StartLauncherTest(unittest.TestCase):
                     "--request",
                     "generate and fail",
                     "--docs-approved",
+                    "--design-approved",
                     "--run-phases",
                     "--full-auto",
                     "--codex-bin",
@@ -396,8 +398,200 @@ class StartLauncherTest(unittest.TestCase):
                     "--request",
                     "orchestrator generated",
                     "--docs-approved",
+                    "--design-approved",
                     "--run-phases",
                     "--full-auto",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "blocked")
+            violation_path = Path(repo, launcher_result["orchestration_violation"])
+            self.assertTrue(violation_path.exists())
+
+    def test_docs_approved_without_design_approval_stops_for_design_review(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    args = sys.argv
+                    prompt = sys.stdin.read()
+                    assert "design_approval_needed" in prompt
+                    assert "Generate is disabled until the launcher is rerun with `--design-approved`." in prompt
+                    root = Path.cwd()
+                    task = root / "tasks" / "demo"
+                    (root / "tasks").mkdir(parents=True, exist_ok=True)
+                    (root / "tasks" / "index.json").write_text('{"tasks":[{"dir":"demo"}]}\\n', encoding="utf-8")
+                    common_docs = [
+                        "docs/harness/runner-contract.md",
+                        "docs/harness/testing.md",
+                        "docs/harness/document-scope.md",
+                        "docs/harness/implementation-quality.md",
+                    ]
+                    task_docs = [
+                        "tasks/demo/docs/prd.md",
+                        "tasks/demo/docs/flow.md",
+                        "tasks/demo/docs/data-schema.md",
+                        "tasks/demo/docs/code-architecture.md",
+                        "tasks/demo/docs/adr.md",
+                        "tasks/demo/docs/implementation-design-review.md",
+                    ]
+                    for raw in common_docs + task_docs:
+                        path = root / raw
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text("# Doc\\n", encoding="utf-8")
+                    static_files = [
+                        "original-prompt.md",
+                        "product.md",
+                        "decisions.md",
+                        "decisions.json",
+                        "open-decisions.json",
+                        "architecture.json",
+                        "dependency-policy.json",
+                        "context-gathering-budget.json",
+                        "rejected-options.md",
+                        "constraints.md",
+                        "test-policy.md",
+                        "clarify-review.md",
+                        "docs-approval.md",
+                        "context-gathering.md",
+                        "docs-index.md",
+                    ]
+                    for name in static_files:
+                        path = task / "context-pack" / "static" / name
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text("{}\\n" if name.endswith(".json") else "# Static\\n", encoding="utf-8")
+                    (task / "index.json").write_text(
+                        '{"project":"demo","task":"demo","common_docs":["docs/harness/runner-contract.md","docs/harness/testing.md","docs/harness/document-scope.md","docs/harness/implementation-quality.md"],"docs":["tasks/demo/docs/prd.md","tasks/demo/docs/flow.md","tasks/demo/docs/data-schema.md","tasks/demo/docs/code-architecture.md","tasks/demo/docs/adr.md","tasks/demo/docs/implementation-design-review.md"],"totalPhases":0,"phases":[]}\\n',
+                        encoding="utf-8",
+                    )
+                    review = task / "docs" / "implementation-design-review.md"
+                    review.write_text("# Implementation Design Review\\n", encoding="utf-8")
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    last_message.write_text(
+                        '{"status":"design_approval_needed","task_path":"tasks/demo","files_to_read_next":["tasks/demo/docs/implementation-design-review.md"],"blockers":[],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "needs design review",
+                    "--docs-approved",
+                    "--run-phases",
+                    "--full-auto",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "design_approval_needed")
+            self.assertIsNone(launcher_result["runner_returncode"])
+
+    def test_design_approval_needed_without_task_structure_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    root = Path.cwd()
+                    task = root / "tasks" / "demo"
+                    review = task / "docs" / "implementation-design-review.md"
+                    review.parent.mkdir(parents=True, exist_ok=True)
+                    review.write_text("# Implementation Design Review\\n", encoding="utf-8")
+                    args = sys.argv
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    last_message.write_text(
+                        '{"status":"design_approval_needed","task_path":"tasks/demo","files_to_read_next":["tasks/demo/docs/implementation-design-review.md"],"blockers":[],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "incomplete design review",
+                    "--docs-approved",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "blocked")
+
+    def test_planned_without_design_approval_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    root = Path.cwd()
+                    task = root / "tasks" / "demo"
+                    task.mkdir(parents=True, exist_ok=True)
+                    args = sys.argv
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    last_message.write_text(
+                        '{"status":"planned","task_path":"tasks/demo","files_to_read_next":[],"blockers":[],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "planned too early",
+                    "--docs-approved",
                     "--codex-bin",
                     str(fake),
                 ],

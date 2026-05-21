@@ -10,7 +10,7 @@ version: 0.1.0
 
 Use this skill to launch a separate codex-harness orchestration session. The parent chat should stay small: save the user's request, run `.codex/harness/scripts/start.py`, and report the launcher result.
 
-The harness session moves a request to exactly one durable state: `questions_needed`, `docs_approval_needed`, `planned`, `generated`, or `blocked`.
+The harness session moves a request to exactly one durable state: `questions_needed`, `docs_approval_needed`, `design_approval_needed`, `planned`, `generated`, or `blocked`.
 
 Each state must be backed by files. Do not rely on a long final explanation.
 
@@ -82,7 +82,8 @@ python3 .codex/harness/scripts/start.py --request-file - --full-auto <<'EOF'
 EOF
 ```
 
-Add `--docs-approved`, `--run-phases`, or `--evaluate` only when the user explicitly requested that state.
+Add `--docs-approved`, `--design-approved`, `--run-phases`, or `--evaluate` only when the user explicitly requested that state.
+Use `--design-approved` only after the whole implementation design review has been approved.
 When `--run-phases` is present, `start.py` must first obtain a valid `planned` result from the orchestration session, then call `.codex/harness/scripts/run-phases.py` itself. The orchestration session must not run Generate directly.
 
 After the command finishes, read only these launcher outputs:
@@ -117,12 +118,13 @@ Return their Markdown content in the structured final output's `artifact.content
    - product feature gate for customer-facing features
    - internal tooling gate for automation and developer workflow tools
 6. Ask for approval before writing task docs.
-7. After approval, create all mandatory docs, context-pack files, task indexes, and phase files.
+7. After docs approval, create mandatory docs, context-pack files, and task indexes.
 8. Gather only the code and project context needed for the approved task.
-9. Plan work into self-contained task/phase files.
-10. Validate the task with `.codex/harness/scripts/verify-task.py <task-dir>` and `.codex/harness/scripts/run-phases.py <task-dir> --dry-run`.
-11. Run phases with `.codex/harness/scripts/run-phases.py`.
-12. Evaluate from fresh context.
+9. Create `tasks/<task-dir>/docs/implementation-design-review.md`, or `design-review-waiver.md` only for tiny non-implementation work, and stop with `design_approval_needed` until the whole design review is approved.
+10. After design approval, Plan work into self-contained task/phase files.
+11. Validate the task with `.codex/harness/scripts/verify-task.py <task-dir>` and `.codex/harness/scripts/run-phases.py <task-dir> --dry-run`.
+12. Run phases with `.codex/harness/scripts/run-phases.py`.
+13. Evaluate from fresh context.
 
 ## Hard Rules
 
@@ -137,7 +139,8 @@ Return their Markdown content in the structured final output's `artifact.content
 - Store durable decisions in files under the task context-pack.
 - Store runner-enforced decisions in `decisions.json`, `open-decisions.json`, `architecture.json`, and `dependency-policy.json`.
 - Do not let Plan or Generate invent implementation-shaping decisions.
-- Do not stop after approval until mandatory docs, context-pack files, task indexes, and phase files exist.
+- Do not create final implementation phase contracts before implementation design approval.
+- Do not stop after docs approval until mandatory docs, context-pack files, task indexes, and an implementation design review or waiver exist.
 - Do not run Generate when phase files still contain placeholders or missing AC commands.
 - Do not run Generate for implementation phases unless the contract lists concrete `required_repo_outputs` in addition to the handoff.
 - Let `run-phases.py` perform its package-manager install preflight before phase Codex execution. If install fails, treat the phase as environment-blocked instead of weakening checks.
@@ -150,6 +153,7 @@ Return their Markdown content in the structured final output's `artifact.content
 
 - Stop with `questions_needed` when a blocking decision is missing.
 - Stop with `docs_approval_needed` when Clarify Review passes and task docs are not approved yet.
+- Stop with `design_approval_needed` after docs approval once task docs, context-pack files, and `implementation-design-review.md` or `design-review-waiver.md` exist but implementation design is not approved yet.
 - Stop with `planned` only after task docs, context-pack files, indexes, phase files, `verify-task.py`, and `run-phases.py --dry-run` pass.
 - Stop with `generated` only after requested phases run and runtime proof passes verification.
 - Stop with `blocked` only when the next durable state cannot be produced safely.
@@ -163,6 +167,7 @@ Return their Markdown content in the structured final output's `artifact.content
   - `tasks/<task-dir>/docs/data-schema.md`
   - `tasks/<task-dir>/docs/code-architecture.md`
   - `tasks/<task-dir>/docs/adr.md`
+  - `tasks/<task-dir>/docs/implementation-design-review.md` or `tasks/<task-dir>/docs/design-review-waiver.md`
   - `tasks/index.json`
   - `tasks/<task-dir>/index.json`
   - `tasks/<task-dir>/context-pack/static/decisions.json`
@@ -227,7 +232,7 @@ find tasks/<task-dir>/context-pack/handoffs -maxdepth 1 -type f | sort
 
 ## Runner Commands
 
-Create a task skeleton after Clarify, Review, docs approval, Context Gathering, and Plan:
+Create a task skeleton after Clarify, Review, docs approval, Context Gathering, and implementation design review:
 
 ```bash
 python3 .codex/harness/scripts/init-task.py <task-name> \

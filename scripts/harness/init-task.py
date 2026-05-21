@@ -230,6 +230,56 @@ TODO: Explain why this decision is better than alternatives.
 
 TODO: List rejected options and reasons.
 """,
+    "implementation-design-review.md": """# Implementation Design Review
+
+## Scope Summary
+
+TODO: Summarize the implementation scope that needs approval.
+
+## Layer Plan
+
+TODO: Describe layer boundaries and responsibilities.
+
+## Object/Module Dependency
+
+TODO: Describe object, module, hook, component, API, DB, storage, and external dependency directions.
+
+## Public Interfaces
+
+TODO: List signature-level public interfaces.
+
+## API Contract
+
+TODO: Define request, response, event, or boundary contracts, or state that none are changed.
+
+## DB/Storage Schema
+
+TODO: Define schema changes, persistence shape, migrations, or state that none are changed.
+
+## State And Lifecycle
+
+TODO: Describe state ownership, creation, update, cleanup, and lifecycle boundaries.
+
+## Transaction Boundaries
+
+TODO: Describe user actions or domain events that change state atomically.
+
+## Files To Add/Change
+
+TODO: List files to add, change, or leave untouched.
+
+## Mermaid Diagrams
+
+TODO: Include at least one Mermaid block using flowchart, sequenceDiagram, or stateDiagram-v2 when implementation design review is required.
+
+## Open Decisions
+
+TODO: List unresolved decisions or state that none remain.
+
+## Approval Checklist
+
+TODO: List exactly what is being approved before implementation.
+""",
 }
 
 STATIC_TEMPLATES = {
