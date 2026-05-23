@@ -36,6 +36,20 @@ GENERIC_FORBIDDEN_RULE_PATTERNS = [
         r"be\s+careful",
     ]
 ]
+BUGFIX_VALIDATION_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"\bbug\s*fix\b",
+        r"\bbugfix\b",
+        r"\bfix\b",
+        r"\bvalidation\b",
+        r"\bvalidate\b",
+        r"버그",
+        r"고치",
+        r"오류",
+        r"검증",
+    ]
+]
 HANDOFF_BLOCK_PATTERNS = [
     re.compile(r"(?im)^\s*(?:status|state)\s*:\s*(blocked|partial|skipped|failed)\b"),
     re.compile(r"(?im)^\s*##\s*(?:status|state)\s*\n+\s*(blocked|partial|skipped|failed)\b"),
@@ -47,6 +61,13 @@ HANDOFF_BLOCK_PATTERNS = [
     ),
     re.compile(r"(막힘|막혔|차단|우회|구현하지 못|부분 구현|일부 구현)"),
 ]
+CHANGE_TRACE_SECTION_RE = re.compile(
+    r"(?ms)^##\s+Change Trace\s*$\n(?P<body>.*?)(?=^##\s+|\Z)"
+)
+CHANGE_TRACE_LINE_RE = re.compile(
+    r"^\s*[-*]\s+`(?P<path>[^`]+)`\s*:\s*(?P<ids>.+?)\s*$"
+)
+INSTRUCTION_ID_RE = re.compile(r"`([^`]+)`|([A-Za-z][A-Za-z0-9_-]*-\d+)")
 IMPLEMENTATION_QUALITY_DOC = "docs/harness/implementation-quality.md"
 DESIGN_REVIEW_DOC = "implementation-design-review.md"
 DESIGN_REVIEW_WAIVER_DOC = "design-review-waiver.md"
@@ -118,6 +139,67 @@ def _validate_validation_budget(value: Any) -> list[str]:
     if not isinstance(command_timeout, int) or command_timeout < 1:
         errors.append("`validation_budget.command_timeout_seconds` must be a positive integer.")
     return errors
+
+
+def _contract_text_for_classification(contract: dict[str, Any], phase_name: str | None) -> str:
+    parts: list[str] = [phase_name or "", str(contract.get("name") or "")]
+    scope = contract.get("scope")
+    if isinstance(scope, dict):
+        parts.append(str(scope.get("layer") or ""))
+    for instruction in contract.get("instructions") or []:
+        if isinstance(instruction, dict):
+            parts.append(str(instruction.get("task") or ""))
+    return "\n".join(parts)
+
+
+def contract_needs_verification_evidence(contract: dict[str, Any], phase_name: str | None = None) -> bool:
+    text = _contract_text_for_classification(contract, phase_name)
+    return any(pattern.search(text) for pattern in BUGFIX_VALIDATION_PATTERNS)
+
+
+def _contract_expected_evidence(contract: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for instruction in contract.get("instructions") or []:
+        if isinstance(instruction, dict):
+            values.extend(string_list(instruction.get("expected_evidence")))
+    return values
+
+
+def _validate_verification_evidence(value: Any, contract: dict[str, Any]) -> list[str]:
+    if not isinstance(value, dict):
+        return [
+            "`verification_evidence` must be an object for bugfix or validation phases."
+        ]
+    reproduction = string_list(value.get("reproduction"))
+    fallback_reason = value.get("fallback_reason")
+    alternative = string_list(value.get("alternative_evidence"))
+    evidence_refs = set(contract_acceptance_commands(contract))
+    selected_evidence = reproduction or alternative
+    if reproduction:
+        missing_refs = [item for item in selected_evidence if item not in evidence_refs]
+        if missing_refs:
+            return [
+                "`verification_evidence.reproduction` entries must also appear in "
+                f"`acceptance_commands`: {missing_refs!r}"
+            ]
+        return []
+    if (
+        isinstance(fallback_reason, str)
+        and fallback_reason.strip()
+        and alternative
+    ):
+        evidence_refs.update(_contract_expected_evidence(contract))
+        missing_refs = [item for item in selected_evidence if item not in evidence_refs]
+        if missing_refs:
+            return [
+                "`verification_evidence.alternative_evidence` entries must also appear in "
+                f"`acceptance_commands` or `instructions[*].expected_evidence`: {missing_refs!r}"
+            ]
+        return []
+    return [
+        "`verification_evidence` must include `reproduction`, or both "
+        "`fallback_reason` and `alternative_evidence`, for bugfix or validation phases."
+    ]
 
 
 def _validate_decision_policy_shape(contract: dict[str, Any]) -> list[str]:
@@ -272,6 +354,8 @@ def validate_phase_contract(
     errors.extend(_validate_fallback_behavior(contract.get("fallback_behavior")))
     errors.extend(_validate_validation_budget(contract.get("validation_budget")))
     errors.extend(_validate_decision_policy_shape(contract))
+    if contract_needs_verification_evidence(contract, phase_name):
+        errors.extend(_validate_verification_evidence(contract.get("verification_evidence"), contract))
     if decision_registry is not None:
         errors.extend(validate_contract_refs(contract, decision_registry))
     missing_evidence = contract.get("missing_evidence_behavior")
@@ -489,6 +573,16 @@ def checklist_markdown(contract: dict[str, Any]) -> str:
     if contract.get("missing_evidence_behavior"):
         lines.append(f"- [ ] {contract.get('missing_evidence_behavior')}")
 
+    verification = contract.get("verification_evidence") if isinstance(contract.get("verification_evidence"), dict) else {}
+    if verification:
+        lines.extend(["", "## Verification Evidence", ""])
+        for item in verification.get("reproduction") or []:
+            lines.append(f"- [ ] Reproduction: {item}")
+        if verification.get("fallback_reason"):
+            lines.append(f"- [ ] Fallback reason: {verification['fallback_reason']}")
+        for item in verification.get("alternative_evidence") or []:
+            lines.append(f"- [ ] Alternative evidence: {item}")
+
     lines.extend(["", "## Required Outputs", ""])
     for raw_path in contract_required_outputs(contract):
         lines.append(f"- [ ] `{raw_path}`")
@@ -572,3 +666,50 @@ def handoff_block_reasons(text: str) -> list[str]:
         if match:
             reasons.append(f"handoff matched blocked/partial marker: {match.group(0).strip()}")
     return reasons
+
+
+def handoff_change_trace(text: str) -> dict[str, list[str]]:
+    match = CHANGE_TRACE_SECTION_RE.search(text)
+    if not match:
+        return {}
+    trace: dict[str, list[str]] = {}
+    for line in match.group("body").splitlines():
+        line_match = CHANGE_TRACE_LINE_RE.match(line)
+        if not line_match:
+            continue
+        ids = [
+            group
+            for match_id in INSTRUCTION_ID_RE.finditer(line_match.group("ids"))
+            for group in match_id.groups()
+            if group
+        ]
+        trace[line_match.group("path").strip("/")] = ids
+    return trace
+
+
+def handoff_change_trace_errors(
+    text: str,
+    changed_files: list[str],
+    instruction_ids: list[str],
+) -> list[str]:
+    normalized_changed = sorted({path.strip("/") for path in changed_files if path.strip("/")})
+    if not normalized_changed:
+        return []
+    trace = handoff_change_trace(text)
+    if not trace:
+        return ["Handoff must include `## Change Trace` with changed file to instruction id mappings."]
+
+    errors: list[str] = []
+    allowed_ids = set(instruction_ids)
+    for path in normalized_changed:
+        ids = trace.get(path)
+        if not ids:
+            errors.append(f"Handoff change trace must map changed file to instruction id: {path}")
+            continue
+        unknown_ids = [item for item in ids if item not in allowed_ids]
+        if unknown_ids:
+            errors.append(
+                "Handoff change trace uses unknown instruction id(s) "
+                f"for {path}: {unknown_ids!r}"
+            )
+    return errors

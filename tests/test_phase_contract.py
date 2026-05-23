@@ -165,6 +165,161 @@ class PhaseContractValidationTest(unittest.TestCase):
 
         self.assertTrue(reasons)
 
+    def test_handoff_change_trace_requires_changed_file_mapping(self) -> None:
+        errors = PHASE_CONTRACT.handoff_change_trace_errors(
+            "# Handoff\n\n## Change Trace\n\n- `src/app.py`: `P0-001`\n",
+            ["src/app.py", "src/other.py"],
+            ["P0-001"],
+        )
+
+        self.assertTrue(any("src/other.py" in error for error in errors), errors)
+
+    def test_handoff_change_trace_rejects_unknown_instruction_ids(self) -> None:
+        errors = PHASE_CONTRACT.handoff_change_trace_errors(
+            "# Handoff\n\n## Change Trace\n\n- `src/app.py`: `P0-999`\n",
+            ["src/app.py"],
+            ["P0-001"],
+        )
+
+        self.assertTrue(any("unknown instruction" in error for error in errors), errors)
+
+    def test_handoff_change_trace_accepts_known_instruction_ids(self) -> None:
+        errors = PHASE_CONTRACT.handoff_change_trace_errors(
+            "# Handoff\n\n## Change Trace\n\n- `src/app.py`: `P0-001`\n",
+            ["src/app.py"],
+            ["P0-001"],
+        )
+
+        self.assertEqual(errors, [])
+
+    def test_bugfix_phase_requires_verification_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["name"] = "bugfix"
+            contract["instructions"] = [
+                {
+                    "id": "P0-001",
+                    "task": "Fix the reported regression.",
+                    "expected_evidence": ["docs/runner.md"],
+                }
+            ]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "bugfix",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any("verification_evidence" in error for error in errors), errors)
+
+    def test_success_criteria_verification_word_does_not_force_verification_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["success_criteria"] = [
+                "The behavior is verified by acceptance commands.",
+                "정해진 범위의 동작이 확인 명령으로 검증된다.",
+            ]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertEqual(errors, [])
+
+    def test_bugfix_phase_accepts_reproduction_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["name"] = "bugfix"
+            contract["instructions"] = [
+                {
+                    "id": "P0-001",
+                    "task": "Fix the reported regression.",
+                    "expected_evidence": ["docs/runner.md"],
+                }
+            ]
+            contract["verification_evidence"] = {
+                "reproduction": ["python3 -m unittest tests.test_regression"],
+            }
+            contract["acceptance_commands"] = ["python3 -m unittest tests.test_regression"]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "bugfix",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertEqual(errors, [])
+
+    def test_validation_phase_accepts_fallback_verification_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["name"] = "validation"
+            contract["instructions"] = [
+                {
+                    "id": "P0-001",
+                    "task": "Validate the migration behavior.",
+                    "expected_evidence": ["docs/runner.md"],
+                }
+            ]
+            contract["verification_evidence"] = {
+                "fallback_reason": "The external service is not available in local tests.",
+                "alternative_evidence": ["python3 scripts/check_migration_shape.py"],
+            }
+            contract["acceptance_commands"] = ["python3 scripts/check_migration_shape.py"]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "validation",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertEqual(errors, [])
+
+    def test_bugfix_phase_rejects_unlinked_verification_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["name"] = "bugfix"
+            contract["instructions"] = [
+                {
+                    "id": "P0-001",
+                    "task": "Fix the reported regression.",
+                    "expected_evidence": ["docs/runner.md"],
+                }
+            ]
+            contract["verification_evidence"] = {
+                "reproduction": ["python3 -m unittest tests.test_regression"],
+            }
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "bugfix",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any("acceptance_commands" in error for error in errors), errors)
+
     def test_required_repo_outputs_are_validated_when_present(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_context(Path(raw_tmp))
