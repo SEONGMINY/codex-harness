@@ -75,9 +75,12 @@ codex-harness는 구현 요청을 다음 구조로 바꿉니다.
 
 - 요구사항과 범위를 정리한 task 문서
 - 레이어, 객체 의존성, 공개 인터페이스, API/DB/상태 흐름을 담은 구현 설계 리뷰
+- 승인된 설계 리뷰 문서와 SHA-256 해시를 기록한 design approval
 - 승인된 기술 결정과 미결정 항목을 담은 decision registry
 - phase마다 필요한 컨텍스트 묶음
 - 수정 범위와 확인 명령이 들어간 phase contract
+- bugfix/validation phase의 재현 증거 또는 대체 검증 사유
+- 변경 파일을 phase instruction id에 연결한 handoff trace
 - runner가 실행한 확인 명령
 - 실행 증거, 판정, 대조 기록, 최종 결과
 - 실패 시 다음 시도에 넘기는 repair packet
@@ -131,7 +134,7 @@ task 경로도 위 두 파일에서 확인합니다.
 경로를 확인한 뒤 검증합니다.
 
 ```bash
-python3 .codex/harness/scripts/verify-task.py <task-dir>
+python3 .codex/harness/scripts/verify-task.py <task-dir> --require-design-approval
 python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run
 ```
 
@@ -161,6 +164,7 @@ python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto
 
 요구사항 확인과 검토는 무엇을 만들지 정합니다.
 구현 설계 리뷰는 어떻게 나눠 만들지 정합니다.
+design approval은 어떤 설계 문서를 승인했는지 고정합니다.
 phase 계획은 phase contract를 만듭니다.
 phase 실행은 launcher가 runner를 호출한 뒤 새 Codex 세션에서 진행합니다.
 검증과 평가는 runner proof를 봅니다.

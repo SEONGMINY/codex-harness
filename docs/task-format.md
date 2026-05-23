@@ -73,6 +73,27 @@ phase 상태는 runner만 바꿉니다.
 작고 구현 설계가 필요 없는 비구현 작업만 `tasks/<task-dir>/docs/design-review-waiver.md`로 대체할 수 있습니다.
 구현 설계 리뷰는 범위 요약, 레이어 계획, 객체/모듈 의존 방향, 공개 인터페이스, API 계약, DB/스토리지 스키마, 상태와 라이프사이클, 트랜잭션 경계, 추가/변경 파일, Mermaid 다이어그램, 미결정 사항, 승인 체크리스트를 포함해야 합니다.
 구현이 phase, 새 파일, 공개 인터페이스, 레이어 경계, 상태 흐름을 만들면 Mermaid 다이어그램은 `flowchart`, `sequenceDiagram`, `stateDiagram-v2` 중 하나로 작성합니다.
+`Files To Add/Change`에는 승인된 저장소 경로나 path pattern을 적습니다.
+구현 phase의 `scope.allowed_paths`와 `required_repo_outputs`는 이 승인 경로 안에 있어야 합니다.
+glob pattern은 승인된 pattern과 완전히 같거나, `scripts/harness/` 같은 승인된 디렉터리 prefix 아래에 있을 때만 허용합니다.
+
+구현 설계 승인 뒤에는 다음 파일이 필요합니다.
+
+```json
+{
+  "approved": true,
+  "approved_doc": "tasks/0-list-tasks/docs/implementation-design-review.md",
+  "approved_doc_sha256": "<sha256>",
+  "approved_at": "2026-05-22T10:00:00+09:00",
+  "approval_source": "--design-approved"
+}
+```
+
+파일 위치:
+
+```text
+tasks/<task-dir>/context-pack/static/design-approval.json
+```
 
 허용되는 상태:
 
@@ -163,6 +184,13 @@ tasks/<task-dir>/phases/phase<N>.md
     "command_timeout_seconds": 600
   },
   "missing_evidence_behavior": "명령 출력이나 필수 파일로 증명되기 전까지 빠진 증거는 unresolved로 본다.",
+  "verification_evidence": {
+    "reproduction": [
+      "python3 -m unittest tests.test_regression"
+    ],
+    "fallback_reason": "",
+    "alternative_evidence": []
+  },
   "acceptance_commands": [
     "python3 -m unittest discover -s tests"
   ],
@@ -186,6 +214,7 @@ tasks/<task-dir>/phases/phase<N>.md
 - `read_first.docs`는 구체적인 문서나 컨텍스트 경로를 나열합니다.
 - 구현 phase의 `read_first.docs`는 `docs/harness/implementation-quality.md`를 포함해야 합니다.
 - 구현 phase의 `read_first.docs`는 승인된 `implementation-design-review.md` 또는 `design-review-waiver.md`를 포함해야 합니다.
+- 구현 phase의 `scope.allowed_paths`와 `required_repo_outputs`는 설계 리뷰 `Files To Add/Change`의 승인 경로 안에 있어야 합니다.
 - phase N > 0이면 `read_first.previous_outputs`가 있어야 합니다.
 - `scope.allowed_paths`는 저장소 루트 기준의 수정 가능 경로입니다.
 - 문서 작업이 아닌 phase는 `interfaces`를 채웁니다.
@@ -203,6 +232,9 @@ tasks/<task-dir>/phases/phase<N>.md
 - `fallback_behavior`는 막히거나 테스트가 실패했을 때의 안전한 행동입니다.
 - `validation_budget.max_attempts`는 실제 재시도 횟수입니다.
 - `validation_budget.command_timeout_seconds`는 확인 명령 제한 시간입니다.
+- bugfix 또는 validation 성격의 phase는 `verification_evidence`를 포함해야 합니다.
+- 재현 테스트나 재현 명령이 있으면 `verification_evidence.reproduction`에 적습니다.
+- 재현이 불가능하면 `verification_evidence.fallback_reason`과 `verification_evidence.alternative_evidence`를 함께 적습니다.
 - `acceptance_commands`는 실행 가능한 명령만 둡니다.
 - `required_outputs`는 task 경로 기준입니다.
 - `required_repo_outputs`는 저장소 루트 기준의 구현 산출물입니다. 문서/계획 phase에서는 생략할 수 있지만, 구현 phase에서는 구체적인 파일을 나열해야 하며 `scope.allowed_paths` 안에 있어야 합니다.
@@ -238,6 +270,7 @@ tasks/<task-dir>/context-pack/handoffs/phase<N>.md
 ```
 
 handoff가 `blocked`, `partial`, `skipped`, `workaround`, `우회`, `막힘`, `차단`, `부분 구현`처럼 미완료 상태를 말하면 runner gate가 실패합니다. 파일 존재와 확인 명령이 통과해도 완료로 보지 않습니다.
+handoff는 `## Change Trace` 섹션에서 필수 task output을 제외한 변경 저장소 파일을 phase instruction id에 연결해야 합니다.
 
 권장 구조:
 
@@ -247,6 +280,10 @@ handoff가 `blocked`, `partial`, `skipped`, `workaround`, `우회`, `막힘`, `�
 ## 변경 파일
 
 - <path>: <요약>
+
+## Change Trace
+
+- `<path>`: `<instruction-id>`
 
 ## 동작
 

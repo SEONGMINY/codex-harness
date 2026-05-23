@@ -92,6 +92,7 @@ runner는 이 결과를 gate 판정에 씁니다.
 - 필수 산출물
 - 구현 산출물
 - handoff blocked/partial 상태
+- handoff 변경 추적(`## Change Trace`)
 - 수정 범위
 
 하나라도 실패하면 gate는 failed입니다.

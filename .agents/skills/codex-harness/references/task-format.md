@@ -72,6 +72,7 @@ The runner must fail before Generate if mandatory docs, static context, AC comma
 Every task must include `tasks/<task-dir>/docs/implementation-design-review.md`, or `tasks/<task-dir>/docs/design-review-waiver.md` only for tiny non-implementation work.
 The design review must include approved sections for scope summary, layer plan, object/module dependency, public interfaces, API contract, DB/storage schema, state and lifecycle, transaction boundaries, files to add/change, Mermaid diagrams, open decisions, and approval checklist.
 The Mermaid diagrams section must contain at least one `mermaid` block using `flowchart`, `sequenceDiagram`, or `stateDiagram-v2` when implementation introduces a phase, new file, public interface, layer boundary, or state flow.
+The `Files To Add/Change` section must list repository paths or path patterns. Implementation phase `scope.allowed_paths` and `required_repo_outputs` must be covered by these approved paths. For glob patterns, the verifier accepts the exact approved glob, or a phase glob under an approved directory prefix such as `scripts/harness/`.
 The orchestrator must treat status JSON as insufficient proof.
 Completed phases also require matching runtime output and handoff files.
 Completed phases also require a schema-valid `phase<N>-result.json`.
@@ -168,6 +169,13 @@ Required sections:
     "command_timeout_seconds": 600
   },
   "missing_evidence_behavior": "Treat missing expected evidence as unresolved until command output or required files prove it.",
+  "verification_evidence": {
+    "reproduction": [
+      "python3 -m unittest tests.test_regression"
+    ],
+    "fallback_reason": "",
+    "alternative_evidence": []
+  },
   "acceptance_commands": [
     "python3 -m py_compile .codex/harness/scripts/run-phases.py .codex/harness/scripts/verify-task.py"
   ],
@@ -219,6 +227,7 @@ Contract rules:
 - `read_first.docs` must list concrete document or context paths.
 - Implementation phases must include `docs/harness/implementation-quality.md` in `read_first.docs`.
 - Implementation phases must include the approved `implementation-design-review.md` or `design-review-waiver.md` in `read_first.docs`.
+- Implementation phase `scope.allowed_paths` and `required_repo_outputs` must stay inside approved design review `Files To Add/Change` paths.
 - `read_first.previous_outputs` must list prior phase reconciliation, gate, or handoff files for phase N > 0.
 - `scope.allowed_paths` must list every implementation path the phase may change.
 - `interfaces` must describe function/class signatures for non-documentation phases.
@@ -236,6 +245,9 @@ Contract rules:
 - `fallback_behavior.if_blocked` and `fallback_behavior.if_tests_fail` must define the next safe action.
 - `validation_budget.max_attempts` and `validation_budget.command_timeout_seconds` must be positive integers.
 - `missing_evidence_behavior` must explain how to handle unproven expected evidence.
+- Bugfix or validation phases must include `verification_evidence`.
+- Use `verification_evidence.reproduction` for a reproducing test or command.
+- If reproduction is not possible, include both `verification_evidence.fallback_reason` and `verification_evidence.alternative_evidence`.
 - `acceptance_commands` must contain executable commands only.
 - `required_outputs` must contain task-relative paths.
 - `required_repo_outputs` must contain repository-relative implementation files for non-documentation phases, and every entry must be covered by `scope.allowed_paths`.
@@ -248,6 +260,7 @@ Phase agents must:
 
 - implement only the phase
 - write the required handoff
+- include `## Change Trace` in the handoff and map every changed repository file to one or more instruction ids
 - run useful local checks when possible
 - report what changed
 - report blocked or partial status honestly in the handoff when work could not be completed
@@ -275,3 +288,4 @@ find tasks/<task-dir>/context-pack/handoffs -maxdepth 1 -type f | sort
 The runtime directory must include runner output files.
 If it does not, report failure even if `tasks/<task-dir>/index.json` says `completed`.
 If the handoff says blocked, partial, skipped, workaround, or equivalent Korean wording, the phase is not complete even when commands pass.
+If the handoff omits `## Change Trace` for changed repository files, the phase is not complete even when commands pass.

@@ -67,6 +67,9 @@ codex-harness는 에이전트 사이의 대화를 넘기지 않습니다.
 이 상태에서는 `tasks/<task-dir>/docs/implementation-design-review.md`를 만들고 레이어 구조, 객체/모듈 의존 방향, 공개 인터페이스, API 계약, DB/스토리지 스키마, 상태와 라이프사이클, 트랜잭션 경계를 승인받습니다.
 작고 구현 설계가 필요 없는 비구현 작업만 `tasks/<task-dir>/docs/design-review-waiver.md`로 대체할 수 있습니다.
 
+구현 설계가 승인되면 `tasks/<task-dir>/context-pack/static/design-approval.json`에 승인 대상 문서와 SHA-256 해시를 남깁니다.
+승인 뒤 설계 리뷰 문서가 바뀌면 해시가 달라지므로 Plan은 다시 승인받기 전까지 통과하지 않습니다.
+
 ## context-pack
 
 `context-pack`은 다음 phase가 읽을 문서와 전달 메모를 모은 폴더입니다.
@@ -122,6 +125,9 @@ JSON 파일은 runner가 검증하기 위한 기준입니다.
 blocking open decision이 남아 있으면 Plan과 Generate는 진행할 수 없습니다.
 phase contract는 승인된 `decision_refs`와 `architecture_refs`만 참조해야 합니다.
 구현 phase의 phase contract는 승인된 구현 설계 리뷰 또는 waiver를 `read_first.docs`에 포함해야 합니다.
+구현 phase의 `scope.allowed_paths`와 `required_repo_outputs`는 설계 리뷰의 `Files To Add/Change`에 승인된 경로 안에 있어야 합니다.
+구현 방향을 바꾸는 가정은 별도 추측으로 남기지 않습니다. 승인된 기본값은 `decisions.json`에, 미확정이면 `open-decisions.json`에 남깁니다.
+bugfix 또는 validation phase는 재현 증거를 `verification_evidence`에 남기거나, 재현이 불가능한 이유와 대체 검증을 함께 남깁니다.
 
 ## runner proof
 

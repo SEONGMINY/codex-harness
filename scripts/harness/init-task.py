@@ -158,6 +158,13 @@ export type RecordingStatus =
 - Render components only when user interaction or visible UI behavior is the point.
 - Avoid tests that only assert mock calls, private implementation details, or pass-through glue code.
 - Use test names that express condition and result, such as `같은 값을 다시 선택하면 > 선택이 해제된다.`
+- Bugfix and validation phases should include reproduction evidence. If a reproducible test or command is not possible, record the fallback reason and alternative evidence in the phase contract.
+
+## Surgical Change Rules
+
+- Every changed repository file must trace to a phase instruction id in the phase handoff.
+- Do not change adjacent code, formatting, comments, or docs unless the phase contract asks for it.
+- Remove only unused code created by the current phase. Report pre-existing dead code instead of deleting it.
 
 ## References
 
@@ -267,6 +274,7 @@ TODO: Describe user actions or domain events that change state atomically.
 ## Files To Add/Change
 
 TODO: List files to add, change, or leave untouched.
+Use repository-relative paths or path patterns. Implementation phase `scope.allowed_paths` and `required_repo_outputs` must stay inside these approved paths.
 
 ## Mermaid Diagrams
 
@@ -554,6 +562,7 @@ The runner uses `required_outputs` from the Contract block.
 - Do not write `context-pack/runtime/phase{phase}-result.json`; the runner generates it.
 - Do not spawn subagents for implementation.
 - Do not expand scope beyond this phase.
+- In `context-pack/handoffs/phase{phase}.md`, include `## Change Trace` and map every changed repository file to one or more instruction ids.
 - Follow `docs/harness/implementation-quality.md` when implementing code.
 """
 

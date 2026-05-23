@@ -122,7 +122,7 @@ Return their Markdown content in the structured final output's `artifact.content
 8. Gather only the code and project context needed for the approved task.
 9. Create `tasks/<task-dir>/docs/implementation-design-review.md`, or `design-review-waiver.md` only for tiny non-implementation work, and stop with `design_approval_needed` until the whole design review is approved.
 10. After design approval, Plan work into self-contained task/phase files.
-11. Validate the task with `.codex/harness/scripts/verify-task.py <task-dir>` and `.codex/harness/scripts/run-phases.py <task-dir> --dry-run`.
+11. Validate the task with `.codex/harness/scripts/verify-task.py <task-dir> --require-design-approval` and `.codex/harness/scripts/run-phases.py <task-dir> --dry-run`.
 12. Run phases with `.codex/harness/scripts/run-phases.py`.
 13. Evaluate from fresh context.
 
@@ -141,7 +141,10 @@ Return their Markdown content in the structured final output's `artifact.content
 - Do not let Plan or Generate invent implementation-shaping decisions.
 - Do not create final implementation phase contracts before implementation design approval.
 - Do not stop after docs approval until mandatory docs, context-pack files, task indexes, and an implementation design review or waiver exist.
+- After implementation design approval, write `tasks/<task-dir>/context-pack/static/design-approval.json` with the approved design document path and current SHA-256 hash before Plan.
+- Do not let implementation phase contracts include files outside the approved design review `Files To Add/Change` paths.
 - Do not run Generate when phase files still contain placeholders or missing AC commands.
+- Do not run Generate for bugfix or validation phases unless the contract records reproduction evidence, or a fallback reason with alternative evidence.
 - Do not run Generate for implementation phases unless the contract lists concrete `required_repo_outputs` in addition to the handoff.
 - Let `run-phases.py` perform its package-manager install preflight before phase Codex execution. If install fails, treat the phase as environment-blocked instead of weakening checks.
 - Do not manually mark phases or tasks completed.
@@ -175,9 +178,10 @@ Return their Markdown content in the structured final output's `artifact.content
   - `tasks/<task-dir>/context-pack/static/architecture.json`
   - `tasks/<task-dir>/context-pack/static/dependency-policy.json`
   - `tasks/<task-dir>/context-pack/static/context-gathering-budget.json`
+  - `tasks/<task-dir>/context-pack/static/design-approval.json` after implementation design approval
   - `tasks/<task-dir>/context-pack/static/*`
   - `tasks/<task-dir>/phases/phase<N>.md`
-- After Plan, run `python3 .codex/harness/scripts/verify-task.py <task-dir>` and `python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run`. Fix failures before stopping.
+- After Plan, run `python3 .codex/harness/scripts/verify-task.py <task-dir> --require-design-approval` and `python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run`. Fix failures before stopping.
 - After Generate, verify runtime proof before stopping.
 - After Generate, run `python3 .codex/harness/scripts/evaluate-task.py <task-dir>` with the task's evaluation commands unless the user explicitly asks not to.
 
@@ -204,7 +208,7 @@ Generate is not complete unless these files exist:
 `phase<N>-gate.json` is runner-owned. It must pass before the phase can be marked completed.
 `phase<N>-repair-packet.*` is runner-owned. It summarizes retryable failures for the next attempt. If it contains `contaminating_changes`, the failure is not auto-retryable until the paths are reviewed, cleaned up, or explicitly brought into phase scope.
 
-For implementation phases, the contract must list repository files under `required_repo_outputs`; every entry must also be covered by `scope.allowed_paths`. The runner checks those files exist separately from task-relative `required_outputs`. A handoff that says blocked, partial, skipped, workaround, or equivalent Korean wording is a failed phase even if files and commands exist.
+For implementation phases, the contract must list repository files under `required_repo_outputs`; every entry must also be covered by `scope.allowed_paths`. The runner checks those files exist separately from task-relative `required_outputs`. A handoff that says blocked, partial, skipped, workaround, or equivalent Korean wording is a failed phase even if files and commands exist. A handoff that does not map changed repository files to phase instruction ids in `## Change Trace` is also a failed phase.
 
 Evaluate is not complete unless these files exist:
 
