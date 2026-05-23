@@ -15,6 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 START = ROOT / "scripts" / "harness" / "start.py"
+HARNESS_VERSION = "0.1.1"
 
 
 class StartLauncherTest(unittest.TestCase):
@@ -22,11 +23,11 @@ class StartLauncherTest(unittest.TestCase):
         repo = tmp / "repo"
         (repo / ".codex" / "harness" / "scripts" / "skill").mkdir(parents=True)
         (repo / "codex-harness.json").write_text(
-            '{"name":"codex-harness","version":"0.1.0"}\n',
+            json.dumps({"name": "codex-harness", "version": HARNESS_VERSION}) + "\n",
             encoding="utf-8",
         )
         (repo / ".codex" / "harness" / "scripts" / "skill" / "SKILL.md").write_text(
-            "---\nname: codex-harness\nversion: 0.1.0\n---\n# skill\n",
+            f"---\nname: codex-harness\nversion: {HARNESS_VERSION}\n---\n# skill\n",
             encoding="utf-8",
         )
         (repo / ".codex" / "harness" / "scripts" / "start.py").write_text(
@@ -39,6 +40,14 @@ class StartLauncherTest(unittest.TestCase):
         )
         (repo / ".codex" / "harness" / "scripts" / "verify-task.py").write_text(
             "#!/usr/bin/env python3\nraise SystemExit(0)\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "relationship_graph.py").write_text(
+            "# relationship graph helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "gen-relationship-graph.py").write_text(
+            "#!/usr/bin/env python3\n",
             encoding="utf-8",
         )
         return repo
@@ -85,6 +94,31 @@ class StartLauncherTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertIn(".codex/harness/scripts/verify-task.py", result.stderr)
+
+    def test_missing_relationship_graph_script_fails_install_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            (repo / ".codex" / "harness" / "scripts" / "relationship_graph.py").unlink()
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "invalid install",
+                    "--codex-bin",
+                    str(tmp / "unused-codex"),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(".codex/harness/scripts/relationship_graph.py", result.stderr)
 
     def test_questions_artifact_in_final_output_sets_questions_needed_status(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -327,6 +361,10 @@ class StartLauncherTest(unittest.TestCase):
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["status"], "generated")
             self.assertEqual(launcher_result["runner_returncode"], 0)
+            graph = launcher_result["relationship_graph"]
+            self.assertEqual(graph["status"], "generated")
+            self.assertTrue((repo / graph["json"]).exists())
+            self.assertTrue((repo / graph["mermaid"]).exists())
             argv = json.loads(runner_argv.read_text(encoding="utf-8"))
             self.assertEqual(
                 Path(argv[0]).resolve(),
@@ -396,6 +434,57 @@ class StartLauncherTest(unittest.TestCase):
             self.assertTrue(violation_path.exists())
             verify_output = Path(repo, launcher_result["verify_task_output"])
             self.assertIn("verify failed", verify_output.read_text(encoding="utf-8"))
+
+    def test_planned_generates_relationship_graph_without_option(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    root = Path.cwd()
+                    task = root / "tasks" / "demo"
+                    task.mkdir(parents=True, exist_ok=True)
+                    args = sys.argv
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    last_message.write_text(
+                        '{"status":"planned","task_path":"tasks/demo","files_to_read_next":[],"blockers":[],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "planned graph",
+                    "--docs-approved",
+                    "--design-approved",
+                    "--full-auto",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "planned")
+            graph = launcher_result["relationship_graph"]
+            self.assertEqual(graph["status"], "generated")
+            self.assertTrue((repo / graph["json"]).exists())
+            self.assertTrue((repo / graph["mermaid"]).exists())
 
     def test_run_phases_failure_blocks_launcher_result(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

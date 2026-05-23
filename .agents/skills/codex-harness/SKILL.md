@@ -1,7 +1,7 @@
 ---
 name: codex-harness
 description: Run a Codex implementation harness for scoped product or internal tooling work. Use when the user invokes `$codex-harness`, asks to clarify requirements before implementation, wants a strict Clarify to Review to Context Gathering to Plan to Generate to Evaluate workflow, or wants phase-based Codex execution controlled by scripts instead of subagents or long chained sessions.
-version: 0.1.0
+version: 0.1.1
 ---
 
 # Codex Harness
@@ -19,6 +19,8 @@ Clarify is a decision gate. Implementation-shaping decisions such as architectur
 The harness does not chain long Codex conversations. It captures decisions as files, runs planning orchestration in a separate `codex exec` session, then the launcher process calls the runner, and each implementation phase runs in another fresh `codex exec` session while the runner owns status, retries, and failure decisions.
 
 Harness `codex exec` calls use structured output schemas for launcher, phase, and evaluation final responses. Treat those final responses as summaries only. Runtime proof files and command results remain the source of truth.
+
+When a task reaches a valid `planned` or `generated` state, the launcher or runner automatically writes a read-only relationship graph under `tasks/<task-dir>/context-pack/runtime/relationship-graph.json` and `.mmd`. This graph is derived from task artifacts only; it is not a new source of truth. If graph generation fails, treat `relationship-graph-warning.json` as a non-blocking warning unless `verify-task.py` or runner proof reports a real source artifact error.
 
 When a phase fails a retryable check, the runner writes a repair packet under `context-pack/runtime/` and retries the same phase with that packet in context. The phase agent repairs only the listed failures; it does not decide the next phase.
 
@@ -40,13 +42,15 @@ required = [
     root / ".codex" / "harness" / "scripts" / "skill" / "SKILL.md",
     root / ".codex" / "harness" / "scripts" / "start.py",
     root / ".codex" / "harness" / "scripts" / "run-phases.py",
+    root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
+    root / ".codex" / "harness" / "scripts" / "gen-relationship-graph.py",
 ]
 missing = [str(path) for path in required if not path.exists()]
 if missing:
     raise SystemExit("missing: " + ", ".join(missing))
 manifest_version = json.loads((root / "codex-harness.json").read_text(encoding="utf-8")).get("version")
 skill_text = (root / ".codex" / "harness" / "scripts" / "skill" / "SKILL.md").read_text(encoding="utf-8")
-if manifest_version != "0.1.0" or "version: 0.1.0" not in skill_text:
+if manifest_version != "0.1.1" or "version: 0.1.1" not in skill_text:
     raise SystemExit(f"version mismatch: manifest={manifest_version}")
 PY
 ```
@@ -97,6 +101,8 @@ After the command finishes, read only these launcher outputs:
 - `.codex/harness/sessions/<run-id>/orchestration-violation.json`, when present
 
 Report the status and next file path. Do not summarize the whole harness session unless the user asks.
+If `launcher-result.json` includes `relationship_graph.status: "warning"`, mention the warning path briefly without changing the task status.
+For `planned` or `generated`, use `launcher-result.json.relationship_graph` as the relationship graph status. The isolated harness session cannot verify this file because the launcher writes it after the session exits.
 
 ## Harness Session Mode
 
@@ -143,6 +149,7 @@ Return their Markdown content in the structured final output's `artifact.content
 - Do not stop after docs approval until mandatory docs, context-pack files, task indexes, and an implementation design review or waiver exist.
 - After implementation design approval, write `tasks/<task-dir>/context-pack/static/design-approval.json` with the approved design document path and current SHA-256 hash before Plan.
 - Do not let implementation phase contracts include files outside the approved design review `Files To Add/Change` paths.
+- Do not require the isolated harness session to verify relationship graph outputs. The launcher or runner writes them after the session or phase process exits.
 - Do not run Generate when phase files still contain placeholders or missing AC commands.
 - Do not run Generate for bugfix or validation phases unless the contract records reproduction evidence, or a fallback reason with alternative evidence.
 - Do not run Generate for implementation phases unless the contract lists concrete `required_repo_outputs` in addition to the handoff.
@@ -182,7 +189,9 @@ Return their Markdown content in the structured final output's `artifact.content
   - `tasks/<task-dir>/context-pack/static/*`
   - `tasks/<task-dir>/phases/phase<N>.md`
 - After Plan, run `python3 .codex/harness/scripts/verify-task.py <task-dir> --require-design-approval` and `python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run`. Fix failures before stopping.
+- After Plan, stop after verification and dry-run pass. The launcher will generate `relationship-graph.json` and `.mmd`, or `relationship-graph-warning.json`, after the isolated session exits.
 - After Generate, verify runtime proof before stopping.
+- After Generate, the runner refreshes `relationship-graph.json` and `.mmd`, or records `relationship-graph-warning.json`, after phase execution.
 - After Generate, run `python3 .codex/harness/scripts/evaluate-task.py <task-dir>` with the task's evaluation commands unless the user explicitly asks not to.
 
 ## Runtime Proof

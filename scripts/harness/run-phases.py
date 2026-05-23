@@ -39,7 +39,7 @@ from phase_contract import (
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
 RUNNABLE_PHASE_STATUSES = {"pending", "running"}
-HARNESS_VERSION = "0.1.0"
+HARNESS_VERSION = "0.1.1"
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 SCRIPT_DIR = Path(__file__).resolve().parent
 MANDATORY_STATIC_FILES = [
@@ -94,6 +94,17 @@ def harness_install_errors(root: Path) -> list[str]:
     manifest_path = root / "codex-harness.json"
     if not manifest_path.exists():
         return ["Missing codex-harness.json. Reinstall codex-harness in this project."]
+    required_paths = [
+        root / ".codex" / "harness" / "scripts" / "run-phases.py",
+        root / ".codex" / "harness" / "scripts" / "verify-task.py",
+        root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
+    ]
+    missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
+    if missing_required:
+        return [
+            "codex-harness is not installed in this project. Missing: "
+            + ", ".join(missing_required)
+        ]
     try:
         manifest = read_json(manifest_path)
     except (json.JSONDecodeError, OSError) as exc:
@@ -1742,6 +1753,21 @@ def generate_docs_diff(root: Path, task_path: Path, baseline: str | None) -> Non
     )
 
 
+def generate_relationship_graph(root: Path, task_path: Path) -> None:
+    from relationship_graph import write_relationship_graph_outputs
+
+    result = write_relationship_graph_outputs(root, task_path)
+    if result.get("status") == "warning":
+        warning = result.get("warning")
+        if warning:
+            message = f"relationship graph warning: {warning}"
+        else:
+            detail = result.get("warning_error") or result.get("error") or "warning file unavailable"
+            message = f"relationship graph warning file unavailable: {detail}"
+        append_progress(task_path, message)
+        print(message[:1].upper() + message[1:], file=sys.stderr)
+
+
 def run_evaluation(root: Path, task_path: Path, args: argparse.Namespace) -> int:
     command = [
         sys.executable,
@@ -2409,6 +2435,7 @@ def main() -> int:
 
         task_index = read_json(task_path / "index.json")
         if not args.dry_run and all(phase.get("status") == "completed" for phase in task_index.get("phases", [])):
+            generate_relationship_graph(root, task_path)
             if verify_task(root, task_path) != 0:
                 update_top_index(root, task_path.name, "error")
                 args.failed = True

@@ -33,7 +33,7 @@ SKIP_SNAPSHOT_PATHS = {
     ".codex-harness",
     ".codex/harness/sessions",
 }
-HARNESS_VERSION = "0.1.0"
+HARNESS_VERSION = "0.1.1"
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MANDATORY_COMMON_DOCS = [
     "docs/harness/runner-contract.md",
@@ -474,6 +474,14 @@ def verify_task(root: Path, task_path: Path, run_dir: Path) -> int:
     return int(result.returncode)
 
 
+def generate_relationship_graph(root: Path, task_path: Path | None) -> dict[str, object] | None:
+    if task_path is None:
+        return None
+    from relationship_graph import write_relationship_graph_outputs
+
+    return write_relationship_graph_outputs(root, task_path)
+
+
 def write_json(path: Path, data: dict[str, object]) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -510,6 +518,8 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "start.py",
         root / ".codex" / "harness" / "scripts" / "run-phases.py",
         root / ".codex" / "harness" / "scripts" / "verify-task.py",
+        root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
+        root / ".codex" / "harness" / "scripts" / "gen-relationship-graph.py",
     ]
     missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
     if missing_required:
@@ -793,6 +803,10 @@ def main() -> int:
             runner_returncode = run_phases(root, task_path, run_dir, args)
             final_status = "generated" if runner_returncode == 0 else "blocked"
 
+    relationship_graph: dict[str, object] | None = None
+    if not args.dry_run and final_status in {"planned", "generated"}:
+        relationship_graph = generate_relationship_graph(root, resolve_task_path(root, final_output))
+
     result = {
         "status": "protocol_violation"
         if protocol_violations
@@ -810,6 +824,7 @@ def main() -> int:
         "run_phases_stderr": rel(run_dir / "run-phases-stderr.txt", root),
         "verify_task_output": rel(run_dir / "verify-task-output.txt", root),
         "verify_task_stderr": rel(run_dir / "verify-task-stderr.txt", root),
+        "relationship_graph": relationship_graph,
         "questions": rel(run_dir / "questions.md", root),
         "docs_approval_request": rel(run_dir / "docs-approval-request.md", root),
         "orchestration_violation": rel(run_dir / "orchestration-violation.json", root),

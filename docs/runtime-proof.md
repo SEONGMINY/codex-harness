@@ -44,6 +44,17 @@ progress.md
 
 이 파일은 현재 phase, attempt, gate 실패, 완료 같은 runner 이벤트를 사람이 확인하기 위한 로그입니다.
 
+planned 또는 generated 상태에서는 task artifact 관계를 확인하는 파생 출력도 생성됩니다.
+
+```text
+relationship-graph.json
+relationship-graph.mmd
+relationship-graph-warning.json  # 생성 실패 시
+```
+
+relationship graph는 읽기 전용 보조 출력입니다.
+생성 실패는 초기에는 non-blocking warning이며, 완료 판정은 계속 phase result, gate, evidence, verify 결과를 기준으로 합니다.
+
 ## 프롬프트
 
 `phase<N>-prompt.md`는 Codex에게 실제로 전달된 프롬프트입니다.

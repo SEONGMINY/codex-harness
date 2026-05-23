@@ -559,6 +559,51 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(task_index["phases"][2]["status"], "pending")
             self.assertTrue(repair_packet.exists())
 
+    def test_runner_relationship_graph_generation_is_non_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+
+            RUN_PHASES.generate_relationship_graph(root, task_path)
+
+            self.assertTrue((task_path / "context-pack" / "runtime" / "relationship-graph.json").exists())
+            self.assertTrue((task_path / "context-pack" / "runtime" / "relationship-graph.mmd").exists())
+
+    def test_runner_relationship_graph_warning_is_recorded_in_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+
+            with mock.patch("relationship_graph.graph_from_task", side_effect=ValueError("boom")):
+                RUN_PHASES.generate_relationship_graph(root, task_path)
+
+            progress = task_path / "context-pack" / "runtime" / "progress.md"
+            warning = task_path / "context-pack" / "runtime" / "relationship-graph-warning.json"
+            self.assertTrue(warning.exists())
+            self.assertIn("relationship graph warning:", progress.read_text(encoding="utf-8"))
+
+    def test_runner_relationship_graph_warning_without_file_is_recorded_as_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+
+            with mock.patch(
+                "relationship_graph.write_relationship_graph_outputs",
+                return_value={
+                    "status": "warning",
+                    "json": None,
+                    "mermaid": None,
+                    "warning": None,
+                    "error": "mkdir failed",
+                    "warning_error": "runtime path is not a directory",
+                },
+            ):
+                RUN_PHASES.generate_relationship_graph(root, task_path)
+
+            progress_text = (task_path / "context-pack" / "runtime" / "progress.md").read_text(encoding="utf-8")
+            self.assertIn("relationship graph warning file unavailable: runtime path is not a directory", progress_text)
+            self.assertNotIn("relationship-graph-warning.json", progress_text)
+
     def test_install_preflight_runs_once_even_when_node_modules_exists(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)

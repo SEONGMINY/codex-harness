@@ -81,6 +81,7 @@ codex-harness는 구현 요청을 다음 구조로 바꿉니다.
 - 수정 범위와 확인 명령이 들어간 phase contract
 - bugfix/validation phase의 재현 증거 또는 대체 검증 사유
 - 변경 파일을 phase instruction id에 연결한 handoff trace
+- task artifact 사이의 관계를 확인하는 read-only relationship graph
 - runner가 실행한 확인 명령
 - 실행 증거, 판정, 대조 기록, 최종 결과
 - 실패 시 다음 시도에 넘기는 repair packet
@@ -145,6 +146,13 @@ python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto
 ```
 
 더 자세한 설치와 실행 명령은 [docs/quickstart.md](./docs/quickstart.md)에 있습니다.
+
+task artifact의 관계를 확인하는 relationship graph는 `planned` 또는 `generated` 흐름에서 자동 생성됩니다.
+이 그래프는 source of truth가 아니라 기존 artifact에서 파생되는 읽기 전용 출력입니다.
+
+```bash
+python3 .codex/harness/scripts/gen-relationship-graph.py <task-dir> --format mermaid
+```
 
 ## 실행 루프
 
@@ -258,12 +266,13 @@ hooks 세부 내용은 [docs/hooks.md](./docs/hooks.md)에 있습니다.
 - [빠른 시작](./docs/quickstart.md)
 - [task 형식](./docs/task-format.md)
 - [runtime proof](./docs/runtime-proof.md)
+- [relationship graph](./docs/relationship-graph.md)
 - [hooks](./docs/hooks.md)
 - [문제 해결](./docs/troubleshooting.md)
 
 ## 상태
 
-현재 버전은 `0.1.0`입니다.
+현재 버전은 `0.1.1`입니다.
 
 이 프로젝트는 Codex 작업을 더 신뢰성 있게 만들기 위한 하네스입니다.
 프로젝트 관리 도구도, 여러 에이전트를 조율하는 프레임워크도 아닙니다.
