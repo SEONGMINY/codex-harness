@@ -193,6 +193,7 @@ def run_codex(
     prompt: str,
     output_path: Path,
     stderr_path: Path,
+    last_message_path: Path | None,
     codex_bin: str,
     full_auto: bool,
     yolo: bool,
@@ -200,6 +201,8 @@ def run_codex(
     activity_paths: Iterable[Path],
 ) -> int:
     command = [codex_bin, "exec", "--json"]
+    if last_message_path is not None:
+        command.extend(["--output-last-message", str(last_message_path)])
     add_output_schema(command, SCHEMA_DIR / "evaluation-final.schema.json")
     if yolo:
         command.append("--dangerously-bypass-approvals-and-sandbox")
@@ -266,11 +269,13 @@ def main() -> int:
 
     output_path = runtime_dir / "evaluation-output.jsonl"
     stderr_path = runtime_dir / "evaluation-stderr.txt"
+    last_message_path = runtime_dir / "evaluation-last-message.json"
     returncode = run_codex(
         root,
         prompt,
         output_path,
         stderr_path,
+        last_message_path,
         args.codex_bin,
         args.full_auto,
         args.yolo,

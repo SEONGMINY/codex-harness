@@ -29,7 +29,7 @@ Every launcher run must produce exactly one next state:
 7. User approval for implementation design
 8. Plan
 9. Generate
-10. Evaluate
+10. Evaluate and Improve Loop
 
 ## Clarify
 
@@ -288,7 +288,7 @@ If runtime proof is absent, the orchestrator must report failure or blocked stat
 It must not manually mark phases complete.
 Use `.codex/harness/scripts/verify-task.py <task-dir>` as the source of truth for artifact validity.
 
-## Evaluate
+## Evaluate And Improve Loop
 
 Evaluate from fresh context.
 
@@ -303,11 +303,22 @@ Minimum checks:
 Evaluation should not trust a phase agent's success claim.
 
 When Generate completes, run `.codex/harness/scripts/evaluate-task.py` with the task's evaluation commands unless the user explicitly asks not to.
+If evaluation returns `rejected`, enter improvement mode:
+
+1. Use the evaluation blockers and required follow-ups as the improvement scope.
+2. Edit only paths already allowed by completed phase contracts.
+3. Write `context-pack/handoffs/evaluation-repair<N>.md`.
+4. Re-run evaluation from fresh context.
+5. Repeat review -> improve -> review until evaluation returns `approved`.
+
+The runner caps the loop with `--review-iterations` to prevent infinite repair cycles. Exhausting the limit is a failed evaluation, not a completed task.
 
 Evaluate completion requires runtime proof:
 
 - `context-pack/runtime/evaluation-command-results.json`
 - `context-pack/runtime/evaluation-prompt.md`
 - `context-pack/runtime/evaluation-output.jsonl`
+- `context-pack/runtime/evaluation-last-message.json`
+- `context-pack/runtime/evaluation-repair<N>-result.json`, when an improvement iteration ran
 
 Use `.codex/harness/scripts/verify-task.py <task-dir> --require-evaluation` after evaluation.

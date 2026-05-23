@@ -132,6 +132,18 @@ classDiagram
 
         self.assertTrue(any("must start with one of" in error for error in errors), errors)
 
+    def test_validate_evaluation_final_requires_approved_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            path = root / "tasks" / "demo" / "context-pack" / "runtime" / "evaluation-last-message.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"verdict":"rejected"}\n', encoding="utf-8")
+
+            self.assertEqual(
+                VERIFY_TASK.validate_evaluation_final(root, path),
+                ['Evaluation verdict must be "approved": tasks/demo/context-pack/runtime/evaluation-last-message.json'],
+            )
+
     def test_design_approval_requires_matching_hash(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "repo"

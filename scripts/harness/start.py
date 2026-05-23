@@ -68,6 +68,7 @@ MANDATORY_STATIC_FILES = [
 DESIGN_REVIEW_DOC = "implementation-design-review.md"
 DESIGN_REVIEW_WAIVER_DOC = "design-review-waiver.md"
 DESIGN_APPROVAL_FILE = "design-approval.json"
+DOCUMENT_RESULT_MAX_CHARS = 80_000
 
 
 def now_id() -> str:
@@ -261,6 +262,14 @@ Instead, return the requested structured final output with:
 
 - `artifact.path`: `{rel(run_dir / "questions.md", root)}` for `questions_needed`, or `{rel(run_dir / "docs-approval-request.md", root)}` for `docs_approval_needed`.
 - `artifact.content`: the full Markdown content for that artifact.
+
+Artifact content requirements:
+
+- Write in Korean.
+- `questions.md` must show the actual question content, not only "논의 필요".
+- For each decision question, include `추천 방향`, `트레이드오프`, and `추천 이유`.
+- `docs-approval-request.md` must include the Clarify Review gate result.
+- If the gate result includes a score or confidence below 100, include `점수 부족 지점` with the checklist items that lost points and why.
 """
         generate_contract = """## Generate
 
@@ -271,6 +280,11 @@ Generate is disabled in this launcher run.
 You are the isolated codex-harness orchestration session.
 
 Goal: create exactly one next-state artifact.
+
+## Language
+
+Write user-facing Markdown artifacts and task documents in Korean unless a code identifier, command, file path, API name, or source quote must remain in its original language.
+When you include a score, confidence, or gate result, also explain which checklist items lowered the score and what evidence is missing or weak.
 
 Allowed states:
 
@@ -285,6 +299,7 @@ Decision rule:
 - Do not invoke `.codex/harness/scripts/start.py` again.
 - If a Plan-impacting decision is not approved, do not plan.
 - Before docs approval, return missing decisions through `artifact.content` for `questions.md`.
+- In `questions.md`, each blocking decision must include a recommended direction, tradeoffs, and why that direction is recommended.
 - After task context exists, write unresolved blocking decisions to `open-decisions.json`.
 - Store approved decisions in `decisions.json`, `architecture.json`, and `dependency-policy.json`.
 - When design approval is approved, write `tasks/<task-dir>/context-pack/static/design-approval.json` with `approved: true`, `approved_doc`, `approved_doc_sha256`, `approved_at`, and `approval_source`.
@@ -603,6 +618,83 @@ def materialize_preapproval_artifact(run_dir: Path, final: dict[str, object] | N
     target.write_text(content.rstrip() + "\n", encoding="utf-8")
 
 
+def resolve_document_path(root: Path, raw_path: object) -> Path | None:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    return resolved
+
+
+def append_document_path(paths: list[Path], path: Path | None) -> None:
+    if path is None:
+        return
+    if path not in paths:
+        paths.append(path)
+
+
+def visible_document_paths(root: Path, run_dir: Path, final: dict[str, object] | None) -> list[Path]:
+    paths: list[Path] = []
+    append_document_path(paths, run_dir / "questions.md")
+    append_document_path(paths, run_dir / "docs-approval-request.md")
+    if final is None:
+        return paths
+
+    files_to_read_next = final.get("files_to_read_next")
+    if isinstance(files_to_read_next, list):
+        for raw_path in files_to_read_next:
+            append_document_path(paths, resolve_document_path(root, raw_path))
+
+    artifact = final.get("artifact")
+    if isinstance(artifact, dict):
+        append_document_path(paths, resolve_document_path(root, artifact.get("path")))
+
+    task_path = resolve_task_path(root, final)
+    if final.get("status") == "design_approval_needed" and task_path is not None:
+        append_document_path(paths, task_path / "docs" / DESIGN_REVIEW_DOC)
+        append_document_path(paths, task_path / "docs" / DESIGN_REVIEW_WAIVER_DOC)
+    return paths
+
+
+def document_result(root: Path, path: Path) -> dict[str, object] | None:
+    if not path.is_file():
+        return None
+    try:
+        relative = rel(path, root)
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    truncated = len(content) > DOCUMENT_RESULT_MAX_CHARS
+    if truncated:
+        content = content[:DOCUMENT_RESULT_MAX_CHARS] + "\n\n[truncated]\n"
+    return {
+        "path": relative,
+        "content": content,
+        "truncated": truncated,
+    }
+
+
+def visible_documents(root: Path, run_dir: Path, final: dict[str, object] | None) -> list[dict[str, object]]:
+    documents: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for path in visible_document_paths(root, run_dir, final):
+        item = document_result(root, path)
+        if item is None:
+            continue
+        item_path = str(item["path"])
+        if item_path in seen:
+            continue
+        seen.add(item_path)
+        documents.append(item)
+    return documents
+
+
 def launcher_status_from_final(root: Path, run_dir: Path, final: dict[str, object] | None) -> str | None:
     if final is None:
         return None
@@ -825,6 +917,7 @@ def main() -> int:
         "verify_task_output": rel(run_dir / "verify-task-output.txt", root),
         "verify_task_stderr": rel(run_dir / "verify-task-stderr.txt", root),
         "relationship_graph": relationship_graph,
+        "documents": visible_documents(root, run_dir, final_output),
         "questions": rel(run_dir / "questions.md", root),
         "docs_approval_request": rel(run_dir / "docs-approval-request.md", root),
         "orchestration_violation": rel(run_dir / "orchestration-violation.json", root),

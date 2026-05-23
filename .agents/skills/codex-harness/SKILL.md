@@ -100,7 +100,10 @@ After the command finishes, read only these launcher outputs:
 - `.codex/harness/sessions/<run-id>/run-phases-stderr.txt`, when `runner_returncode` is non-zero
 - `.codex/harness/sessions/<run-id>/orchestration-violation.json`, when present
 
-Report the status and next file path. Do not summarize the whole harness session unless the user asks.
+Report the status and show the relevant document content from `launcher-result.json.documents` directly in the parent chat.
+Do not make the user open `questions.md`, `docs-approval-request.md`, or `implementation-design-review.md` just to understand the next decision.
+If `launcher-result.json.documents` is missing because the repository has an older harness install, read the relevant file listed in the launcher result and show its content.
+Do not summarize the whole harness session unless the user asks.
 If `launcher-result.json` includes `relationship_graph.status: "warning"`, mention the warning path briefly without changing the task status.
 For `planned` or `generated`, use `launcher-result.json.relationship_graph` as the relationship graph status. The isolated harness session cannot verify this file because the launcher writes it after the session exits.
 
@@ -192,7 +195,7 @@ Return their Markdown content in the structured final output's `artifact.content
 - After Plan, stop after verification and dry-run pass. The launcher will generate `relationship-graph.json` and `.mmd`, or `relationship-graph-warning.json`, after the isolated session exits.
 - After Generate, verify runtime proof before stopping.
 - After Generate, the runner refreshes `relationship-graph.json` and `.mmd`, or records `relationship-graph-warning.json`, after phase execution.
-- After Generate, run `python3 .codex/harness/scripts/evaluate-task.py <task-dir>` with the task's evaluation commands unless the user explicitly asks not to.
+- After Generate, run evaluation in a review/improve loop unless the user explicitly asks not to: review from fresh context, improve only rejected blockers and required follow-ups, then review again until evaluation returns approved or the runner's `--review-iterations` budget is exhausted.
 
 ## Runtime Proof
 
@@ -224,6 +227,7 @@ Evaluate is not complete unless these files exist:
 - `tasks/<task-dir>/context-pack/runtime/evaluation-command-results.json`
 - `tasks/<task-dir>/context-pack/runtime/evaluation-prompt.md`
 - `tasks/<task-dir>/context-pack/runtime/evaluation-output.jsonl`
+- `tasks/<task-dir>/context-pack/runtime/evaluation-last-message.json`
 
 If runtime proof is missing, report the task as blocked or failed. Do not infer success from handoffs or status JSON alone.
 

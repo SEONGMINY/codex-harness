@@ -54,6 +54,7 @@ class EvaluateTaskTest(unittest.TestCase):
                 "prompt",
                 output_path,
                 stderr_path,
+                None,
                 str(fake),
                 False,
                 False,

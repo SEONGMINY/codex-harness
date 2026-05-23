@@ -637,6 +637,20 @@ def validate_phase_gate(root: Path, path: Path) -> list[str]:
     return []
 
 
+def validate_evaluation_final(root: Path, path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"Invalid evaluation final JSON: {rel(root, path)}: {exc}"]
+    if not isinstance(data, dict):
+        return [f"Evaluation final output must be a JSON object: {rel(root, path)}"]
+    if data.get("verdict") != "approved":
+        return [f'Evaluation verdict must be "approved": {rel(root, path)}']
+    return []
+
+
 def validate_phase_reconciliation(root: Path, path: Path) -> list[str]:
     if not path.exists():
         return []
@@ -1058,6 +1072,9 @@ def verify(
         )
         errors.extend(require_file(root, runtime_dir / "evaluation-prompt.md", "evaluation prompt"))
         errors.extend(require_file(root, runtime_dir / "evaluation-output.jsonl", "evaluation output", False))
+        evaluation_final = runtime_dir / "evaluation-last-message.json"
+        errors.extend(require_file(root, evaluation_final, "evaluation final output", False))
+        errors.extend(validate_evaluation_final(root, evaluation_final))
 
     if not registry_errors:
         for phase in phases:

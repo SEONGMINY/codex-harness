@@ -132,6 +132,9 @@ class StartLauncherTest(unittest.TestCase):
                     assert "--output-schema" in args, args
                     assert args[args.index("--output-schema") + 1].endswith("launcher-final.schema.json")
                     prompt = sys.stdin.read()
+                    assert "Write user-facing Markdown artifacts and task documents in Korean" in prompt
+                    assert "recommended direction, tradeoffs, and why" in prompt
+                    assert "점수 부족 지점" in prompt
                     assert "return missing decisions through `artifact.content`" in prompt
                     assert "Before docs approval, write missing decisions" not in prompt
                     last_message = Path(args[args.index("--output-last-message") + 1])
@@ -167,6 +170,16 @@ class StartLauncherTest(unittest.TestCase):
             self.assertEqual(launcher_result["status"], "questions_needed")
             questions_path = Path(repo, launcher_result["questions"])
             self.assertEqual(questions_path.read_text(encoding="utf-8"), "Q?\n")
+            self.assertEqual(
+                launcher_result["documents"],
+                [
+                    {
+                        "path": launcher_result["questions"],
+                        "content": "Q?\n",
+                        "truncated": False,
+                    }
+                ],
+            )
 
     def test_docs_approval_artifact_in_final_output_sets_docs_approval_needed_status(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -210,6 +223,16 @@ class StartLauncherTest(unittest.TestCase):
             self.assertEqual(launcher_result["status"], "docs_approval_needed")
             approval_path = Path(repo, launcher_result["docs_approval_request"])
             self.assertEqual(approval_path.read_text(encoding="utf-8"), "Approve docs?\n")
+            self.assertEqual(
+                launcher_result["documents"],
+                [
+                    {
+                        "path": launcher_result["docs_approval_request"],
+                        "content": "Approve docs?\n",
+                        "truncated": False,
+                    }
+                ],
+            )
 
     def test_blocked_final_output_sets_blocked_status(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -685,6 +708,16 @@ class StartLauncherTest(unittest.TestCase):
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["status"], "design_approval_needed")
             self.assertIsNone(launcher_result["runner_returncode"])
+            self.assertEqual(
+                launcher_result["documents"],
+                [
+                    {
+                        "path": "tasks/demo/docs/implementation-design-review.md",
+                        "content": "# Implementation Design Review\n",
+                        "truncated": False,
+                    }
+                ],
+            )
 
     def test_design_approval_needed_without_task_structure_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

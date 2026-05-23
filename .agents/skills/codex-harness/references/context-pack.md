@@ -73,6 +73,8 @@ Required Evaluate proof:
 - `evaluation-command-results.json`
 - `evaluation-prompt.md`
 - `evaluation-output.jsonl`
+- `evaluation-last-message.json`
+- `evaluation-repair<N>-result.json` when review improvement ran
 
 Runner-generated `phase<N>-result.json` schema:
 

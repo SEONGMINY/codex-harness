@@ -118,6 +118,9 @@ cat .codex/harness/sessions/<run-id>/launcher-result.json
 cat .codex/harness/sessions/<run-id>/last-message.md
 ```
 
+`launcher-result.json`의 `documents`에는 메인 세션에서 바로 보여줄 문서 본문이 들어갑니다.
+질문, 문서 생성 승인 요청, 구현 설계 리뷰처럼 사용자가 확인해야 하는 문서는 경로만 남기지 않고 본문도 함께 제공합니다.
+
 `questions.md`가 있으면 답을 추가합니다.
 `docs-approval-request.md`가 있으면 승인한 뒤 다시 실행합니다.
 `implementation-design-review.md`가 있으면 설계를 검토하고 승인한 뒤 다시 실행합니다.
@@ -143,6 +146,14 @@ phase를 실행합니다.
 
 ```bash
 python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto
+```
+
+평가까지 반복하려면 `--evaluate`를 붙입니다.
+평가가 `rejected`이면 runner가 평가의 blocker와 follow-up만 대상으로 개선 세션을 실행하고 다시 평가합니다.
+이 과정은 평가가 `approved`가 되거나 `--review-iterations` 한도에 도달할 때까지 반복됩니다.
+
+```bash
+python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto --evaluate
 ```
 
 더 자세한 설치와 실행 명령은 [docs/quickstart.md](./docs/quickstart.md)에 있습니다.

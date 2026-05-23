@@ -177,8 +177,12 @@ evaluation은 새 컨텍스트에서 실행됩니다.
 evaluation-command-results.json
 evaluation-prompt.md
 evaluation-output.jsonl
+evaluation-last-message.json
 evaluation-stderr.txt
 ```
+
+`run-phases.py --evaluate`에서 평가가 `rejected`이면 runner는 `evaluation-repair<N>-*` 실행 기록을 남기고 다시 평가합니다.
+평가가 `approved`가 되기 전까지는 완료로 보지 않습니다.
 
 평가까지 요구하려면 다음을 실행합니다.
 

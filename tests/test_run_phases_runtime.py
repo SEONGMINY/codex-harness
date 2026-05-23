@@ -337,6 +337,49 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertIn("--full-auto", calls[2])
             self.assertIn("--yolo", calls[2])
 
+    def test_evaluation_review_loop_improves_until_approved(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            finals = [
+                {"verdict": "rejected", "required_followups": ["Fix drift."], "blockers": []},
+                {"verdict": "approved", "required_followups": [], "blockers": []},
+            ]
+            args = argparse.Namespace(review_iterations=2, failed=False)
+
+            def fake_run_evaluation(root_arg: Path, task_arg: Path, args_arg: argparse.Namespace) -> int:
+                RUN_PHASES.write_json(RUN_PHASES.evaluation_final_path(task_arg), finals.pop(0))
+                return 0
+
+            with (
+                mock.patch.object(RUN_PHASES, "run_evaluation", side_effect=fake_run_evaluation),
+                mock.patch.object(RUN_PHASES, "run_evaluation_improvement", return_value=0) as improve,
+            ):
+                self.assertEqual(RUN_PHASES.run_evaluation_review_loop(root, task_path, args), 0)
+
+            improve.assert_called_once()
+            self.assertFalse(args.failed)
+
+    def test_evaluation_review_loop_fails_when_rejected_after_iteration_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            args = argparse.Namespace(review_iterations=1, failed=False)
+
+            def fake_run_evaluation(root_arg: Path, task_arg: Path, args_arg: argparse.Namespace) -> int:
+                RUN_PHASES.write_json(
+                    RUN_PHASES.evaluation_final_path(task_arg),
+                    {"verdict": "rejected", "required_followups": ["Still failing."], "blockers": []},
+                )
+                return 0
+
+            with (
+                mock.patch.object(RUN_PHASES, "run_evaluation", side_effect=fake_run_evaluation),
+                mock.patch.object(RUN_PHASES, "run_evaluation_improvement", return_value=0) as improve,
+            ):
+                self.assertEqual(RUN_PHASES.run_evaluation_review_loop(root, task_path, args), 1)
+
+            improve.assert_called_once()
+            self.assertTrue(args.failed)
+
     def test_codex_idle_timeout_covers_blocked_stdin_write(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)

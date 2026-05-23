@@ -84,6 +84,9 @@ cat .codex/harness/sessions/<run-id>/launcher-result.json
 cat .codex/harness/sessions/<run-id>/last-message.md
 ```
 
+`launcher-result.json`의 `documents` 배열에는 다음에 사용자가 확인해야 하는 문서 본문이 들어갑니다.
+메인 세션은 이 값을 그대로 보여주면 되고, 사용자가 파일을 직접 열어야만 내용을 알 수 있게 만들지 않습니다.
+
 `questions.md`가 있으면 답을 추가합니다.
 `docs-approval-request.md`가 있으면 승인한 뒤 다시 실행합니다.
 `implementation-design-review.md`가 있으면 설계를 검토하고 승인한 뒤 다시 실행합니다.
@@ -178,3 +181,6 @@ python3 .codex/harness/scripts/evaluate-task.py <task-dir> \
 ```bash
 python3 .codex/harness/scripts/verify-task.py <task-dir> --require-evaluation
 ```
+
+`run-phases.py --evaluate`는 평가가 `rejected`를 반환하면 개선 세션을 실행하고 다시 평가합니다.
+이 과정은 평가가 `approved`가 되거나 `--review-iterations` 한도에 도달할 때까지 반복됩니다.

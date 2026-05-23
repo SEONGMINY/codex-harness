@@ -1768,6 +1768,19 @@ def generate_relationship_graph(root: Path, task_path: Path) -> None:
         print(message[:1].upper() + message[1:], file=sys.stderr)
 
 
+def evaluation_final_path(task_path: Path) -> Path:
+    return task_path / "context-pack" / "runtime" / "evaluation-last-message.json"
+
+
+def read_evaluation_final(task_path: Path) -> dict[str, object] | None:
+    path = evaluation_final_path(task_path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def run_evaluation(root: Path, task_path: Path, args: argparse.Namespace) -> int:
     command = [
         sys.executable,
@@ -1783,6 +1796,234 @@ def run_evaluation(root: Path, task_path: Path, args: argparse.Namespace) -> int
     if args.yolo:
         command.append("--yolo")
     return subprocess.run(command, cwd=root, check=False).returncode
+
+
+def evaluation_improvement_allowed_paths(task_path: Path) -> list[str]:
+    allowed: list[str] = []
+    index_path = task_path / "index.json"
+    if not index_path.exists():
+        return allowed
+    task_index = read_json(index_path)
+    for phase in task_index.get("phases", []):
+        phase_number = int(phase["phase"])
+        try:
+            phase_markdown = phase_file(task_path, phase_number).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        contract, errors = parse_phase_contract(phase_markdown)
+        if errors or contract is None:
+            continue
+        for path in contract_allowed_paths(contract):
+            if path not in allowed:
+                allowed.append(path)
+        for path in contract_required_repo_outputs(contract):
+            if path not in allowed:
+                allowed.append(path)
+    return allowed
+
+
+def evaluation_repair_handoff_path(task_path: Path, iteration: int) -> Path:
+    return task_path / "context-pack" / "handoffs" / f"evaluation-repair{iteration}.md"
+
+
+def evaluation_repair_result_path(task_path: Path, iteration: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"evaluation-repair{iteration}-result.json"
+
+
+def build_evaluation_improvement_prompt(
+    root: Path,
+    task_path: Path,
+    iteration: int,
+    evaluation_final: dict[str, object],
+    allowed_paths: list[str],
+) -> str:
+    task_index = read_json(task_path / "index.json")
+    context = collect_files(root, [*common_doc_files(root, task_index), *task_doc_files(root, task_index)], 100_000)
+    static_context = collect_files(root, static_context_files(task_path), 80_000)
+    handoffs = collect_files(root, sorted((task_path / "context-pack" / "handoffs").glob("*.md")), 80_000)
+    evaluation_output = collect_files(
+        root,
+        [
+            task_path / "context-pack" / "runtime" / "evaluation-command-results.json",
+            task_path / "context-pack" / "runtime" / "evaluation-last-message.json",
+            task_path / "context-pack" / "runtime" / "evaluation-prompt.md",
+        ],
+        120_000,
+    )
+    handoff_rel = evaluation_repair_handoff_path(task_path, iteration).relative_to(root)
+    allowed_lines = "\n".join(f"- `{path}`" for path in allowed_paths) or "- none"
+    evaluation_json = json.dumps(evaluation_final, ensure_ascii=False, indent=2)
+    return f"""# Harness Evaluation Improvement Contract
+
+You are improving a generated task after fresh evaluation rejected it.
+
+Task: `{task_index.get("task")}`
+Iteration: `{iteration}`
+
+## Goal
+
+Fix only the concrete blockers and required follow-ups from the latest evaluation result, then stop.
+This is the "review mode -> improve -> review mode" loop. The runner will re-run evaluation after your improvement.
+
+## Evaluation Result
+
+```json
+{evaluation_json}
+```
+
+## Allowed Paths
+
+{allowed_lines}
+
+## Hard Invariants
+
+- Edit only files covered by Allowed Paths.
+- Do not edit task indexes.
+- Do not edit runner-owned runtime proof files.
+- Do not expand scope or add unapproved architecture, dependency, data model, API, or user-visible behavior.
+- Do not spawn subagents.
+- Write `{handoff_rel}` describing what changed and which evaluation blocker or follow-up it addresses.
+- If the evaluation result is wrong and no code change is needed, write that rationale in the handoff and make no implementation changes.
+- Return only the structured final output requested by the active output schema.
+
+# Task Context
+
+{context or "(none)"}
+
+# Static Context
+
+{static_context or "(none)"}
+
+# Handoffs
+
+{handoffs or "(none)"}
+
+# Evaluation Artifacts
+
+{evaluation_output or "(none)"}
+
+# Repository Snapshot
+
+{git_summary(root)}
+"""
+
+
+def run_evaluation_improvement(
+    root: Path,
+    task_path: Path,
+    args: argparse.Namespace,
+    iteration: int,
+    evaluation_final: dict[str, object],
+) -> int:
+    allowed_paths = evaluation_improvement_allowed_paths(task_path)
+    if not allowed_paths:
+        print("Evaluation improvement is blocked: no allowed paths are available.", file=sys.stderr)
+        return 1
+
+    runtime_dir = task_path / "context-pack" / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    prompt = build_evaluation_improvement_prompt(root, task_path, iteration, evaluation_final, allowed_paths)
+    prompt_path = runtime_dir / f"evaluation-repair{iteration}-prompt.md"
+    output_path = runtime_dir / f"evaluation-repair{iteration}-output.jsonl"
+    stderr_path = runtime_dir / f"evaluation-repair{iteration}-stderr.txt"
+    last_message_path = runtime_dir / f"evaluation-repair{iteration}-last-message.json"
+    prompt_path.write_text(prompt, encoding="utf-8")
+
+    before = worktree_snapshot(root)
+    command = [args.codex_bin, "exec", "--json", "--output-last-message", str(last_message_path)]
+    add_output_schema(command, SCHEMA_DIR / "phase-final.schema.json")
+    if args.yolo:
+        command.append("--dangerously-bypass-approvals-and-sandbox")
+    elif args.full_auto:
+        command.append("--full-auto")
+    command.append("-")
+    returncode = run_codex_exec(
+        command,
+        cwd=root,
+        prompt=prompt,
+        output_path=output_path,
+        stderr_path=stderr_path,
+        idle_timeout=getattr(args, "codex_idle_timeout", 300),
+        activity_paths=[root / path for path in allowed_paths] + [evaluation_repair_handoff_path(task_path, iteration)],
+    )
+    after = worktree_snapshot(root)
+    changed_files = phase_changed_paths(task_path, before, after)
+    ignored_paths = [str(evaluation_repair_handoff_path(task_path, iteration).relative_to(root))]
+    traceable_files = [path for path in changed_files if not path_allowed(path, ignored_paths)]
+    violations = scope_violations(traceable_files, allowed_paths, [])
+    handoff_exists = evaluation_repair_handoff_path(task_path, iteration).exists()
+    result = {
+        "iteration": iteration,
+        "status": "completed" if returncode == 0 and not violations and handoff_exists else "failed",
+        "codex_exit_code": returncode,
+        "changed_files": changed_files,
+        "allowed_paths": allowed_paths,
+        "scope_violations": violations,
+        "handoff": str(evaluation_repair_handoff_path(task_path, iteration).relative_to(task_path)),
+        "handoff_exists": handoff_exists,
+        "artifacts": {
+            "prompt": str(prompt_path.relative_to(task_path)),
+            "stdout": str(output_path.relative_to(task_path)),
+            "stderr": str(stderr_path.relative_to(task_path)),
+            "last_message": str(last_message_path.relative_to(task_path)),
+        },
+    }
+    write_json(evaluation_repair_result_path(task_path, iteration), result)
+    if returncode != 0:
+        print(f"Evaluation improvement failed. See {stderr_path}.", file=sys.stderr)
+        return returncode
+    if violations:
+        print(
+            "Evaluation improvement changed files outside allowed paths: "
+            + ", ".join(violations),
+            file=sys.stderr,
+        )
+        return 1
+    if not handoff_exists:
+        print(
+            f"Evaluation improvement did not write required handoff: {evaluation_repair_handoff_path(task_path, iteration)}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+def run_evaluation_review_loop(root: Path, task_path: Path, args: argparse.Namespace) -> int:
+    max_iterations = getattr(args, "review_iterations", 5)
+    for iteration in range(0, max_iterations + 1):
+        append_progress(task_path, f"evaluation review iteration {iteration}: started")
+        eval_returncode = run_evaluation(root, task_path, args)
+        evaluation_final = read_evaluation_final(task_path)
+        if evaluation_final and evaluation_final.get("verdict") == "approved" and eval_returncode == 0:
+            append_progress(task_path, f"evaluation review iteration {iteration}: approved")
+            return 0
+        if evaluation_final and evaluation_final.get("verdict") == "rejected" and iteration < max_iterations:
+            append_progress(task_path, f"evaluation review iteration {iteration}: rejected; improvement started")
+            improvement_returncode = run_evaluation_improvement(
+                root,
+                task_path,
+                args,
+                iteration + 1,
+                evaluation_final,
+            )
+            if improvement_returncode != 0:
+                args.failed = True
+                return improvement_returncode
+            continue
+        if eval_returncode != 0:
+            args.failed = True
+            return eval_returncode
+        if evaluation_final and evaluation_final.get("verdict") == "rejected":
+            print(
+                f"Evaluation still rejected after {max_iterations} improvement iteration(s).",
+                file=sys.stderr,
+            )
+        else:
+            print("Evaluation final output is missing or invalid.", file=sys.stderr)
+        args.failed = True
+        return 1
+    args.failed = True
+    return 1
 
 
 def verify_task(
@@ -2391,6 +2632,12 @@ def main() -> int:
     )
     parser.add_argument("--evaluate", action="store_true", help="Run fresh evaluation after all phases complete.")
     parser.add_argument("--eval-command", action="append", default=[], help="Evaluation command.")
+    parser.add_argument(
+        "--review-iterations",
+        type=non_negative_int,
+        default=5,
+        help="Maximum evaluation improvement iterations when --evaluate returns rejected.",
+    )
     parser.add_argument("--skip-install", action="store_true", help="Skip package-manager install preflight.")
     parser.add_argument("--install-timeout", type=non_negative_int, default=600)
     parser.add_argument("--full-auto", action="store_true", help="Pass --full-auto to codex exec.")
@@ -2442,7 +2689,7 @@ def main() -> int:
                 return 1
             update_top_index(root, task_path.name, "completed")
             if args.evaluate:
-                eval_returncode = run_evaluation(root, task_path, args)
+                eval_returncode = run_evaluation_review_loop(root, task_path, args)
                 if eval_returncode != 0:
                     args.failed = True
                 elif verify_task(root, task_path, require_evaluation=True) != 0:
