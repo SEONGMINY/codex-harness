@@ -67,6 +67,7 @@ MANDATORY_STATIC_FILES = [
 ]
 DESIGN_REVIEW_DOC = "implementation-design-review.md"
 DESIGN_REVIEW_WAIVER_DOC = "design-review-waiver.md"
+DESIGN_APPROVAL_FILE = "design-approval.json"
 
 
 def now_id() -> str:
@@ -187,11 +188,13 @@ Required before `planned`:
 
 - Mandatory task docs and context-pack files exist.
 - `tasks/<task-dir>/docs/implementation-design-review.md` or `tasks/<task-dir>/docs/design-review-waiver.md` exists.
+- `tasks/<task-dir>/context-pack/static/design-approval.json` records the approved design document path, SHA-256 hash, approval time, and approval source.
 - `decisions.json`, `architecture.json`, and `dependency-policy.json` contain the approved implementation-shaping decisions.
 - `open-decisions.json` has no blocking open item.
 - Approved implementation design is reflected in `decisions.json`, `architecture.json`, `dependency-policy.json`, and phase contracts.
 - Phase contracts reference only approved decisions and architecture refs.
-- `python3 .codex/harness/scripts/verify-task.py <task-dir>` passes.
+- Implementation phase contracts stay within the approved `Files To Add/Change` paths from the design review.
+- `python3 .codex/harness/scripts/verify-task.py <task-dir> --require-design-approval` passes.
 - `python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run` passes.
 """
         generate_contract = f"""## Generate
@@ -284,6 +287,7 @@ Decision rule:
 - Before docs approval, return missing decisions through `artifact.content` for `questions.md`.
 - After task context exists, write unresolved blocking decisions to `open-decisions.json`.
 - Store approved decisions in `decisions.json`, `architecture.json`, and `dependency-policy.json`.
+- When design approval is approved, write `tasks/<task-dir>/context-pack/static/design-approval.json` with `approved: true`, `approved_doc`, `approved_doc_sha256`, `approved_at`, and `approval_source`.
 - Keep the response short. Files and runner proof carry the detail.
 
 ## Required Inputs
@@ -454,6 +458,22 @@ def run_phases(root: Path, task_path: Path, run_dir: Path, args: argparse.Namesp
     return int(result.returncode)
 
 
+def verify_task(root: Path, task_path: Path, run_dir: Path) -> int:
+    output_path = run_dir / "verify-task-output.txt"
+    stderr_path = run_dir / "verify-task-stderr.txt"
+    command = [
+        sys.executable,
+        str(installed_harness_script(root, "verify-task.py")),
+        rel(task_path, root),
+        "--root",
+        str(root),
+        "--require-design-approval",
+    ]
+    with output_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+        result = subprocess.run(command, cwd=root, text=True, stdout=stdout, stderr=stderr, check=False)
+    return int(result.returncode)
+
+
 def write_json(path: Path, data: dict[str, object]) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -489,6 +509,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / "codex-harness.json",
         root / ".codex" / "harness" / "scripts" / "start.py",
         root / ".codex" / "harness" / "scripts" / "run-phases.py",
+        root / ".codex" / "harness" / "scripts" / "verify-task.py",
     ]
     missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
     if missing_required:
@@ -733,6 +754,30 @@ def main() -> int:
                 "reason": "Generate is runner-owned. The launcher Codex session must stop at planned.",
             },
         )
+    verifier_returncode: int | None = None
+    if (
+        args.docs_approved
+        and args.design_approved
+        and not args.dry_run
+        and returncode == 0
+        and final_status == "planned"
+    ):
+        task_path = resolve_task_path(root, final_output)
+        if task_path is None:
+            final_status = "blocked"
+        else:
+            verifier_returncode = verify_task(root, task_path, run_dir)
+            if verifier_returncode != 0:
+                final_status = "blocked"
+                write_json(
+                    run_dir / "orchestration-violation.json",
+                    {
+                        "status": "orchestration_violation",
+                        "reason": "Task verification must pass before the launcher can accept planned state.",
+                        "verifier_returncode": verifier_returncode,
+                    },
+                )
+
     runner_returncode: int | None = None
     if (
         args.run_phases
@@ -753,6 +798,7 @@ def main() -> int:
         if protocol_violations
         else (final_status or launcher_status(run_dir, returncode, args.dry_run)),
         "returncode": returncode,
+        "verifier_returncode": verifier_returncode,
         "runner_returncode": runner_returncode,
         "run_dir": rel(run_dir, root),
         "request": rel(request_path, root),
@@ -762,6 +808,8 @@ def main() -> int:
         "stderr": rel(run_dir / "harness-stderr.txt", root),
         "run_phases_output": rel(run_dir / "run-phases-output.txt", root),
         "run_phases_stderr": rel(run_dir / "run-phases-stderr.txt", root),
+        "verify_task_output": rel(run_dir / "verify-task-output.txt", root),
+        "verify_task_stderr": rel(run_dir / "verify-task-stderr.txt", root),
         "questions": rel(run_dir / "questions.md", root),
         "docs_approval_request": rel(run_dir / "docs-approval-request.md", root),
         "orchestration_violation": rel(run_dir / "orchestration-violation.json", root),

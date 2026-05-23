@@ -37,6 +37,10 @@ class StartLauncherTest(unittest.TestCase):
             "#!/usr/bin/env python3\n",
             encoding="utf-8",
         )
+        (repo / ".codex" / "harness" / "scripts" / "verify-task.py").write_text(
+            "#!/usr/bin/env python3\nraise SystemExit(0)\n",
+            encoding="utf-8",
+        )
         return repo
 
     def make_fake_codex(self, tmp: Path, body: str) -> Path:
@@ -56,6 +60,31 @@ class StartLauncherTest(unittest.TestCase):
         result_paths = sorted((repo / ".codex" / "harness" / "sessions").glob("*/launcher-result.json"))
         self.assertTrue(result_paths)
         return json.loads(result_paths[-1].read_text(encoding="utf-8"))
+
+    def test_missing_verify_task_script_fails_install_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            (repo / ".codex" / "harness" / "scripts" / "verify-task.py").unlink()
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "invalid install",
+                    "--codex-bin",
+                    str(tmp / "unused-codex"),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(".codex/harness/scripts/verify-task.py", result.stderr)
 
     def test_questions_artifact_in_final_output_sets_questions_needed_status(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -311,6 +340,62 @@ class StartLauncherTest(unittest.TestCase):
             self.assertIn("--full-auto", argv)
             self.assertIn("--evaluate", argv)
             self.assertNotIn("--yolo", argv)
+
+    def test_planned_with_design_approval_requires_verify_task_success(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            (repo / ".codex" / "harness" / "scripts" / "verify-task.py").write_text(
+                "import sys\nprint('verify failed')\nraise SystemExit(9)\n",
+                encoding="utf-8",
+            )
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    root = Path.cwd()
+                    task = root / "tasks" / "demo"
+                    task.mkdir(parents=True, exist_ok=True)
+                    args = sys.argv
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    last_message.write_text(
+                        '{"status":"planned","task_path":"tasks/demo","files_to_read_next":[],"blockers":[],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "planned with bad verification",
+                    "--docs-approved",
+                    "--design-approved",
+                    "--full-auto",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "blocked")
+            self.assertEqual(launcher_result["verifier_returncode"], 9)
+            violation_path = Path(repo, launcher_result["orchestration_violation"])
+            self.assertTrue(violation_path.exists())
+            verify_output = Path(repo, launcher_result["verify_task_output"])
+            self.assertIn("verify failed", verify_output.read_text(encoding="utf-8"))
 
     def test_run_phases_failure_blocks_launcher_result(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

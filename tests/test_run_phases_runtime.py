@@ -209,6 +209,90 @@ class RunCodexRuntimeTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("phase child codex exec is not configured with --yolo", errors[0])
 
+    def test_execute_phase_blocks_when_task_verification_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "docs": [],
+                        "common_docs": [],
+                        "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=1,
+                ac_timeout=600,
+                codex_bin=str(tmp / "unused-codex"),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=1) as verify_task,
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            verify_task.assert_called_once_with(root, task_path)
+            self.assertTrue(args.failed)
+            last_error = (
+                task_path / "context-pack" / "runtime" / "phase0-last-error.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn("Task verification failed before phase execution.", last_error)
+
+    def test_gate_fails_when_handoff_change_trace_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = {
+                "scope": {"allowed_paths": ["src/app.py"]},
+                "dependency_policy": {"new_dependencies": "forbidden"},
+            }
+
+            gate = RUN_PHASES.build_gate(
+                root,
+                task_path,
+                0,
+                contract,
+                ["src/app.py"],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                ["src/app.py"],
+                [],
+                ["Handoff must include `## Change Trace`."],
+            )
+
+            self.assertEqual(gate["status"], "failed")
+            self.assertTrue(
+                any(check["name"] == "handoff_change_trace" for check in gate["checks"])
+            )
+
+    def test_traceable_changed_files_ignores_required_task_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            _, task_path = self.make_task(Path(raw_tmp))
+
+            self.assertEqual(
+                RUN_PHASES.traceable_changed_files(
+                    task_path,
+                    [
+                        "tasks/demo/context-pack/handoffs/phase0.md",
+                        "src/app.py",
+                    ],
+                    ["context-pack/handoffs/phase0.md"],
+                ),
+                ["src/app.py"],
+            )
+
     def test_runner_uses_installed_script_dir_for_verify_and_evaluate(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -244,6 +328,8 @@ class RunCodexRuntimeTest(unittest.TestCase):
 
             self.assertEqual(calls[0][1], str(installed_scripts / "verify-task.py"))
             self.assertEqual(calls[1][1], str(installed_scripts / "verify-task.py"))
+            self.assertIn("--require-design-approval", calls[0])
+            self.assertIn("--require-design-approval", calls[1])
             self.assertIn("--require-evaluation", calls[1])
             self.assertEqual(calls[2][1], str(installed_scripts / "evaluate-task.py"))
             self.assertIn("--command", calls[2])
@@ -355,6 +441,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 ["context-pack/handoffs/phase0.md"],
                 [],
                 [],
+                [],
             )
 
             scope_check = next(check for check in gate["checks"] if check["name"] == "scope")
@@ -412,6 +499,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 [],
                 ["apps/api/src/server.ts"],
                 [],
+                [],
             )
 
             self.assertEqual(gate["status"], "failed")
@@ -431,6 +519,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 [],
                 [],
                 ["handoff matched blocked/partial marker: Status: blocked"],
+                [],
             )
 
             self.assertEqual(gate["status"], "failed")
@@ -614,7 +703,8 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 failed=False,
             )
 
-            self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+            with mock.patch.object(RUN_PHASES, "verify_task", return_value=0):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(task_index["phases"][0]["attempts"], 1)
             self.assertEqual(task_index["phases"][0]["status"], "error")
@@ -749,7 +839,8 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 failed=False,
             )
 
-            self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+            with mock.patch.object(RUN_PHASES, "verify_task", return_value=0):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(task_index["phases"][0]["attempts"], 1)
             self.assertEqual(task_index["phases"][0]["status"], "error")
@@ -864,7 +955,8 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 failed=False,
             )
 
-            self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+            with mock.patch.object(RUN_PHASES, "verify_task", return_value=0):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             phase = task_index["phases"][0]
             self.assertEqual(phase["status"], "error")

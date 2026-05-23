@@ -29,6 +29,8 @@ from phase_contract import (
     contract_required_outputs,
     contract_required_repo_outputs,
     handoff_block_reasons,
+    handoff_change_trace_errors,
+    path_allowed,
     parse_phase_contract,
     scope_violations,
     validate_phase_contract,
@@ -500,6 +502,7 @@ The runner also requires:
 - Required outputs exist.
 - Required repo outputs exist when the contract lists them.
 - The phase handoff does not report blocked, partial, skipped, or workaround status.
+- The phase handoff maps each changed repository file to a Contract instruction id.
 - Changed files stay within `scope.allowed_paths`.
 
 ## Hard Invariants
@@ -520,6 +523,7 @@ The runner also requires:
 ## Output Contract
 
 - Write `tasks/{task_path.name}/context-pack/handoffs/phase{phase_number}.md`.
+- Include a `## Change Trace` section in the handoff. Map each changed repository file, except required task outputs, to one or more Contract instruction ids. Example line: - `path/to/file`: `P0-001`.
 - Run useful local checks when possible.
 - If you are blocked, write that honestly in the handoff. The runner will fail the phase instead of treating a blocked handoff as success.
 - Return only the structured final output requested by the active output schema.
@@ -816,6 +820,15 @@ def ignored_gate_paths(task_path: Path, required_outputs: list[str]) -> list[str
     ]
 
 
+def traceable_changed_files(task_path: Path, changed_files: list[str], required_outputs: list[str]) -> list[str]:
+    ignored_paths = ignored_gate_paths(task_path, required_outputs)
+    return [
+        path
+        for path in changed_files
+        if not path_allowed(path, ignored_paths)
+    ]
+
+
 def attempt_scope_violations(
     contract: dict | None,
     task_path: Path,
@@ -1071,6 +1084,28 @@ def handoff_blockers(task_path: Path, phase_number: int) -> list[str]:
     return handoff_block_reasons(path.read_text(encoding="utf-8", errors="replace"))
 
 
+def handoff_change_trace_blockers(
+    task_path: Path,
+    phase_number: int,
+    contract: dict,
+    changed_files: list[str],
+    required_outputs: list[str],
+) -> list[str]:
+    path = phase_handoff_path(task_path, phase_number)
+    if not path.exists():
+        return []
+    instruction_ids = [
+        item.get("id")
+        for item in contract.get("instructions") or []
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    ]
+    return handoff_change_trace_errors(
+        path.read_text(encoding="utf-8", errors="replace"),
+        traceable_changed_files(task_path, changed_files, required_outputs),
+        instruction_ids,
+    )
+
+
 def task_relative(path: Path, task_path: Path) -> str:
     return str(path.relative_to(task_path))
 
@@ -1161,6 +1196,7 @@ def build_gate(
     required_outputs: list[str],
     required_repo_outputs: list[str],
     handoff_reasons: list[str],
+    handoff_trace_errors: list[str],
 ) -> dict[str, object]:
     failed_commands = [item for item in command_results if item.get("exit_code") != 0]
     missing_outputs = verify_required_outputs(task_path, required_outputs)
@@ -1182,6 +1218,8 @@ def build_gate(
         blocking_reasons.append("Changed files include paths outside Contract.scope.allowed_paths.")
     if handoff_reasons:
         blocking_reasons.append("Handoff reports blocked, partial, skipped, or workaround status.")
+    if handoff_trace_errors:
+        blocking_reasons.append("Handoff change trace is missing or invalid.")
     if dependency_errors:
         blocking_reasons.extend(dependency_errors)
 
@@ -1205,6 +1243,12 @@ def build_gate(
             "name": "handoff_status",
             "status": "passed" if not handoff_reasons else "failed",
             "reasons": handoff_reasons,
+        },
+        {
+            "name": "handoff_change_trace",
+            "status": "passed" if not handoff_trace_errors else "failed",
+            "errors": handoff_trace_errors,
+            "traceable_changed_files": traceable_changed_files(task_path, changed_files, required_outputs),
         },
         {
             "name": "scope",
@@ -1463,6 +1507,7 @@ def contract_summary(
         "fallback_behavior": contract.get("fallback_behavior") or {},
         "validation_budget": contract.get("validation_budget") or {},
         "missing_evidence_behavior": contract.get("missing_evidence_behavior"),
+        "verification_evidence": contract.get("verification_evidence") or {},
         "decision_refs": contract.get("decision_refs") or [],
         "architecture_refs": contract.get("architecture_refs") or [],
         "dependency_policy": contract.get("dependency_policy") or {},
@@ -1714,7 +1759,12 @@ def run_evaluation(root: Path, task_path: Path, args: argparse.Namespace) -> int
     return subprocess.run(command, cwd=root, check=False).returncode
 
 
-def verify_task(root: Path, task_path: Path, require_evaluation: bool = False) -> int:
+def verify_task(
+    root: Path,
+    task_path: Path,
+    require_evaluation: bool = False,
+    require_design_approval: bool = True,
+) -> int:
     command = [
         sys.executable,
         str(SCRIPT_DIR / "verify-task.py"),
@@ -1722,6 +1772,8 @@ def verify_task(root: Path, task_path: Path, require_evaluation: bool = False) -
         "--root",
         str(root),
     ]
+    if require_design_approval:
+        command.append("--require-design-approval")
     if require_evaluation:
         command.append("--require-evaluation")
     return subprocess.run(command, cwd=root, check=False).returncode
@@ -1807,7 +1859,10 @@ def execute_phase(
     if attempts <= 0 and not args.dry_run and not getattr(args, "resume_repair", False):
         clear_repair_packet(task_path, phase_number)
 
-    preflight_errors = nested_codex_preflight_errors(args)
+    preflight_errors = []
+    if verify_task(root, task_path) != 0:
+        preflight_errors.append("Task verification failed before phase execution.")
+    preflight_errors.extend(nested_codex_preflight_errors(args))
     preflight_errors.extend(preflight_phase(root, task_path, task_index, phase))
     if preflight_errors:
         message = "Preflight failed:\n" + "\n".join(f"- {error}" for error in preflight_errors)
@@ -2184,6 +2239,13 @@ def execute_phase(
                 task_path,
             )
             handoff_reasons = handoff_blockers(task_path, phase_number)
+            handoff_trace_errors = handoff_change_trace_blockers(
+                task_path,
+                phase_number,
+                contract,
+                changed_files,
+                required_outputs,
+            )
             gate = build_gate(
                 root,
                 task_path,
@@ -2194,6 +2256,7 @@ def execute_phase(
                 required_outputs,
                 required_repo_outputs,
                 handoff_reasons,
+                handoff_trace_errors,
             )
             reconciliation = write_runtime_review_artifacts(task_path, phase_number, contract, evidence, gate)
             if gate.get("status") != "passed":

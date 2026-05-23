@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -19,10 +20,14 @@ from phase_contract import (
     DESIGN_REVIEW_DOC,
     DESIGN_REVIEW_WAIVER_DOC,
     IMPLEMENTATION_QUALITY_DOC,
+    NON_IMPLEMENTATION_LAYERS,
     contract_acceptance_commands,
+    contract_allowed_paths,
     contract_required_outputs,
     contract_required_repo_outputs,
     handoff_block_reasons,
+    handoff_change_trace_errors,
+    path_allowed,
     parse_phase_contract,
     scope_violations,
     validate_phase_contract,
@@ -67,8 +72,49 @@ DESIGN_REVIEW_REQUIRED_SECTIONS = [
     "Open Decisions",
     "Approval Checklist",
 ]
+DESIGN_APPROVAL_FILE = "design-approval.json"
 ALLOWED_MERMAID_DIAGRAMS = ("flowchart", "sequenceDiagram", "stateDiagram-v2")
 MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*\n(?P<body>.*?)```", re.DOTALL)
+REPO_PATH_TOKEN_RE = re.compile(r"^[A-Za-z0-9._@{}<>*?\[\]/-]+$")
+NON_PATH_TOKENS = {
+    "none",
+    "n/a",
+    "na",
+    "no",
+    "not",
+    "tbd",
+    "todo",
+    "unknown",
+    "없음",
+    "해당없음",
+}
+KNOWN_ROOT_PATH_TOKENS = {
+    "app",
+    "api",
+    "assets",
+    "client",
+    "components",
+    "config",
+    "db",
+    "docs",
+    "dockerfile",
+    "features",
+    "hooks",
+    "lib",
+    "makefile",
+    "pages",
+    "prisma",
+    "public",
+    "readme",
+    "scripts",
+    "server",
+    "src",
+    "styles",
+    "supabase",
+    "tests",
+    "types",
+    "utils",
+}
 PLACEHOLDER_PATTERNS = [
     re.compile(r"^\s*TODO\b", re.MULTILINE),
     re.compile(r"\[TODO", re.IGNORECASE),
@@ -145,6 +191,65 @@ def validate_mermaid_blocks(text: str) -> list[str]:
     return errors
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def design_doc_info(root: Path, task_path: Path) -> tuple[Path, str, str] | None:
+    review_path = task_path / "docs" / DESIGN_REVIEW_DOC
+    if review_path.exists():
+        return review_path, rel(root, review_path), "review"
+    waiver_path = task_path / "docs" / DESIGN_REVIEW_WAIVER_DOC
+    if waiver_path.exists():
+        return waiver_path, rel(root, waiver_path), "waiver"
+    return None
+
+
+def markdown_section(text: str, section: str) -> str:
+    match = re.search(
+        rf"(?ms)^##\s+{re.escape(section)}\s*$\n(?P<body>.*?)(?=^##\s+|\Z)",
+        text,
+    )
+    return match.group("body").strip() if match else ""
+
+
+def _normalize_repo_path_token(value: str) -> str | None:
+    value = value.strip().strip("`").strip(".,;")
+    lowered = value.lower()
+    if lowered in NON_PATH_TOKENS:
+        return None
+    if not value or value.startswith("<") or value.endswith(">"):
+        return None
+    if "://" in value or any(char.isspace() for char in value):
+        return None
+    if not REPO_PATH_TOKEN_RE.match(value):
+        return None
+    if "/" not in value and "." not in value and not any(char in value for char in "*?["):
+        if lowered not in KNOWN_ROOT_PATH_TOKENS:
+            return None
+    return value.strip("/")
+
+
+def extract_design_repo_paths(text: str) -> list[str]:
+    section = markdown_section(text, "Files To Add/Change")
+    paths: set[str] = set()
+    for value in re.findall(r"`([^`]+)`", section):
+        normalized = _normalize_repo_path_token(value)
+        if normalized:
+            paths.add(normalized)
+    for line in section.splitlines():
+        stripped = re.sub(r"^\s*[-*+]\s+(?:\[[ xX]\]\s+)?", "", line).strip()
+        candidate = re.split(r"\s+(?:-|--|:|=>)\s+|:", stripped, maxsplit=1)[0].strip().strip("`")
+        normalized = _normalize_repo_path_token(candidate)
+        if normalized:
+            paths.add(normalized)
+    return sorted(paths)
+
+
 def validate_design_review(
     root: Path,
     task_path: Path,
@@ -164,6 +269,11 @@ def validate_design_review(
             if not re.search(rf"(?m)^##\s+{re.escape(section)}\s*$", text):
                 errors.append(f"Implementation design review must include section: {section}")
         errors.extend(validate_mermaid_blocks(text))
+        if not extract_design_repo_paths(text):
+            errors.append(
+                "Implementation design review must list approved repository paths "
+                "in `Files To Add/Change`."
+            )
         return errors
 
     if waiver_path.exists():
@@ -176,6 +286,93 @@ def validate_design_review(
         "Task docs must include implementation design review or design review waiver: "
         f"{rel(root, review_path)} or {rel(root, waiver_path)}"
     )
+    return errors
+
+
+def validate_design_approval(root: Path, task_path: Path) -> list[str]:
+    info = design_doc_info(root, task_path)
+    if info is None:
+        return []
+    design_path, design_rel_path, _ = info
+    approval_path = task_path / "context-pack" / "static" / DESIGN_APPROVAL_FILE
+    errors = require_file(root, approval_path, "design approval", check_placeholder=False)
+    if errors:
+        return errors
+    try:
+        approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"Invalid design approval JSON: {rel(root, approval_path)}: {exc}"]
+    if not isinstance(approval, dict):
+        return [f"Design approval must be a JSON object: {rel(root, approval_path)}"]
+
+    if approval.get("approved") is not True:
+        errors.append("Design approval must set `approved` to true.")
+    if approval.get("approved_doc") != design_rel_path:
+        errors.append(f"Design approval `approved_doc` must be {design_rel_path}.")
+    expected_hash = file_sha256(design_path)
+    if approval.get("approved_doc_sha256") != expected_hash:
+        errors.append("Design approval hash does not match the current design review document.")
+    if not isinstance(approval.get("approved_at"), str) or not approval.get("approved_at", "").strip():
+        errors.append("Design approval must include non-empty `approved_at`.")
+    if not isinstance(approval.get("approval_source"), str) or not approval.get("approval_source", "").strip():
+        errors.append("Design approval must include non-empty `approval_source`.")
+    return errors
+
+
+def is_implementation_contract(contract: dict[str, object]) -> bool:
+    scope = contract.get("scope")
+    layer = scope.get("layer") if isinstance(scope, dict) else ""
+    return isinstance(layer, str) and layer.lower() not in NON_IMPLEMENTATION_LAYERS
+
+
+def design_path_covers(raw_path: str, approved_paths: list[str]) -> bool:
+    normalized = raw_path.strip("/")
+    normalized_approved = [path.strip("/") for path in approved_paths]
+    if any(char in normalized for char in "*?["):
+        # Glob-to-glob containment is intentionally conservative. Use the exact
+        # approved glob, or approve a directory prefix such as `scripts/harness/`.
+        if normalized in normalized_approved:
+            return True
+        for approved in normalized_approved:
+            if any(char in approved for char in "*?["):
+                continue
+            if normalized.startswith(approved.rstrip("/") + "/"):
+                return True
+        return False
+    return path_allowed(normalized, approved_paths)
+
+
+def validate_contract_against_design(
+    root: Path,
+    task_path: Path,
+    phase_number: int,
+    contract: dict[str, object],
+    design_kind: str | None,
+    approved_paths: list[str],
+) -> list[str]:
+    if not is_implementation_contract(contract):
+        return []
+    errors: list[str] = []
+    if design_kind == "waiver":
+        errors.append(
+            f"Phase {phase_number} uses an implementation layer, so design-review-waiver.md is not allowed."
+        )
+        return errors
+    if not approved_paths:
+        errors.append(
+            f"Phase {phase_number} requires approved repository paths in design review `Files To Add/Change`."
+        )
+        return errors
+    for raw_path in contract_allowed_paths(contract):
+        if not design_path_covers(raw_path, approved_paths):
+            errors.append(
+                f"Phase {phase_number} scope.allowed_paths entry is outside approved design files: {raw_path}"
+            )
+    for raw_path in contract_required_repo_outputs(contract):
+        if not path_allowed(raw_path, approved_paths):
+            errors.append(
+                f"Phase {phase_number} required_repo_outputs entry is outside approved design files: {raw_path}"
+            )
     return errors
 
 
@@ -460,6 +657,15 @@ def required_output_repo_paths(task_path: Path, required_outputs: list[str]) -> 
     return [f"tasks/{task_path.name}/{raw_path.strip('/')}" for raw_path in required_outputs]
 
 
+def traceable_changed_files(task_path: Path, changed_files: list[str], required_outputs: list[str]) -> list[str]:
+    ignored_paths = required_output_repo_paths(task_path, required_outputs)
+    return [
+        path
+        for path in changed_files
+        if not path_allowed(path, ignored_paths)
+    ]
+
+
 def contract_allowed_paths(contract: dict) -> list[str]:
     scope = contract.get("scope")
     if not isinstance(scope, dict):
@@ -568,6 +774,20 @@ def validate_runtime_contract_bundle(
     if violations:
         errors.append(f"Evidence changed_files include paths outside scope: {violations!r}")
 
+    handoff_path = task_path / "context-pack" / "handoffs" / f"phase{phase_number}.md"
+    if handoff_path.exists():
+        instruction_ids = [
+            item.get("id")
+            for item in contract.get("instructions") or []
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        ]
+        trace_errors = handoff_change_trace_errors(
+            handoff_path.read_text(encoding="utf-8", errors="replace"),
+            traceable_changed_files(task_path, changed_files, expected_outputs),
+            instruction_ids,
+        )
+        errors.extend(f"Phase {phase_number} handoff change trace: {error}" for error in trace_errors)
+
     contract_instruction_ids = [
         item.get("id")
         for item in contract.get("instructions", [])
@@ -656,7 +876,12 @@ def validate_phase_result(
     return errors
 
 
-def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
+def verify(
+    root: Path,
+    task_path: Path,
+    require_evaluation: bool,
+    require_design_approval: bool,
+) -> list[str]:
     errors: list[str] = []
     task_index_path = task_path / "index.json"
     errors.extend(require_file(root, task_index_path, "task index", check_placeholder=False))
@@ -697,6 +922,15 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
     static_dir = task_path / "context-pack" / "static"
     for filename in MANDATORY_STATIC_FILES:
         errors.extend(require_file(root, static_dir / filename, "static context"))
+    if require_design_approval:
+        errors.extend(validate_design_approval(root, task_path))
+    design_info = design_doc_info(root, task_path)
+    design_kind = design_info[2] if design_info else None
+    approved_design_paths: list[str] = []
+    if design_info and design_kind == "review":
+        approved_design_paths = extract_design_repo_paths(
+            design_info[0].read_text(encoding="utf-8", errors="replace")
+        )
 
     phase_count = int(task_index.get("totalPhases") or len(task_index.get("phases") or []))
     phases = task_index.get("phases") or []
@@ -714,7 +948,7 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
         expected_repo_outputs: list[str] = []
         if phase_path.exists():
             markdown = phase_path.read_text(encoding="utf-8", errors="replace")
-            _, contract_errors = validate_phase_contract(
+            contract, contract_errors = validate_phase_contract(
                 root,
                 task_path,
                 phase_number,
@@ -724,6 +958,17 @@ def verify(root: Path, task_path: Path, require_evaluation: bool) -> list[str]:
                 decision_registry=decision_registry if not registry_errors else None,
             )
             errors.extend([f"Phase {phase_number} contract: {error}" for error in contract_errors])
+            if contract is not None:
+                errors.extend(
+                    validate_contract_against_design(
+                        root,
+                        task_path,
+                        phase_number,
+                        contract,
+                        design_kind,
+                        approved_design_paths,
+                    )
+                )
             expected_commands = expected_ac_commands(phase, markdown)
             expected_outputs = expected_required_outputs(phase, markdown)
             expected_repo_outputs = expected_required_repo_outputs(markdown)
@@ -844,11 +1089,17 @@ def main() -> int:
     parser.add_argument("task", help="Task directory name or path.")
     parser.add_argument("--root", default=".", help="Repository root.")
     parser.add_argument("--require-evaluation", action="store_true")
+    parser.add_argument("--require-design-approval", action="store_true")
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
     task_path = resolve_task_path(root, args.task)
-    errors = verify(root, task_path, args.require_evaluation)
+    errors = verify(
+        root,
+        task_path,
+        args.require_evaluation,
+        args.require_design_approval,
+    )
     if errors:
         print("Task verification failed:", file=sys.stderr)
         for error in errors:
