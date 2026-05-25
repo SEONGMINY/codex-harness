@@ -65,7 +65,7 @@ codex-harness는 대화를 실행 상태로 쓰지 않습니다.
 
 완료 판정은 runner가 합니다.
 
-`phase<N>-result.json`과 `phase<N>-gate.json`이 없으면 완료가 아닙니다.
+`phase<N>-result.json`, `phase<N>-gate.json`, `phase<N>-quality.json`이 없으면 완료가 아닙니다.
 
 자세한 실행 모델은 [docs/model.md](./docs/model.md)를 읽으세요.
 
@@ -203,6 +203,7 @@ tasks/<task-dir>/
       phase<N>-ac-attempt<M>.json
       phase<N>-evidence.json
       phase<N>-gate.json
+      phase<N>-quality.json
       phase<N>-reconciliation.json
       phase<N>-repair-packet.md
       phase<N>-result.json

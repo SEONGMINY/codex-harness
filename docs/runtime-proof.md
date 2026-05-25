@@ -25,6 +25,7 @@ phase<N>-evidence.json
 phase<N>-reconciliation.json
 phase<N>-reconciliation.md
 phase<N>-gate.json
+phase<N>-quality.json
 phase<N>-result.json
 ```
 
@@ -105,8 +106,17 @@ runner는 이 결과를 gate 판정에 씁니다.
 - handoff blocked/partial 상태
 - handoff 변경 추적(`## Change Trace`)
 - 수정 범위
+- quality check
 
 하나라도 실패하면 gate는 failed입니다.
+
+## quality
+
+`phase<N>-quality.json`은 phase 종료 직전 실행한 quality check 결과입니다.
+실행 가능한 기존 프로젝트 lint나 formatter가 있으면 먼저 사용하며, 기본 level은 warning입니다.
+실행 가능한 프로젝트 lint가 없으면 하네스 baseline 검사를 phase changed files 기준으로 block합니다.
+`CODEX_HARNESS_PROJECT_LINT_LEVEL=block`을 설정하면 프로젝트 lint 실패도 gate 실패가 됩니다.
+이 파일은 runner가 만들며, block level 실패가 있으면 gate의 `quality` check가 실패합니다.
 
 ## reconciliation
 

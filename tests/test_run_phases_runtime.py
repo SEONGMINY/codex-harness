@@ -209,6 +209,38 @@ class RunCodexRuntimeTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("phase child codex exec is not configured with --yolo", errors[0])
 
+    def test_phase_gate_fails_on_quality_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            contract = {
+                "scope": {"allowed_paths": ["src/**"]},
+                "dependency_policy": {"new_dependencies": "forbidden"},
+            }
+
+            gate = RUN_PHASES.build_gate(
+                root=root,
+                task_path=task_path,
+                phase_number=0,
+                contract=contract,
+                changed_files=["src/demo.py"],
+                command_results=[],
+                required_outputs=[],
+                required_repo_outputs=[],
+                handoff_reasons=[],
+                handoff_trace_errors=[],
+                quality_result={
+                    "status": "failed",
+                    "source": "harness",
+                    "blocking_reasons": ["Quality check failed: harness-baseline-style"],
+                },
+            )
+
+            self.assertEqual(gate["status"], "failed")
+            self.assertIn("Quality check failed: harness-baseline-style", gate["blocking_reasons"])
+            quality_check = [item for item in gate["checks"] if item["name"] == "quality"][0]
+            self.assertEqual(quality_check["status"], "failed")
+
     def test_execute_phase_blocks_when_task_verification_fails(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)

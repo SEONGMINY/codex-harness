@@ -211,6 +211,7 @@ Generate is not complete unless these files exist:
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-reconciliation.json` for every executed phase
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-reconciliation.md` for every executed phase
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-gate.json` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-quality.json` for every executed phase
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-result.json` for every completed phase
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-repair-packet.json` and `.md` for failed/retried attempts, when present
 - `tasks/<task-dir>/context-pack/runtime/docs-diff.md` after phase 0
@@ -218,6 +219,7 @@ Generate is not complete unless these files exist:
 
 `phase<N>-result.json` is runner-owned. It contains measured facts: exit codes, changed files, required output status, and artifact paths. Phase agents write handoffs, not result JSON.
 `phase<N>-gate.json` is runner-owned. It must pass before the phase can be marked completed.
+`phase<N>-quality.json` is runner-owned. It records runnable project lint results, or harness baseline style checks when project lint is unavailable, and feeds the gate quality check.
 `phase<N>-repair-packet.*` is runner-owned. It summarizes retryable failures for the next attempt. If it contains `contaminating_changes`, the failure is not auto-retryable until the paths are reviewed, cleaned up, or explicitly brought into phase scope.
 
 For implementation phases, the contract must list repository files under `required_repo_outputs`; every entry must also be covered by `scope.allowed_paths`. The runner checks those files exist separately from task-relative `required_outputs`. A handoff that says blocked, partial, skipped, workaround, or equivalent Korean wording is a failed phase even if files and commands exist. A handoff that does not map changed repository files to phase instruction ids in `## Change Trace` is also a failed phase.

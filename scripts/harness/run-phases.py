@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime
@@ -97,6 +98,7 @@ def harness_install_errors(root: Path) -> list[str]:
     required_paths = [
         root / ".codex" / "harness" / "scripts" / "run-phases.py",
         root / ".codex" / "harness" / "scripts" / "verify-task.py",
+        root / ".codex" / "harness" / "scripts" / "run-quality-checks.py",
         root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
     ]
     missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
@@ -349,6 +351,10 @@ def phase_reconciliation_summary_path(task_path: Path, phase_number: int) -> Pat
 
 def phase_gate_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-gate.json"
+
+
+def phase_quality_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-quality.json"
 
 
 def phase_repair_packet_path(task_path: Path, phase_number: int) -> Path:
@@ -1088,6 +1094,54 @@ def required_repo_output_results(root: Path, required_outputs: list[str]) -> lis
     ]
 
 
+def run_quality_checks(
+    root: Path,
+    task_path: Path,
+    phase_number: int,
+    changed_files: list[str],
+) -> dict[str, object]:
+    output_path = phase_quality_path(task_path, phase_number)
+    command = [
+        sys.executable,
+        str(SCRIPT_DIR / "run-quality-checks.py"),
+        "--root",
+        str(root),
+        "--task-path",
+        str(task_path),
+        "--phase",
+        str(phase_number),
+        "--contract",
+        str(phase_contract_path(task_path, phase_number)),
+        "--output",
+        str(output_path),
+    ]
+    for changed_file in changed_files:
+        command.extend(["--changed-file", changed_file])
+
+    exit_code, output = run_shell(" ".join(shlex.quote(item) for item in command), root, 180)
+    if output_path.exists():
+        try:
+            result = read_json(output_path)
+        except (json.JSONDecodeError, OSError):
+            result = {}
+    else:
+        result = {}
+    if not isinstance(result, dict):
+        result = {}
+    result.setdefault("phase", phase_number)
+    result.setdefault("changed_files", changed_files)
+    result.setdefault("checks", [])
+    result["exit_code"] = exit_code
+    if output:
+        result["output_tail"] = truncate_text(output, 4000)
+    if exit_code != 0 and result.get("status") != "failed":
+        result["status"] = "failed"
+        result["blocking_reasons"] = ["Quality check command failed."]
+    if not output_path.exists():
+        write_json(output_path, result)
+    return result
+
+
 def handoff_blockers(task_path: Path, phase_number: int) -> list[str]:
     path = phase_handoff_path(task_path, phase_number)
     if not path.exists():
@@ -1177,6 +1231,7 @@ def write_phase_result(
             "stdout": task_relative(output_path, task_path),
             "stderr": task_relative(stderr_path, task_path),
             "ac_results": task_relative(ac_results, task_path),
+            "quality": task_relative(phase_quality_path(task_path, phase_number), task_path),
             "handoff": task_relative(phase_handoff_path(task_path, phase_number), task_path),
             "evidence": task_relative(phase_evidence_path(task_path, phase_number), task_path),
             "reconciliation": task_relative(phase_reconciliation_path(task_path, phase_number), task_path),
@@ -1208,6 +1263,7 @@ def build_gate(
     required_repo_outputs: list[str],
     handoff_reasons: list[str],
     handoff_trace_errors: list[str],
+    quality_result: dict[str, object] | None = None,
 ) -> dict[str, object]:
     failed_commands = [item for item in command_results if item.get("exit_code") != 0]
     missing_outputs = verify_required_outputs(task_path, required_outputs)
@@ -1233,6 +1289,15 @@ def build_gate(
         blocking_reasons.append("Handoff change trace is missing or invalid.")
     if dependency_errors:
         blocking_reasons.extend(dependency_errors)
+    quality_status = quality_result.get("status") if isinstance(quality_result, dict) else "skipped"
+    quality_reasons = (
+        quality_result.get("blocking_reasons")
+        if isinstance(quality_result, dict) and isinstance(quality_result.get("blocking_reasons"), list)
+        else []
+    )
+    if quality_status == "failed":
+        quality_blockers = [str(item) for item in quality_reasons if str(item).strip()]
+        blocking_reasons.extend(quality_blockers or ["Quality checks failed."])
 
     checks = [
         {
@@ -1271,6 +1336,13 @@ def build_gate(
             "status": "passed" if not dependency_errors else "failed",
             "errors": dependency_errors,
         },
+        {
+            "name": "quality",
+            "status": "passed" if quality_status != "failed" else "failed",
+            "source": quality_result.get("source") if isinstance(quality_result, dict) else None,
+            "blocking_reasons": quality_reasons,
+            "artifact": task_relative(phase_quality_path(task_path, phase_number), task_path),
+        },
     ]
     return {
         "phase": phase_number,
@@ -1289,6 +1361,7 @@ def build_evidence(
     required_outputs: list[str],
     required_repo_outputs: list[str],
     task_path: Path,
+    quality_result: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return {
         "phase": phase_number,
@@ -1297,6 +1370,7 @@ def build_evidence(
         "commands": command_results,
         "required_outputs": required_output_results(task_path, required_outputs),
         "required_repo_outputs": required_repo_output_results(root, required_repo_outputs),
+        "quality": quality_result or {},
     }
 
 
@@ -1716,6 +1790,7 @@ def clear_attempt_artifacts(task_path: Path, phase_number: int) -> None:
         phase_reconciliation_path(task_path, phase_number),
         phase_reconciliation_summary_path(task_path, phase_number),
         phase_gate_path(task_path, phase_number),
+        phase_quality_path(task_path, phase_number),
     ]:
         path.unlink(missing_ok=True)
 
@@ -2495,6 +2570,7 @@ def execute_phase(
 
             final_snapshot = worktree_snapshot(root)
             changed_files = phase_changed_paths(task_path, attempt_start_snapshot, final_snapshot)
+            quality_result = run_quality_checks(root, task_path, phase_number, changed_files)
             evidence = build_evidence(
                 root,
                 phase_number,
@@ -2504,6 +2580,7 @@ def execute_phase(
                 required_outputs,
                 required_repo_outputs,
                 task_path,
+                quality_result,
             )
             handoff_reasons = handoff_blockers(task_path, phase_number)
             handoff_trace_errors = handoff_change_trace_blockers(
@@ -2524,6 +2601,7 @@ def execute_phase(
                 required_repo_outputs,
                 handoff_reasons,
                 handoff_trace_errors,
+                quality_result,
             )
             reconciliation = write_runtime_review_artifacts(task_path, phase_number, contract, evidence, gate)
             if gate.get("status") != "passed":

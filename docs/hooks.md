@@ -38,6 +38,32 @@ Codex가 멈추려 할 때 필수 산출물이 있는지 확인합니다.
 
 예를 들어 phase 전달 메모가 없으면 계속 작업하게 합니다.
 
+Stop hook은 phase 시작 시점의 worktree baseline을 알 수 없으므로 quality check를 hard block하지 않습니다.
+quality check는 runner gate에서 phase changed files 기준으로 실행합니다.
+
+## quality check
+
+runner는 phase 종료 전에 `phase<N>-quality.json`을 만듭니다.
+
+quality check는 실행 가능한 기존 프로젝트 lint를 먼저 사용합니다.
+실행 가능한 프로젝트 lint가 없으면 하네스의 보수적인 changed-file baseline 검사를 block으로 실행합니다.
+기존 프로젝트 lint의 기본 level은 warning입니다.
+프로젝트 lint를 block으로 승격하려면 `CODEX_HARNESS_PROJECT_LINT_LEVEL=block`을 설정합니다.
+
+기존 프로젝트 lint는 다음을 감지합니다.
+
+- `package.json`의 `format:check` 또는 `lint` script
+- `pyproject.toml` 또는 `ruff.toml`이 있는 Python 프로젝트의 `ruff`
+
+fallback baseline은 다음을 막습니다.
+
+- trailing whitespace
+- merge conflict marker
+- final newline 누락
+- 변경된 Python 파일의 syntax error
+
+폴더 구조 스타일은 hook에서 block하지 않습니다.
+
 ## 선택 hook
 
 선택 hook은 기본으로 켜지지 않습니다.
@@ -79,6 +105,9 @@ hooks는 모든 문제를 막지 않습니다.
 - 모든 도구를 가로채지는 못합니다.
 - 모든 의미상 버그를 알 수 없습니다.
 - 테스트 성공 여부를 대신 판단하지 않습니다.
+- 프로젝트에 없는 lint 도구를 설치하지 않습니다.
+- 폴더 구조 스타일을 강제하지 않습니다.
+- Stop hook은 dirty worktree 전체를 quality 기준으로 막지 않습니다.
 - phase 완료 상태를 직접 결정하지 않습니다.
 
 hooks는 빠른 차단 장치입니다.

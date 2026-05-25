@@ -587,6 +587,7 @@ def validate_artifacts(
     expected_paths = {
         "prompt": f"context-pack/runtime/phase{phase_number}-prompt.md",
         "handoff": f"context-pack/handoffs/phase{phase_number}.md",
+        "quality": f"context-pack/runtime/phase{phase_number}-quality.json",
     }
     if attempt is not None:
         expected_paths.update(
@@ -596,7 +597,7 @@ def validate_artifacts(
                 "ac_results": f"context-pack/runtime/phase{phase_number}-ac-attempt{attempt}.json",
             }
         )
-    for key in ["prompt", "stdout", "stderr", "ac_results", "handoff"]:
+    for key in ["prompt", "stdout", "stderr", "ac_results", "quality", "handoff"]:
         raw_path = value.get(key)
         if not isinstance(raw_path, str) or not raw_path.strip():
             errors.append(f"`artifacts.{key}` must be a non-empty string.")
@@ -703,6 +704,7 @@ def validate_runtime_contract_bundle(
     evidence_path = runtime_dir / f"phase{phase_number}-evidence.json"
     reconciliation_path = runtime_dir / f"phase{phase_number}-reconciliation.json"
     gate_path = runtime_dir / f"phase{phase_number}-gate.json"
+    quality_path = runtime_dir / f"phase{phase_number}-quality.json"
     errors: list[str] = []
 
     try:
@@ -721,6 +723,12 @@ def validate_runtime_contract_bundle(
         gate = read_json(gate_path)
     except (FileNotFoundError, json.JSONDecodeError) as exc:
         return [f"Cannot read phase gate: {rel(root, gate_path)}: {exc}"]
+    try:
+        quality = read_json(quality_path)
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        return [f"Cannot read phase quality result: {rel(root, quality_path)}: {exc}"]
+    if quality.get("status") != "passed":
+        errors.append(f'Phase quality status must be "passed": {rel(root, quality_path)}')
 
     if contract_acceptance_commands(contract) != expected_commands:
         errors.append(
