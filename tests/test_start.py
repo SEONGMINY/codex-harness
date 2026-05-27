@@ -15,7 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 START = ROOT / "scripts" / "harness" / "start.py"
-HARNESS_VERSION = "0.1.1"
+HARNESS_VERSION = "0.1.2"
 
 
 class StartLauncherTest(unittest.TestCase):
@@ -39,6 +39,10 @@ class StartLauncherTest(unittest.TestCase):
             encoding="utf-8",
         )
         (repo / ".codex" / "harness" / "scripts" / "verify-task.py").write_text(
+            "#!/usr/bin/env python3\nraise SystemExit(0)\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "review-phase-plan.py").write_text(
             "#!/usr/bin/env python3\nraise SystemExit(0)\n",
             encoding="utf-8",
         )
@@ -94,6 +98,31 @@ class StartLauncherTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertIn(".codex/harness/scripts/verify-task.py", result.stderr)
+
+    def test_missing_phase_plan_review_script_fails_install_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            (repo / ".codex" / "harness" / "scripts" / "review-phase-plan.py").unlink()
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "invalid install",
+                    "--codex-bin",
+                    str(tmp / "unused-codex"),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(".codex/harness/scripts/review-phase-plan.py", result.stderr)
 
     def test_missing_relationship_graph_script_fails_install_validation(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -457,6 +486,62 @@ class StartLauncherTest(unittest.TestCase):
             self.assertTrue(violation_path.exists())
             verify_output = Path(repo, launcher_result["verify_task_output"])
             self.assertIn("verify failed", verify_output.read_text(encoding="utf-8"))
+
+    def test_planned_with_design_approval_requires_phase_plan_review_success(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            (repo / ".codex" / "harness" / "scripts" / "review-phase-plan.py").write_text(
+                "import sys\nprint('phase plan failed')\nraise SystemExit(8)\n",
+                encoding="utf-8",
+            )
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    root = Path.cwd()
+                    task = root / "tasks" / "demo"
+                    task.mkdir(parents=True, exist_ok=True)
+                    args = sys.argv
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    last_message.write_text(
+                        '{"status":"planned","task_path":"tasks/demo","files_to_read_next":[],"blockers":[],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "planned with bad phase review",
+                    "--docs-approved",
+                    "--design-approved",
+                    "--full-auto",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "blocked")
+            self.assertEqual(launcher_result["phase_plan_review_returncode"], 8)
+            violation_path = Path(repo, launcher_result["orchestration_violation"])
+            self.assertTrue(violation_path.exists())
+            review_output = Path(repo, launcher_result["phase_plan_review_output"])
+            self.assertIn("phase plan failed", review_output.read_text(encoding="utf-8"))
 
     def test_planned_generates_relationship_graph_without_option(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

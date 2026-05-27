@@ -140,6 +140,7 @@ task 경로도 위 두 파일에서 확인합니다.
 ```bash
 python3 .codex/harness/scripts/verify-task.py <task-dir> --require-design-approval
 python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run
+python3 .codex/harness/scripts/review-phase-plan.py <task-dir>
 ```
 
 phase를 실행합니다.
@@ -284,7 +285,7 @@ hooks 세부 내용은 [docs/hooks.md](./docs/hooks.md)에 있습니다.
 
 ## 상태
 
-현재 버전은 `0.1.1`입니다.
+현재 버전은 `0.1.2`입니다.
 
 이 프로젝트는 Codex 작업을 더 신뢰성 있게 만들기 위한 하네스입니다.
 프로젝트 관리 도구도, 여러 에이전트를 조율하는 프레임워크도 아닙니다.

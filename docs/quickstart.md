@@ -138,6 +138,7 @@ task가 만들어진 뒤에는 먼저 검증합니다.
 ```bash
 python3 .codex/harness/scripts/verify-task.py <task-dir> --require-design-approval
 python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run
+python3 .codex/harness/scripts/review-phase-plan.py <task-dir>
 ```
 
 ## phase 실행

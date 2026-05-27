@@ -1,7 +1,7 @@
 ---
 name: codex-harness
 description: Run a Codex implementation harness for scoped product or internal tooling work. Use when the user invokes `$codex-harness`, asks to clarify requirements before implementation, wants a strict Clarify to Review to Context Gathering to Plan to Generate to Evaluate workflow, or wants phase-based Codex execution controlled by scripts instead of subagents or long chained sessions.
-version: 0.1.1
+version: 0.1.2
 ---
 
 # Codex Harness
@@ -44,13 +44,14 @@ required = [
     root / ".codex" / "harness" / "scripts" / "run-phases.py",
     root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
     root / ".codex" / "harness" / "scripts" / "gen-relationship-graph.py",
+    root / ".codex" / "harness" / "scripts" / "review-phase-plan.py",
 ]
 missing = [str(path) for path in required if not path.exists()]
 if missing:
     raise SystemExit("missing: " + ", ".join(missing))
 manifest_version = json.loads((root / "codex-harness.json").read_text(encoding="utf-8")).get("version")
 skill_text = (root / ".codex" / "harness" / "scripts" / "skill" / "SKILL.md").read_text(encoding="utf-8")
-if manifest_version != "0.1.1" or "version: 0.1.1" not in skill_text:
+if manifest_version != "0.1.2" or "version: 0.1.2" not in skill_text:
     raise SystemExit(f"version mismatch: manifest={manifest_version}")
 PY
 ```
@@ -131,7 +132,7 @@ Return their Markdown content in the structured final output's `artifact.content
 8. Gather only the code and project context needed for the approved task.
 9. Create `tasks/<task-dir>/docs/implementation-design-review.md`, or `design-review-waiver.md` only for tiny non-implementation work, and stop with `design_approval_needed` until the whole design review is approved.
 10. After design approval, Plan work into self-contained task/phase files.
-11. Validate the task with `.codex/harness/scripts/verify-task.py <task-dir> --require-design-approval` and `.codex/harness/scripts/run-phases.py <task-dir> --dry-run`.
+11. Validate the task with `.codex/harness/scripts/verify-task.py <task-dir> --require-design-approval`, `.codex/harness/scripts/run-phases.py <task-dir> --dry-run`, and `.codex/harness/scripts/review-phase-plan.py <task-dir>`.
 12. Run phases with `.codex/harness/scripts/run-phases.py`.
 13. Evaluate from fresh context.
 
@@ -167,7 +168,7 @@ Return their Markdown content in the structured final output's `artifact.content
 - Stop with `questions_needed` when a blocking decision is missing.
 - Stop with `docs_approval_needed` when Clarify Review passes and task docs are not approved yet.
 - Stop with `design_approval_needed` after docs approval once task docs, context-pack files, and `implementation-design-review.md` or `design-review-waiver.md` exist but implementation design is not approved yet.
-- Stop with `planned` only after task docs, context-pack files, indexes, phase files, `verify-task.py`, and `run-phases.py --dry-run` pass.
+- Stop with `planned` only after task docs, context-pack files, indexes, phase files, `verify-task.py`, `run-phases.py --dry-run`, and `review-phase-plan.py` pass.
 - Stop with `generated` only after requested phases run and runtime proof passes verification.
 - Stop with `blocked` only when the next durable state cannot be produced safely.
 - After the user approves docs creation, do not stop until these exist:
@@ -191,8 +192,8 @@ Return their Markdown content in the structured final output's `artifact.content
   - `tasks/<task-dir>/context-pack/static/design-approval.json` after implementation design approval
   - `tasks/<task-dir>/context-pack/static/*`
   - `tasks/<task-dir>/phases/phase<N>.md`
-- After Plan, run `python3 .codex/harness/scripts/verify-task.py <task-dir> --require-design-approval` and `python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run`. Fix failures before stopping.
-- After Plan, stop after verification and dry-run pass. The launcher will generate `relationship-graph.json` and `.mmd`, or `relationship-graph-warning.json`, after the isolated session exits.
+- After Plan, run `python3 .codex/harness/scripts/verify-task.py <task-dir> --require-design-approval`, `python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run`, and `python3 .codex/harness/scripts/review-phase-plan.py <task-dir>`. Fix failures before stopping.
+- After Plan, stop after verification, dry-run, and phase-plan semantic review pass. The launcher will generate `relationship-graph.json` and `.mmd`, or `relationship-graph-warning.json`, after the isolated session exits.
 - After Generate, verify runtime proof before stopping.
 - After Generate, the runner refreshes `relationship-graph.json` and `.mmd`, or records `relationship-graph-warning.json`, after phase execution.
 - After Generate, run evaluation in a review/improve loop unless the user explicitly asks not to: review from fresh context, improve only rejected blockers and required follow-ups, then review again until evaluation returns approved or the runner's `--review-iterations` budget is exhausted.
@@ -267,6 +268,7 @@ Build the next phase prompt without running Codex:
 ```bash
 python3 .codex/harness/scripts/verify-task.py <task-dir>
 python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run
+python3 .codex/harness/scripts/review-phase-plan.py <task-dir>
 ```
 
 Run pending phases:

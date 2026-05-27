@@ -28,7 +28,7 @@ python3 .codex/harness/scripts/verify-task.py <task-dir>
 
 - 출력에 나온 파일을 채웁니다.
 - phase contract를 고칩니다.
-- `run-phases.py <task-dir> --dry-run`을 다시 실행합니다.
+- `run-phases.py <task-dir> --dry-run`과 `review-phase-plan.py <task-dir>`를 다시 실행합니다.
 
 ## Codex는 완료라고 했지만 task가 완료가 아닙니다
 

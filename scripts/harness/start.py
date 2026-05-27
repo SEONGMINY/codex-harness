@@ -33,7 +33,7 @@ SKIP_SNAPSHOT_PATHS = {
     ".codex-harness",
     ".codex/harness/sessions",
 }
-HARNESS_VERSION = "0.1.1"
+HARNESS_VERSION = "0.1.2"
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MANDATORY_COMMON_DOCS = [
     "docs/harness/runner-contract.md",
@@ -197,12 +197,13 @@ Required before `planned`:
 - Implementation phase contracts stay within the approved `Files To Add/Change` paths from the design review.
 - `python3 .codex/harness/scripts/verify-task.py <task-dir> --require-design-approval` passes.
 - `python3 .codex/harness/scripts/run-phases.py <task-dir> --dry-run` passes.
+- `python3 .codex/harness/scripts/review-phase-plan.py <task-dir>` passes.
 """
         generate_contract = f"""## Generate
 
 Do not run Generate from this Codex orchestration session.
 
-If Generate state is `requested`, still stop after docs, context gathering, planning, `verify-task.py`, and `run-phases.py --dry-run`.
+If Generate state is `requested`, still stop after docs, context gathering, planning, `verify-task.py`, `run-phases.py --dry-run`, and `review-phase-plan.py`.
 The Python launcher process will run `.codex/harness/scripts/run-phases.py` after it receives a valid `planned` result.
 """
     elif docs_approved:
@@ -218,7 +219,7 @@ Produce exactly one of these:
 
 Do not produce `planned`.
 Do not create final phase contracts for implementation.
-Do not run `verify-task.py`, `run-phases.py`, Generate, or Evaluate.
+Do not run `verify-task.py`, `run-phases.py`, `review-phase-plan.py`, Generate, or Evaluate.
 
 The implementation design review must include these sections:
 
@@ -254,7 +255,7 @@ Produce exactly one of these:
 - `docs_approval_needed`: write `{rel(run_dir / "docs-approval-request.md", root)}` when Clarify and Review pass.
 
 Do not create task docs, task indexes, context-pack files, phase files, or implementation changes.
-Do not run Context Gathering, Plan, Generate, Evaluate, `verify-task.py`, or `run-phases.py`.
+Do not run Context Gathering, Plan, Generate, Evaluate, `verify-task.py`, `run-phases.py`, or `review-phase-plan.py`.
 
 Pre-approval state artifacts live under `.codex/harness/sessions`, and the launcher owns writing them.
 Do not use shell commands or file-edit tools to create `questions.md` or `docs-approval-request.md`.
@@ -489,6 +490,21 @@ def verify_task(root: Path, task_path: Path, run_dir: Path) -> int:
     return int(result.returncode)
 
 
+def review_phase_plan(root: Path, task_path: Path, run_dir: Path) -> int:
+    output_path = run_dir / "phase-plan-review-output.txt"
+    stderr_path = run_dir / "phase-plan-review-stderr.txt"
+    command = [
+        sys.executable,
+        str(installed_harness_script(root, "review-phase-plan.py")),
+        rel(task_path, root),
+        "--root",
+        str(root),
+    ]
+    with output_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+        result = subprocess.run(command, cwd=root, text=True, stdout=stdout, stderr=stderr, check=False)
+    return int(result.returncode)
+
+
 def generate_relationship_graph(root: Path, task_path: Path | None) -> dict[str, object] | None:
     if task_path is None:
         return None
@@ -533,6 +549,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "start.py",
         root / ".codex" / "harness" / "scripts" / "run-phases.py",
         root / ".codex" / "harness" / "scripts" / "verify-task.py",
+        root / ".codex" / "harness" / "scripts" / "review-phase-plan.py",
         root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
         root / ".codex" / "harness" / "scripts" / "gen-relationship-graph.py",
     ]
@@ -880,6 +897,31 @@ def main() -> int:
                     },
                 )
 
+    phase_plan_review_returncode: int | None = None
+    if (
+        args.docs_approved
+        and args.design_approved
+        and not args.dry_run
+        and not protocol_violations
+        and returncode == 0
+        and final_status == "planned"
+    ):
+        task_path = resolve_task_path(root, final_output)
+        if task_path is None:
+            final_status = "blocked"
+        else:
+            phase_plan_review_returncode = review_phase_plan(root, task_path, run_dir)
+            if phase_plan_review_returncode != 0:
+                final_status = "blocked"
+                write_json(
+                    run_dir / "orchestration-violation.json",
+                    {
+                        "status": "orchestration_violation",
+                        "reason": "Phase plan semantic review must pass before the launcher can accept planned state.",
+                        "phase_plan_review_returncode": phase_plan_review_returncode,
+                    },
+                )
+
     runner_returncode: int | None = None
     if (
         args.run_phases
@@ -905,6 +947,7 @@ def main() -> int:
         else (final_status or launcher_status(run_dir, returncode, args.dry_run)),
         "returncode": returncode,
         "verifier_returncode": verifier_returncode,
+        "phase_plan_review_returncode": phase_plan_review_returncode,
         "runner_returncode": runner_returncode,
         "run_dir": rel(run_dir, root),
         "request": rel(request_path, root),
@@ -916,6 +959,8 @@ def main() -> int:
         "run_phases_stderr": rel(run_dir / "run-phases-stderr.txt", root),
         "verify_task_output": rel(run_dir / "verify-task-output.txt", root),
         "verify_task_stderr": rel(run_dir / "verify-task-stderr.txt", root),
+        "phase_plan_review_output": rel(run_dir / "phase-plan-review-output.txt", root),
+        "phase_plan_review_stderr": rel(run_dir / "phase-plan-review-stderr.txt", root),
         "relationship_graph": relationship_graph,
         "documents": visible_documents(root, run_dir, final_output),
         "questions": rel(run_dir / "questions.md", root),

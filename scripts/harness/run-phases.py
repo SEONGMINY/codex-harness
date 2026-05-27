@@ -40,7 +40,7 @@ from phase_contract import (
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
 RUNNABLE_PHASE_STATUSES = {"pending", "running"}
-HARNESS_VERSION = "0.1.1"
+HARNESS_VERSION = "0.1.2"
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 SCRIPT_DIR = Path(__file__).resolve().parent
 MANDATORY_STATIC_FILES = [

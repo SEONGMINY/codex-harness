@@ -43,6 +43,7 @@ class InstallCodexHarnessTest(unittest.TestCase):
             self.assertTrue((target / ".codex" / "harness" / "scripts" / "skill" / "SKILL.md").exists())
             self.assertTrue((target / ".codex" / "harness" / "scripts" / "codex_exec.py").exists())
             self.assertTrue((target / ".codex" / "harness" / "scripts" / "run-quality-checks.py").exists())
+            self.assertTrue((target / ".codex" / "harness" / "scripts" / "review-phase-plan.py").exists())
             self.assertFalse((target / "scripts" / "harness").exists())
             self.assertTrue((target / "codex-harness.json").exists())
             gitignore = (target / ".gitignore").read_text(encoding="utf-8")
