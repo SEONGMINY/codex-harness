@@ -88,6 +88,7 @@ DESIGN_REVIEW_DOC = "implementation-design-review.md"
 DESIGN_REVIEW_WAIVER_DOC = "design-review-waiver.md"
 DESIGN_APPROVAL_FILE = "design-approval.json"
 DOCUMENT_RESULT_MAX_CHARS = 80_000
+LAUNCHER_SUBPROCESS_TIMEOUT_EXIT_CODE = 124
 
 
 def now_id() -> str:
@@ -545,9 +546,7 @@ def run_phases(root: Path, task_path: Path, run_dir: Path, args: argparse.Namesp
     if getattr(args, "strict_current_harness", False):
         command.append("--strict-current-harness")
 
-    with output_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        result = subprocess.run(command, cwd=root, text=True, stdout=stdout, stderr=stderr, check=False)
-    return int(result.returncode)
+    return run_subprocess_to_files(command, root, output_path, stderr_path, args.subprocess_timeout)
 
 
 def run_phases_dry_run(root: Path, task_path: Path, run_dir: Path, args: argparse.Namespace) -> int:
@@ -563,12 +562,16 @@ def run_phases_dry_run(root: Path, task_path: Path, run_dir: Path, args: argpars
     ]
     if getattr(args, "strict_current_harness", False):
         command.append("--strict-current-harness")
-    with output_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        result = subprocess.run(command, cwd=root, text=True, stdout=stdout, stderr=stderr, check=False)
-    return int(result.returncode)
+    return run_subprocess_to_files(command, root, output_path, stderr_path, args.subprocess_timeout)
 
 
-def verify_task(root: Path, task_path: Path, run_dir: Path, strict_current_harness: bool = False) -> int:
+def verify_task(
+    root: Path,
+    task_path: Path,
+    run_dir: Path,
+    strict_current_harness: bool = False,
+    subprocess_timeout: int = 1800,
+) -> int:
     output_path = run_dir / "verify-task-output.txt"
     stderr_path = run_dir / "verify-task-stderr.txt"
     command = [
@@ -581,12 +584,10 @@ def verify_task(root: Path, task_path: Path, run_dir: Path, strict_current_harne
     ]
     if strict_current_harness:
         command.append("--strict-current-harness")
-    with output_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        result = subprocess.run(command, cwd=root, text=True, stdout=stdout, stderr=stderr, check=False)
-    return int(result.returncode)
+    return run_subprocess_to_files(command, root, output_path, stderr_path, subprocess_timeout)
 
 
-def review_phase_plan(root: Path, task_path: Path, run_dir: Path) -> int:
+def review_phase_plan(root: Path, task_path: Path, run_dir: Path, subprocess_timeout: int = 1800) -> int:
     output_path = run_dir / "phase-plan-review-output.txt"
     stderr_path = run_dir / "phase-plan-review-stderr.txt"
     command = [
@@ -596,9 +597,32 @@ def review_phase_plan(root: Path, task_path: Path, run_dir: Path) -> int:
         "--root",
         str(root),
     ]
+    return run_subprocess_to_files(command, root, output_path, stderr_path, subprocess_timeout)
+
+
+def run_subprocess_to_files(
+    command: list[str],
+    root: Path,
+    output_path: Path,
+    stderr_path: Path,
+    timeout_seconds: int,
+) -> int:
+    timeout = timeout_seconds if timeout_seconds > 0 else None
     with output_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        result = subprocess.run(command, cwd=root, text=True, stdout=stdout, stderr=stderr, check=False)
-    return int(result.returncode)
+        try:
+            result = subprocess.run(
+                command,
+                cwd=root,
+                text=True,
+                stdout=stdout,
+                stderr=stderr,
+                timeout=timeout,
+                check=False,
+            )
+            return int(result.returncode)
+        except subprocess.TimeoutExpired:
+            stderr.write(f"\nTimed out after {timeout_seconds} seconds.\n")
+            return LAUNCHER_SUBPROCESS_TIMEOUT_EXIT_CODE
 
 
 def generate_relationship_graph(root: Path, task_path: Path | None) -> dict[str, object] | None:
@@ -900,6 +924,12 @@ def main() -> int:
         help="Fail codex exec after this many seconds with no activity. Use 0 to disable.",
     )
     parser.add_argument(
+        "--subprocess-timeout",
+        type=int,
+        default=1800,
+        help="Fail launcher-owned verify/review/runner subprocesses after this many seconds. Use 0 to disable.",
+    )
+    parser.add_argument(
         "--yolo",
         action="store_true",
         help="Pass --dangerously-bypass-approvals-and-sandbox to codex exec.",
@@ -1018,7 +1048,13 @@ def main() -> int:
             final_status = "blocked"
         else:
             write_design_approval(root, task_path)
-            verifier_returncode = verify_task(root, task_path, run_dir, args.strict_current_harness)
+            verifier_returncode = verify_task(
+                root,
+                task_path,
+                run_dir,
+                args.strict_current_harness,
+                args.subprocess_timeout,
+            )
             if verifier_returncode != 0:
                 final_status = "blocked"
                 write_json(
@@ -1044,7 +1080,7 @@ def main() -> int:
         if task_path is None:
             final_status = "blocked"
         else:
-            phase_plan_review_returncode = review_phase_plan(root, task_path, run_dir)
+            phase_plan_review_returncode = review_phase_plan(root, task_path, run_dir, args.subprocess_timeout)
             if phase_plan_review_returncode != 0:
                 final_status = "blocked"
                 write_json(
@@ -1131,10 +1167,11 @@ def main() -> int:
     }
     write_json(run_dir / "launcher-result.json", result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    if protocol_violations:
+    for gate_returncode in (verifier_returncode, phase_plan_review_returncode, dry_run_returncode, runner_returncode):
+        if gate_returncode is not None and gate_returncode != 0:
+            return int(gate_returncode)
+    if protocol_violations or (run_dir / "orchestration-violation.json").exists():
         return 1
-    if runner_returncode is not None and runner_returncode != 0:
-        return runner_returncode
     return 0 if returncode in (None, 0) else int(returncode)
 
 

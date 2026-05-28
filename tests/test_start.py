@@ -784,7 +784,7 @@ class StartLauncherTest(unittest.TestCase):
                 check=False,
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertEqual(result.returncode, 9, result.stderr + result.stdout)
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["status"], "blocked")
             self.assertEqual(launcher_result["verifier_returncode"], 9)
@@ -792,6 +792,63 @@ class StartLauncherTest(unittest.TestCase):
             self.assertTrue(violation_path.exists())
             verify_output = Path(repo, launcher_result["verify_task_output"])
             self.assertIn("verify failed", verify_output.read_text(encoding="utf-8"))
+
+    def test_launcher_times_out_planned_verification_and_writes_result(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            (repo / ".codex" / "harness" / "scripts" / "verify-task.py").write_text(
+                "import time\ntime.sleep(10)\n",
+                encoding="utf-8",
+            )
+            self.refresh_install_manifest(repo)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    root = Path.cwd()
+                    task = root / "tasks" / "demo"
+                    task.mkdir(parents=True, exist_ok=True)
+                    args = sys.argv
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    last_message.write_text(
+                        '{"status":"planned","task_path":"tasks/demo","files_to_read_next":[],"blockers":[],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "planned with stuck verification",
+                    "--docs-approved",
+                    "--design-approved",
+                    "--full-auto",
+                    "--codex-bin",
+                    str(fake),
+                    "--subprocess-timeout",
+                    "1",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 124, result.stderr + result.stdout)
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "blocked")
+            self.assertEqual(launcher_result["verifier_returncode"], 124)
+            verify_stderr = Path(repo, launcher_result["verify_task_stderr"])
+            self.assertIn("Timed out after 1 seconds.", verify_stderr.read_text(encoding="utf-8"))
 
     def test_planned_with_design_approval_requires_phase_plan_review_success(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -841,7 +898,7 @@ class StartLauncherTest(unittest.TestCase):
                 check=False,
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertEqual(result.returncode, 8, result.stderr + result.stdout)
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["status"], "blocked")
             self.assertEqual(launcher_result["phase_plan_review_returncode"], 8)
@@ -899,7 +956,7 @@ class StartLauncherTest(unittest.TestCase):
                 check=False,
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertEqual(result.returncode, 6, result.stderr + result.stdout)
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["status"], "blocked")
             self.assertEqual(launcher_result["dry_run_returncode"], 6)
@@ -1145,7 +1202,7 @@ class StartLauncherTest(unittest.TestCase):
                 check=False,
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["status"], "blocked")
             violation_path = Path(repo, launcher_result["orchestration_violation"])
@@ -1351,7 +1408,7 @@ class StartLauncherTest(unittest.TestCase):
                 check=False,
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["status"], "blocked")
             violation_path = Path(repo, launcher_result["orchestration_violation"])
