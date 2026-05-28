@@ -188,10 +188,15 @@ def install_project(
 
     legacy_scripts = target_root / LEGACY_PROJECT_SCRIPT_TARGET
     source_legacy_scripts = source_root / LEGACY_PROJECT_SCRIPT_TARGET
+    target_is_harness_source = (
+        (target_root / "scripts" / "install-codex-harness.py").exists()
+        and (target_root / PROJECT_LOCAL_SKILL_TARGET / "SKILL.md").exists()
+    )
     if (
         force
         and legacy_scripts.exists()
         and legacy_scripts.resolve() != source_legacy_scripts.resolve()
+        and not target_is_harness_source
     ):
         shutil.rmtree(legacy_scripts)
         print(f"removed stale project harness scripts {LEGACY_PROJECT_SCRIPT_TARGET}")

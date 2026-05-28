@@ -76,6 +76,36 @@ class InstallCodexHarnessTest(unittest.TestCase):
             self.assertFalse(legacy.exists())
             self.assertTrue((target / ".codex" / "harness" / "scripts" / "start.py").exists())
 
+    def test_project_force_install_preserves_harness_source_checkout_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            target = tmp / "target"
+            legacy = target / "scripts" / "harness"
+            legacy.mkdir(parents=True)
+            (legacy / "start.py").write_text("# local source\n", encoding="utf-8")
+            (target / "scripts" / "install-codex-harness.py").write_text("# installer\n", encoding="utf-8")
+            source_skill = target / ".agents" / "skills" / "codex-harness"
+            source_skill.mkdir(parents=True)
+            (source_skill / "SKILL.md").write_text("# source skill\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(INSTALLER),
+                    str(target),
+                    "--scope",
+                    "project",
+                    "--force",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertTrue((legacy / "start.py").exists())
+            self.assertTrue((target / ".codex" / "harness" / "scripts" / "start.py").exists())
+
     def test_project_hook_install_ignores_local_hook_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
