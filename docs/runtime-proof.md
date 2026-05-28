@@ -324,10 +324,14 @@ evaluation-prompt.md
 evaluation-output.jsonl
 evaluation-last-message.json
 evaluation-stderr.txt
+evaluation-commit.json
 ```
 
 `run-phases.py --evaluate`에서 평가가 `rejected`이면 runner는 `evaluation-repair<N>-*` 실행 기록을 남기고 다시 평가합니다.
 평가가 `approved`가 되기 전까지는 완료로 보지 않습니다.
+
+`evaluation-commit.json`은 평가가 참조한 completed phase attempt commit과 evaluation artifact 묶음을 sha256으로 봉인합니다.
+`verify-task.py --require-evaluation`은 이 파일을 기준으로 현재 phase proof와 evaluation artifact가 평가 시점의 봉인값과 일치하는지 확인합니다.
 
 `evaluation-command-results.json`은 schema version 1 object입니다.
 이 파일은 evaluation command 결과뿐 아니라 evaluation에 적용된 `policy_pack`, `harness_attestation`, `design_approval_scope_sha256`를 기록합니다.

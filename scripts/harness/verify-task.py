@@ -964,6 +964,155 @@ def validate_evaluation_final(root: Path, path: Path) -> list[str]:
     return []
 
 
+def artifact_entries_by_name(value: object) -> dict[str, dict[str, Any]]:
+    entries = value if isinstance(value, list) else []
+    return {
+        str(item.get("name")): item
+        for item in entries
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+
+
+def validate_commit_artifact_ref(
+    root: Path,
+    task_path: Path,
+    entry: object,
+    expected_name: str,
+    expected_path: str,
+    label: str,
+) -> list[str]:
+    if not isinstance(entry, dict):
+        return [f"{label} must include artifact {expected_name}."]
+    errors: list[str] = []
+    if entry.get("name") != expected_name:
+        errors.append(f"{label} {expected_name} name mismatch.")
+    if entry.get("path") != expected_path:
+        errors.append(f"{label} {expected_name} path must be {expected_path}.")
+    if entry.get("exists") is not True:
+        errors.append(f"{label} {expected_name} must exist.")
+        return errors
+    target, path_errors = resolve_task_relative_path(root, task_path, expected_path, f"{label}.{expected_name}.path")
+    errors.extend(path_errors)
+    if target is None:
+        return errors
+    if not target.exists() or not target.is_file():
+        errors.append(f"{label} {expected_name} path does not exist: {rel(root, target)}")
+    elif entry.get("sha256") != file_sha256(target):
+        errors.append(f"{label} {expected_name} sha256 does not match current artifact.")
+    return errors
+
+
+def validate_evaluation_commit(
+    root: Path,
+    task_path: Path,
+    path: Path,
+    completed_phase_results: list[tuple[int, dict[str, Any]]],
+    *,
+    approved_policy_packs: list[dict[str, str]] | None = None,
+    strict_current_harness: bool = False,
+) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        commit = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"Invalid evaluation commit JSON: {rel(root, path)}: {exc}"]
+    if not isinstance(commit, dict):
+        return [f"Evaluation commit must be a JSON object: {rel(root, path)}"]
+
+    errors: list[str] = []
+    if commit.get("schema_version") != 1:
+        errors.append("Evaluation commit schema_version must be 1.")
+    if commit.get("commit_scope") != "evaluation_bundle":
+        errors.append('Evaluation commit commit_scope must be "evaluation_bundle".')
+    if commit.get("status") != "committed":
+        errors.append('Evaluation commit status must be "committed".')
+    if commit.get("verdict") != "approved":
+        errors.append('Evaluation commit verdict must be "approved".')
+    errors.extend(
+        validate_policy_pack_metadata(
+            commit.get("policy_pack"),
+            "Evaluation commit",
+            approved_fingerprints=approved_policy_packs,
+        )
+    )
+    errors.extend(
+        validate_harness_attestation_metadata(
+            commit.get("harness_attestation"),
+            "Evaluation commit",
+            strict_current=strict_current_harness,
+        )
+    )
+    errors.extend(
+        validate_commit_artifact_ref(
+            root,
+            task_path,
+            commit.get("task_index"),
+            "task_index",
+            "index.json",
+            "Evaluation commit",
+        )
+    )
+
+    expected_artifacts = {
+        "command_results": "context-pack/runtime/evaluation-command-results.json",
+        "prompt": "context-pack/runtime/evaluation-prompt.md",
+        "output": "context-pack/runtime/evaluation-output.jsonl",
+        "stderr": "context-pack/runtime/evaluation-stderr.txt",
+        "last_message": "context-pack/runtime/evaluation-last-message.json",
+    }
+    artifacts = artifact_entries_by_name(commit.get("evaluation_artifacts"))
+    for name, expected_path in expected_artifacts.items():
+        errors.extend(
+            validate_commit_artifact_ref(
+                root,
+                task_path,
+                artifacts.get(name),
+                name,
+                expected_path,
+                "Evaluation commit artifact",
+            )
+        )
+
+    phase_proofs = commit.get("phase_proofs")
+    if not isinstance(phase_proofs, list):
+        errors.append("Evaluation commit phase_proofs must be a list.")
+        phase_proofs = []
+    by_phase = {
+        item.get("phase"): item
+        for item in phase_proofs
+        if isinstance(item, dict) and isinstance(item.get("phase"), int)
+    }
+    expected_phases = {phase_number for phase_number, _result in completed_phase_results}
+    actual_phases = {phase for phase in by_phase if isinstance(phase, int)}
+    if actual_phases != expected_phases:
+        errors.append(
+            "Evaluation commit phase_proofs must match completed phases. "
+            f"expected={sorted(expected_phases)!r} actual={sorted(actual_phases)!r}"
+        )
+    for phase_number, result in completed_phase_results:
+        proof = by_phase.get(phase_number)
+        if not isinstance(proof, dict):
+            continue
+        attempt = result.get("attempt")
+        if not isinstance(attempt, int) or attempt <= 0:
+            continue
+        if proof.get("attempt") != attempt:
+            errors.append(f"Evaluation commit phase {phase_number} attempt must be {attempt}.")
+        commit_path = f"context-pack/runtime/phase{phase_number}-attempt{attempt}-commit.json"
+        errors.extend(
+            validate_commit_artifact_ref(
+                root,
+                task_path,
+                proof.get("attempt_commit"),
+                "attempt_commit",
+                commit_path,
+                f"Evaluation commit phase {phase_number}",
+            )
+        )
+    return errors
+
+
 def validate_phase_reconciliation(root: Path, path: Path) -> list[str]:
     if not path.exists():
         return []
@@ -1805,6 +1954,18 @@ def verify(
         evaluation_final = runtime_dir / "evaluation-last-message.json"
         errors.extend(require_file(root, evaluation_final, "evaluation final output", False))
         errors.extend(validate_evaluation_final(root, evaluation_final))
+        evaluation_commit = runtime_dir / "evaluation-commit.json"
+        errors.extend(require_file(root, evaluation_commit, "evaluation commit", False))
+        errors.extend(
+            validate_evaluation_commit(
+                root,
+                task_path,
+                evaluation_commit,
+                completed_phase_results,
+                approved_policy_packs=approved_evaluation_policy_packs,
+                strict_current_harness=strict_current_harness,
+            )
+        )
         errors.extend(validate_evaluation_repair_results(root, task_path, runtime_dir))
 
     if not registry_errors:

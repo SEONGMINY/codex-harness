@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -55,6 +56,103 @@ def design_approval_scope_sha(task_path: Path) -> str | None:
 
 def now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def task_relative(task_path: Path, path: Path) -> str:
+    return str(path.relative_to(task_path))
+
+
+def artifact_ref(task_path: Path, name: str, path: Path) -> dict[str, object]:
+    item: dict[str, object] = {
+        "name": name,
+        "path": task_relative(task_path, path),
+        "exists": path.exists() and path.is_file(),
+    }
+    if item["exists"]:
+        item["sha256"] = file_sha256(path)
+    return item
+
+
+def phase_attempt_from_result(task_path: Path, phase_number: int) -> int | None:
+    result_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-result.json"
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    attempt = result.get("attempt") if isinstance(result, dict) else None
+    return attempt if isinstance(attempt, int) and attempt > 0 else None
+
+
+def completed_phase_proofs(task_path: Path, task_index: dict) -> list[dict[str, object]]:
+    proofs: list[dict[str, object]] = []
+    runtime_dir = task_path / "context-pack" / "runtime"
+    for phase in task_index.get("phases") or []:
+        if not isinstance(phase, dict) or phase.get("status") != "completed":
+            continue
+        phase_number = phase.get("phase")
+        if not isinstance(phase_number, int):
+            continue
+        attempt = phase.get("attempts")
+        if not isinstance(attempt, int) or attempt <= 0:
+            attempt = phase_attempt_from_result(task_path, phase_number)
+        if not isinstance(attempt, int) or attempt <= 0:
+            continue
+        commit_path = runtime_dir / f"phase{phase_number}-attempt{attempt}-commit.json"
+        proof: dict[str, object] = {
+            "phase": phase_number,
+            "attempt": attempt,
+            "attempt_commit": artifact_ref(task_path, "attempt_commit", commit_path),
+        }
+        try:
+            commit = json.loads(commit_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            commit = {}
+        result_ref = commit.get("result") if isinstance(commit, dict) else None
+        result_path = result_ref.get("path") if isinstance(result_ref, dict) else None
+        if isinstance(result_path, str) and result_path.strip():
+            proof["result"] = artifact_ref(task_path, "result", task_path / result_path)
+        proofs.append(proof)
+    return proofs
+
+
+def write_evaluation_commit(
+    task_path: Path,
+    task_index: dict,
+    artifacts: dict[str, Path],
+) -> Path:
+    runtime_dir = task_path / "context-pack" / "runtime"
+    final_path = artifacts["last_message"]
+    try:
+        final = json.loads(final_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        final = {}
+    commit = {
+        "schema_version": 1,
+        "commit_scope": "evaluation_bundle",
+        "status": "committed",
+        "verdict": final.get("verdict") if isinstance(final, dict) else None,
+        "evaluated_at": now(),
+        "policy_pack": runtime_policy_pack(),
+        "harness_attestation": harness_attestation(),
+        "design_approval_scope_sha256": design_approval_scope_sha(task_path),
+        "task_index": artifact_ref(task_path, "task_index", task_path / "index.json"),
+        "phase_proofs": completed_phase_proofs(task_path, task_index),
+        "evaluation_artifacts": [
+            artifact_ref(task_path, name, path)
+            for name, path in artifacts.items()
+        ],
+    }
+    path = runtime_dir / "evaluation-commit.json"
+    atomic_write_json(path, commit)
+    return path
 
 
 def read_json(path: Path) -> dict:
@@ -334,6 +432,17 @@ def main() -> int:
         if returncode != 0:
             print(f"codex exec failed. See {stderr_path}.", file=sys.stderr)
             return returncode
+        write_evaluation_commit(
+            task_path,
+            task_index,
+            {
+                "command_results": results_path,
+                "prompt": prompt_path,
+                "output": output_path,
+                "stderr": stderr_path,
+                "last_message": last_message_path,
+            },
+        )
         if failed_commands:
             print(f"validation command failed. See {results_path}.", file=sys.stderr)
             return 1

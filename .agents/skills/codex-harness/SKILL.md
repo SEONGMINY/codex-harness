@@ -242,7 +242,9 @@ Evaluate is not complete unless these files exist:
 - `tasks/<task-dir>/context-pack/runtime/evaluation-command-results.json`
 - `tasks/<task-dir>/context-pack/runtime/evaluation-prompt.md`
 - `tasks/<task-dir>/context-pack/runtime/evaluation-output.jsonl`
+- `tasks/<task-dir>/context-pack/runtime/evaluation-stderr.txt`
 - `tasks/<task-dir>/context-pack/runtime/evaluation-last-message.json`
+- `tasks/<task-dir>/context-pack/runtime/evaluation-commit.json`
 
 If runtime proof is missing, report the task as blocked or failed. Do not infer success from handoffs or status JSON alone.
 

@@ -310,8 +310,50 @@ class VerifyTaskHelperTest(unittest.TestCase):
         )
         (runtime_dir / "evaluation-prompt.md").write_text("Evaluate this task.\n", encoding="utf-8")
         (runtime_dir / "evaluation-output.jsonl").write_text('{"event":"done"}\n', encoding="utf-8")
+        (runtime_dir / "evaluation-stderr.txt").write_text("", encoding="utf-8")
         (runtime_dir / "evaluation-last-message.json").write_text(
             json.dumps({"verdict": "approved", "blockers": [], "required_followups": []}) + "\n",
+            encoding="utf-8",
+        )
+        evaluation_artifacts = []
+        for name, filename in [
+            ("command_results", "evaluation-command-results.json"),
+            ("prompt", "evaluation-prompt.md"),
+            ("output", "evaluation-output.jsonl"),
+            ("stderr", "evaluation-stderr.txt"),
+            ("last_message", "evaluation-last-message.json"),
+        ]:
+            path = runtime_dir / filename
+            evaluation_artifacts.append(
+                {
+                    "name": name,
+                    "path": f"context-pack/runtime/{filename}",
+                    "exists": True,
+                    "sha256": VERIFY_TASK.file_sha256(path),
+                }
+            )
+        (runtime_dir / "evaluation-commit.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "commit_scope": "evaluation_bundle",
+                    "status": "committed",
+                    "verdict": "approved",
+                    "evaluated_at": "2026-05-22T10:00:00+09:00",
+                    "policy_pack": VERIFY_TASK.policy_pack_metadata(),
+                    "harness_attestation": VERIFY_TASK.harness_attestation(),
+                    "design_approval_scope_sha256": approval["design_approval_scope_sha256"],
+                    "task_index": {
+                        "name": "task_index",
+                        "path": "index.json",
+                        "exists": True,
+                        "sha256": VERIFY_TASK.file_sha256(task_path / "index.json"),
+                    },
+                    "phase_proofs": [],
+                    "evaluation_artifacts": evaluation_artifacts,
+                }
+            )
+            + "\n",
             encoding="utf-8",
         )
 
@@ -882,6 +924,63 @@ classDiagram
             )
 
             self.assertEqual(errors, [])
+
+    def test_verify_with_evaluation_requirement_rejects_missing_evaluation_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+            self.write_design_approval(root, task_path)
+            self.write_evaluation_artifacts(task_path)
+            (task_path / "context-pack" / "runtime" / "evaluation-commit.json").unlink()
+
+            errors = VERIFY_TASK.verify(
+                root,
+                task_path,
+                require_evaluation=True,
+                require_design_approval=True,
+            )
+
+            self.assertTrue(any("Missing evaluation commit" in error for error in errors), errors)
+
+    def test_verify_with_evaluation_requirement_rejects_stale_evaluation_artifact_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+            self.write_design_approval(root, task_path)
+            self.write_evaluation_artifacts(task_path)
+            (task_path / "context-pack" / "runtime" / "evaluation-output.jsonl").write_text(
+                '{"event":"changed"}\n',
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.verify(
+                root,
+                task_path,
+                require_evaluation=True,
+                require_design_approval=True,
+            )
+
+            self.assertTrue(any("output sha256 does not match" in error for error in errors), errors)
+
+    def test_evaluation_commit_phase_proofs_must_match_completed_phases(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+            self.write_design_approval(root, task_path)
+            self.write_evaluation_artifacts(task_path)
+
+            errors = VERIFY_TASK.validate_evaluation_commit(
+                root,
+                task_path,
+                task_path / "context-pack" / "runtime" / "evaluation-commit.json",
+                [(0, {"attempt": 1})],
+                approved_policy_packs=[VERIFY_TASK.current_policy_pack_fingerprint()],
+            )
+
+            self.assertTrue(any("phase_proofs must match completed phases" in error for error in errors), errors)
 
     def test_verify_with_evaluation_requirement_rejects_repair_result_drift(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

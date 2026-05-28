@@ -29,11 +29,17 @@ class EvaluateTaskTest(unittest.TestCase):
         path.write_text(
             "#!/usr/bin/env python3\n"
             "from __future__ import annotations\n"
+            "from pathlib import Path\n"
             "import sys\n"
             + textwrap.dedent(
                 """
                 assert "--output-schema" in sys.argv, sys.argv
                 assert sys.argv[sys.argv.index("--output-schema") + 1].endswith("evaluation-final.schema.json")
+                if "--output-last-message" in sys.argv:
+                    Path(sys.argv[sys.argv.index("--output-last-message") + 1]).write_text(
+                        '{"verdict":"approved","blockers":[],"required_followups":[]}\\n',
+                        encoding="utf-8",
+                    )
                 sys.stdin.read()
                 print('{"event":"done"}', flush=True)
                 raise SystemExit(0)
@@ -135,6 +141,78 @@ class EvaluateTaskTest(unittest.TestCase):
             )
             self.assertNotIn("policy_pack", prompt)
             self.assertIn('"command": "true"', prompt)
+
+    def test_evaluation_writes_commit_for_artifact_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "repo"
+            task_path = root / "tasks" / "demo"
+            static_dir = task_path / "context-pack" / "static"
+            static_dir.mkdir(parents=True)
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "docs": [],
+                        "common_docs": [],
+                        "evaluation_commands": ["true"],
+                        "phases": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            active_policy_pack = {
+                key: value
+                for key, value in EVALUATE_TASK.runtime_policy_pack().items()
+                if key in {"id", "schema_version", "sha256"}
+            }
+            (static_dir / "design-approval.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "active_policy_pack": active_policy_pack,
+                        "approved_policy_packs": [active_policy_pack],
+                        "approved_bundle_sha256": "bundle-sha",
+                        "design_approval_scope_sha256": "scope-sha",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake = self.make_fake_codex(tmp)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(HARNESS_DIR / "evaluate-task.py"),
+                    "demo",
+                    "--root",
+                    str(root),
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            commit_path = task_path / "context-pack" / "runtime" / "evaluation-commit.json"
+            commit = json.loads(commit_path.read_text(encoding="utf-8"))
+            self.assertEqual(commit["commit_scope"], "evaluation_bundle")
+            self.assertEqual(commit["verdict"], "approved")
+            self.assertEqual(commit["phase_proofs"], [])
+            by_name = {item["name"]: item for item in commit["evaluation_artifacts"]}
+            self.assertEqual(
+                by_name["last_message"]["sha256"],
+                EVALUATE_TASK.file_sha256(task_path / "context-pack" / "runtime" / "evaluation-last-message.json"),
+            )
+            self.assertEqual(
+                commit["task_index"]["sha256"],
+                EVALUATE_TASK.file_sha256(task_path / "index.json"),
+            )
 
     def test_standalone_evaluation_refuses_active_task_runtime_lock(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
