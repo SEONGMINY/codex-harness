@@ -736,6 +736,77 @@ classDiagram
 
             self.assertTrue(any("design-approved policy pack lineage" in error for error in errors), errors)
 
+    def test_ac_results_metadata_accepts_current_runtime_metadata_and_matching_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            commands = [{"command": "true", "exit_code": 0, "timed_out": False}]
+            identities = [VERIFY_TASK.command_result_identity(item) for item in commands]
+            (runtime_dir / "phase0-ac-attempt1.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "runner_version": VERIFY_TASK.HARNESS_VERSION,
+                        "phase": 0,
+                        "attempt": 1,
+                        "policy_pack": VERIFY_TASK.policy_pack_metadata(),
+                        "harness_attestation": VERIFY_TASK.harness_attestation(),
+                        "commands_digest": VERIFY_TASK.stable_json_sha256(identities),
+                        "commands": commands,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.validate_ac_results_metadata(
+                root,
+                task_path,
+                0,
+                1,
+                {"ac_results": "context-pack/runtime/phase0-ac-attempt1.json"},
+                VERIFY_TASK.policy_pack_metadata(),
+                commands,
+                strict_current_harness=True,
+            )
+
+            self.assertEqual(errors, [])
+
+    def test_ac_results_metadata_rejects_command_digest_and_phase_command_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            (runtime_dir / "phase0-ac-attempt1.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "phase": 0,
+                        "attempt": 1,
+                        "commands_digest": "stale",
+                        "commands": [{"command": "false", "exit_code": 1}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.validate_ac_results_metadata(
+                root,
+                task_path,
+                0,
+                1,
+                {"ac_results": "context-pack/runtime/phase0-ac-attempt1.json"},
+                None,
+                [{"command": "true", "exit_code": 0}],
+            )
+
+            self.assertTrue(any("commands_digest" in error for error in errors), errors)
+            self.assertTrue(any("commands do not match" in error for error in errors), errors)
+
     def test_strict_current_harness_rejects_stale_policy_pack(self) -> None:
         stale_policy = VERIFY_TASK.policy_pack_metadata()
         stale_policy["sha256"] = "stale"

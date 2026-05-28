@@ -1587,6 +1587,13 @@ def resolve_task_artifact_path(task_path: Path, raw_path: object) -> Path | None
     return target
 
 
+COMMAND_IDENTITY_FIELDS = ("id", "command", "role", "target", "exit_code", "timed_out")
+
+
+def command_result_identity(item: dict[str, object]) -> dict[str, object]:
+    return {key: item.get(key) for key in COMMAND_IDENTITY_FIELDS if key in item}
+
+
 def write_ac_results(
     task_path: Path,
     phase_number: int,
@@ -1594,11 +1601,17 @@ def write_ac_results(
     command_results: list[dict[str, object]],
 ) -> Path:
     path = ac_results_path(task_path, phase_number, attempt)
+    command_identities = [command_result_identity(item) for item in command_results]
     write_json(
         path,
         {
+            "schema_version": 1,
+            "runner_version": HARNESS_VERSION,
             "phase": phase_number,
             "attempt": attempt,
+            "policy_pack": runtime_policy_pack(),
+            "harness_attestation": RUNTIME_HARNESS_ATTESTATION,
+            "commands_digest": stable_json_sha256(command_identities),
             "commands": command_results,
         },
     )
@@ -2037,10 +2050,47 @@ def attempt_commit_artifacts_valid(
     return True
 
 
+def attempt_commit_runtime_metadata_valid(
+    commit: dict[str, object],
+    result: dict[str, object],
+) -> bool:
+    if commit.get("schema_version") != 1:
+        return False
+    if commit.get("commit_scope") != "runtime_attempt_bundle":
+        return False
+    if commit.get("status") != "committed":
+        return False
+    if commit.get("runner_version") != HARNESS_VERSION or result.get("runner_version") != HARNESS_VERSION:
+        return False
+    if result.get("status") != "completed":
+        return False
+    if result.get("codex_exit_code") != 0 or result.get("tests_passed") is not True:
+        return False
+    current_policy = policy_pack_fingerprint(runtime_policy_pack())
+    commit_policy = policy_pack_fingerprint(commit.get("policy_pack") if isinstance(commit.get("policy_pack"), dict) else None)
+    result_policy = policy_pack_fingerprint(result.get("policy_pack") if isinstance(result.get("policy_pack"), dict) else None)
+    if current_policy is None or commit_policy != current_policy or result_policy != current_policy:
+        return False
+    current_attestation = attestation_fingerprint(RUNTIME_HARNESS_ATTESTATION)
+    commit_attestation = attestation_fingerprint(
+        commit.get("harness_attestation") if isinstance(commit.get("harness_attestation"), dict) else None
+    )
+    result_attestation = attestation_fingerprint(
+        result.get("harness_attestation") if isinstance(result.get("harness_attestation"), dict) else None
+    )
+    if current_attestation is None or commit_attestation != current_attestation or result_attestation != current_attestation:
+        return False
+    return True
+
+
 def phase_attempt_commit_sort_key(path: Path) -> tuple[int, str]:
     match = re.search(r"-attempt(\d+)-commit\.json$", path.name)
     attempt = int(match.group(1)) if match else -1
     return attempt, path.name
+
+
+def phase_attempt_commit_files_exist(task_path: Path, phase_number: int) -> bool:
+    return any((task_path / "context-pack" / "runtime").glob(f"phase{phase_number}-attempt*-commit.json"))
 
 
 def latest_valid_phase_attempt_commit(task_path: Path, phase_number: int) -> dict[str, object] | None:
@@ -2084,6 +2134,8 @@ def latest_valid_phase_attempt_commit(task_path: Path, phase_number: int) -> dic
         if "reset_generation" in data or "reset_generation" in result_data:
             if data.get("reset_generation") != result_data.get("reset_generation"):
                 continue
+        if not attempt_commit_runtime_metadata_valid(data, result_data):
+            continue
         if not attempt_commit_artifacts_valid(task_path, data, result_data):
             continue
         lineage, lineage_errors = approved_policy_pack_lineage(task_path)
@@ -2132,7 +2184,11 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
                 phase["completed_at"] = now()
                 phase["attempts"] = commit.get("attempt")
         elif status == "completed" and (not commit or not commit_matches_phase_attempt):
-            reason = "missing_attempt_commit" if not commit else "stale_attempt_commit"
+            reason = (
+                "missing_attempt_commit"
+                if not commit and not phase_attempt_commit_files_exist(task_path, phase_number)
+                else "stale_attempt_commit"
+            )
             changes.append({"phase": phase_number, "from_status": status, "to_status": "error", "reason": reason})
             if not dry_run:
                 phase["status"] = "error"

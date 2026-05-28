@@ -316,6 +316,13 @@ def approved_policy_pack_lineage(root: Path, task_path: Path) -> tuple[list[dict
     return allowed_policy_fingerprints(entries), errors
 
 
+COMMAND_IDENTITY_FIELDS = ("id", "command", "role", "target", "exit_code", "timed_out")
+
+
+def command_result_identity(item: dict[str, object]) -> dict[str, object]:
+    return {key: item.get(key) for key in COMMAND_IDENTITY_FIELDS if key in item}
+
+
 def validate_ac_results_metadata(
     root: Path,
     task_path: Path,
@@ -323,8 +330,10 @@ def validate_ac_results_metadata(
     attempt: int,
     artifacts: dict[str, object],
     expected_policy_pack: dict[str, str] | None = None,
+    expected_commands_run: object = None,
     *,
     approved_policy_packs: list[dict[str, str]] | None = None,
+    strict_current_harness: bool = False,
 ) -> list[str]:
     raw_path = artifacts.get("ac_results") if isinstance(artifacts, dict) else None
     if not isinstance(raw_path, str):
@@ -337,20 +346,54 @@ def validate_ac_results_metadata(
     if not isinstance(data, dict):
         return [f"AC results must be a metadata object: {rel(root, path)}"]
     errors: list[str] = []
+    if strict_current_harness or "schema_version" in data:
+        if data.get("schema_version") != 1:
+            errors.append("AC results schema_version must be 1.")
     if data.get("phase") != phase_number:
         errors.append("AC results metadata phase does not match result phase.")
     if data.get("attempt") not in (None, attempt):
         errors.append("AC results metadata attempt does not match result attempt.")
+    commands = data.get("commands") if isinstance(data.get("commands"), list) else []
+    command_identities = [command_result_identity(item) for item in commands if isinstance(item, dict)]
+    commands_digest = data.get("commands_digest")
+    if commands_digest is not None and commands_digest != stable_json_sha256(command_identities):
+        errors.append("AC results commands_digest does not match commands.")
+    if isinstance(expected_commands_run, list):
+        expected_identities = [
+            command_result_identity(item)
+            for item in expected_commands_run
+            if isinstance(item, dict)
+        ]
+        if command_identities != expected_identities:
+            errors.append("AC results commands do not match phase result commands_run.")
     policy = data.get("policy_pack")
-    if expected_policy_pack is not None and policy != expected_policy_pack:
+    if expected_policy_pack is not None and policy is not None and policy != expected_policy_pack:
         errors.append("AC results metadata policy_pack does not match phase result policy_pack.")
-    errors.extend(
-        validate_policy_pack_metadata(
-            policy,
-            "AC results",
-            approved_fingerprints=approved_policy_packs,
+    if strict_current_harness or policy is not None:
+        errors.extend(
+            validate_policy_pack_metadata(
+                policy,
+                "AC results",
+                strict_current=strict_current_harness,
+                approved_fingerprints=approved_policy_packs,
+            )
         )
-    )
+    if strict_current_harness or data.get("runner_version") is not None:
+        errors.extend(
+            validate_runner_version(
+                data.get("runner_version"),
+                "AC results",
+                strict_current=strict_current_harness,
+            )
+        )
+    if strict_current_harness or data.get("harness_attestation") is not None:
+        errors.extend(
+            validate_harness_attestation_metadata(
+                data.get("harness_attestation"),
+                "AC results",
+                strict_current=strict_current_harness,
+            )
+        )
     return errors
 
 
@@ -1442,7 +1485,9 @@ def validate_phase_result(
                 attempt,
                 artifacts,
                 policy_pack if isinstance(policy_pack, dict) else None,
+                result.get("commands_run"),
                 approved_policy_packs=approved_policy_packs or None,
+                strict_current_harness=strict_current_harness,
             )
         )
     expected_handoff_paths = set()

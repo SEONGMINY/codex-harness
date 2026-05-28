@@ -478,6 +478,29 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 RUN_PHASES.stable_json_sha256(commit["repo_content"]["changed_files"]),
             )
 
+    def test_ac_results_records_runtime_metadata_and_command_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            _root, task_path = self.make_task(Path(raw_tmp))
+            commands = [
+                {
+                    "command": "python3 -m unittest",
+                    "exit_code": 0,
+                    "output": "ok\n",
+                    "timed_out": False,
+                }
+            ]
+
+            path = RUN_PHASES.write_ac_results(task_path, 0, 1, commands)
+            data = json.loads(path.read_text(encoding="utf-8"))
+
+            identities = [RUN_PHASES.command_result_identity(item) for item in commands]
+            self.assertEqual(data["schema_version"], 1)
+            self.assertEqual(data["runner_version"], RUN_PHASES.HARNESS_VERSION)
+            self.assertEqual(data["policy_pack"], RUN_PHASES.runtime_policy_pack())
+            self.assertEqual(data["harness_attestation"], RUN_PHASES.RUNTIME_HARNESS_ATTESTATION)
+            self.assertEqual(data["commands_digest"], RUN_PHASES.stable_json_sha256(identities))
+            self.assertEqual(data["commands"], commands)
+
     def test_attempt_result_keeps_old_commit_valid_after_phase_result_alias_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
@@ -549,6 +572,57 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 "context-pack/runtime/phase0-handoff-attempt1.md",
             )
             self.assertEqual(json.loads(commit1.read_text(encoding="utf-8"))["attempt"], 1)
+
+    def test_runtime_projection_does_not_recover_stale_runner_metadata_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            for path in [
+                RUN_PHASES.phase_contract_path(task_path, 0),
+                RUN_PHASES.phase_checklist_path(task_path, 0),
+                RUN_PHASES.phase_quality_path(task_path, 0),
+                RUN_PHASES.phase_evidence_path(task_path, 0),
+                RUN_PHASES.phase_gate_path(task_path, 0),
+                RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+                RUN_PHASES.phase_handoff_path(task_path, 0),
+            ]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("artifact\n", encoding="utf-8")
+            prompt = RUN_PHASES.phase_attempt_prompt_path(task_path, 0, 1)
+            stdout = runtime / "phase0-output-attempt1.jsonl"
+            stderr = runtime / "phase0-stderr-attempt1.txt"
+            ac = RUN_PHASES.write_ac_results(task_path, 0, 1, [{"command": "true", "exit_code": 0}])
+            for path in [prompt, stdout, stderr]:
+                path.write_text("attempt 1\n", encoding="utf-8")
+            result_path = RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                1,
+                0,
+                [],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                prompt,
+                stdout,
+                stderr,
+                ac,
+            )
+            commit_path = RUN_PHASES.write_phase_attempt_commit(task_path, 0, 1, result_path)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result["runner_version"] = "0.0.0"
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            commit = json.loads(commit_path.read_text(encoding="utf-8"))
+            commit["runner_version"] = "0.0.0"
+            commit["result"]["sha256"] = RUN_PHASES.file_sha256(result_path)
+            commit_path.write_text(json.dumps(commit) + "\n", encoding="utf-8")
+
+            self.assertIsNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 0))
 
     def test_running_projection_does_not_recover_old_commit_after_new_result_before_commit_crash(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -1068,14 +1142,32 @@ class RunCodexRuntimeTest(unittest.TestCase):
             reset_at = "2026-01-01T00:00:00+09:00"
             RUN_PHASES.write_phase_reset_marker(task_path, 0, reset_at, 0)
             result_path = RUN_PHASES.phase_result_path(task_path, 0)
-            result = {"phase": 0, "attempt": 1, "status": "completed", "reset_generation": 1, "artifacts": {}}
+            result = {
+                "schema_version": 1,
+                "runner_version": RUN_PHASES.HARNESS_VERSION,
+                "phase": 0,
+                "attempt": 1,
+                "status": "completed",
+                "reset_generation": 1,
+                "codex_exit_code": 0,
+                "tests_passed": True,
+                "policy_pack": RUN_PHASES.runtime_policy_pack(),
+                "harness_attestation": RUN_PHASES.RUNTIME_HARNESS_ATTESTATION,
+                "artifacts": {},
+            }
             result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
             RUN_PHASES.phase_attempt_commit_path(task_path, 0, 1).write_text(
                 json.dumps(
                     {
+                        "schema_version": 1,
+                        "runner_version": RUN_PHASES.HARNESS_VERSION,
+                        "commit_scope": "runtime_attempt_bundle",
                         "phase": 0,
                         "attempt": 1,
                         "reset_generation": 1,
+                        "status": "committed",
+                        "policy_pack": RUN_PHASES.runtime_policy_pack(),
+                        "harness_attestation": RUN_PHASES.RUNTIME_HARNESS_ATTESTATION,
                         "committed_at": reset_at,
                         "result": {
                             "path": "context-pack/runtime/phase0-result.json",
