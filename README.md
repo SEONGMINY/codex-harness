@@ -206,6 +206,13 @@ tasks/<task-dir>/
       phase<N>-prompt-attempt<M>.md
       phase<N>-contract-attempt<M>.json
       phase<N>-checklist-attempt<M>.md
+      phase<N>-evidence-attempt<M>.json
+      phase<N>-gate-attempt<M>.json
+      phase<N>-quality-attempt<M>.json
+      phase<N>-reconciliation-attempt<M>.json
+      phase<N>-reconciliation-attempt<M>.md
+      phase<N>-repair-packet-attempt<M>.json
+      phase<N>-repair-packet-attempt<M>.md
       phase<N>-prompt.md
       phase<N>-contract.json
       phase<N>-checklist.md

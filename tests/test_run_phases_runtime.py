@@ -2377,8 +2377,159 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertNotIn("Repair mode:", attempt1_prompt.read_text(encoding="utf-8"))
             self.assertIn("Repair mode:", attempt2_prompt.read_text(encoding="utf-8"))
             self.assertEqual(result["artifacts"]["prompt"], "context-pack/runtime/phase0-prompt-attempt2.md")
+            self.assertEqual(
+                result["artifacts"]["repair_packet"],
+                "context-pack/runtime/phase0-repair-packet-attempt1.json",
+            )
+            self.assertTrue(RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).exists())
+            self.assertTrue(RUN_PHASES.phase_attempt_repair_packet_summary_path(task_path, 0, 1).exists())
+            repair_packet = json.loads(
+                RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).read_text(encoding="utf-8")
+            )
+            self.assertEqual(repair_packet["attempt"], 1)
+            self.assertEqual(repair_packet["failure"]["type"], "acceptance_commands")
+            repair_artifacts = {item["name"]: item for item in repair_packet["failed_attempt_artifacts"]}
+            self.assertTrue(repair_artifacts["prompt"]["exists"])
+            self.assertTrue(repair_artifacts["ac_results"]["exists"])
             by_name = {item["name"]: item for item in commit["artifacts"]}
             self.assertEqual(by_name["prompt"]["sha256"], RUN_PHASES.file_sha256(attempt2_prompt))
+
+    def test_execute_phase_retry_keeps_failed_gate_attempt_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (task_path / "phases").mkdir(parents=True)
+            (task_path / "context-pack" / "handoffs").mkdir(parents=True)
+            subprocess.run(["git", "init"], cwd=root, text=True, capture_output=True, check=False)
+            contract = {
+                "phase": 0,
+                "name": "demo",
+                "read_first": {"docs": [], "previous_outputs": []},
+                "scope": {
+                    "layer": "docs",
+                    "allowed_paths": ["tasks/demo/context-pack/handoffs/**", "tasks/demo/index.json"],
+                },
+                "interfaces": [],
+                "decision_refs": [],
+                "architecture_refs": [],
+                "dependency_policy": {"new_dependencies": "forbidden"},
+                "instructions": [
+                    {
+                        "id": "P0-001",
+                        "task": "Write the handoff.",
+                        "expected_evidence": ["context-pack/handoffs/phase0.md"],
+                    }
+                ],
+                "success_criteria": ["The handoff exists."],
+                "stop_rules": ["Stop if required context is missing."],
+                "fallback_behavior": {"if_blocked": "Write the blocker to the handoff."},
+                "validation_budget": {"max_attempts": 2, "command_timeout_seconds": 600},
+                "missing_evidence_behavior": "Treat missing evidence as unresolved.",
+                "acceptance_commands": ["true"],
+                "required_outputs": ["context-pack/handoffs/phase0.md"],
+            }
+            (task_path / "phases" / "phase0.md").write_text(
+                "# Phase 0: demo\n\n## Contract\n\n```json\n"
+                + json.dumps(contract, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "docs": [],
+                        "common_docs": [],
+                        "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    sys.stdin.read()
+                    from pathlib import Path
+                    Path.cwd().joinpath("tasks/demo/context-pack/handoffs/phase0.md").write_text(
+                        "# Handoff\\n\\n## Change Trace\\n\\n"
+                        "- `tasks/demo/context-pack/handoffs/phase0.md`: `P0-001`\\n"
+                        "- `tasks/demo/index.json`: `P0-001`\\n",
+                        encoding="utf-8",
+                    )
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=3,
+                ac_timeout=600,
+                codex_bin=str(fake),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+            )
+            quality_results = [
+                {
+                    "status": "failed",
+                    "checks": [{"name": "mock-quality", "status": "failed"}],
+                    "blocking_reasons": ["mock quality failed"],
+                },
+                {"status": "passed", "checks": [], "blocking_reasons": []},
+            ]
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "run_quality_checks", side_effect=quality_results),
+            ):
+                self.assertTrue(RUN_PHASES.execute_phase(root, task_path, args))
+
+            result = json.loads(RUN_PHASES.phase_result_path(task_path, 0).read_text(encoding="utf-8"))
+            commit = json.loads((task_path / result["artifacts"]["attempt_commit"]).read_text(encoding="utf-8"))
+            self.assertEqual(result["attempt"], 2)
+            self.assertEqual(result["artifacts"]["quality"], "context-pack/runtime/phase0-quality-attempt2.json")
+            self.assertEqual(result["artifacts"]["evidence"], "context-pack/runtime/phase0-evidence-attempt2.json")
+            self.assertEqual(result["artifacts"]["reconciliation"], "context-pack/runtime/phase0-reconciliation-attempt2.json")
+            self.assertEqual(
+                result["artifacts"]["reconciliation_summary"],
+                "context-pack/runtime/phase0-reconciliation-attempt2.md",
+            )
+            self.assertEqual(result["artifacts"]["gate"], "context-pack/runtime/phase0-gate-attempt2.json")
+            self.assertEqual(
+                result["artifacts"]["repair_packet"],
+                "context-pack/runtime/phase0-repair-packet-attempt1.json",
+            )
+            attempt1_gate = json.loads(
+                RUN_PHASES.phase_attempt_gate_path(task_path, 0, 1).read_text(encoding="utf-8")
+            )
+            attempt2_gate = json.loads(
+                RUN_PHASES.phase_attempt_gate_path(task_path, 0, 2).read_text(encoding="utf-8")
+            )
+            attempt1_repair = json.loads(
+                RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).read_text(encoding="utf-8")
+            )
+            self.assertEqual(attempt1_gate["status"], "failed")
+            self.assertEqual(attempt2_gate["status"], "passed")
+            self.assertEqual(attempt1_repair["failure"]["type"], "gate")
+            repair_artifacts = {item["name"]: item for item in attempt1_repair["failed_attempt_artifacts"]}
+            self.assertTrue(repair_artifacts["quality"]["exists"])
+            self.assertTrue(repair_artifacts["evidence"]["exists"])
+            self.assertTrue(repair_artifacts["gate"]["exists"])
+            self.assertTrue(RUN_PHASES.phase_attempt_evidence_path(task_path, 0, 1).exists())
+            self.assertTrue(RUN_PHASES.phase_attempt_reconciliation_path(task_path, 0, 1).exists())
+            self.assertTrue(RUN_PHASES.phase_attempt_reconciliation_summary_path(task_path, 0, 1).exists())
+            self.assertTrue(RUN_PHASES.phase_attempt_quality_path(task_path, 0, 1).exists())
+            by_name = {item["name"]: item for item in commit["artifacts"]}
+            self.assertEqual(
+                by_name["gate"]["sha256"],
+                RUN_PHASES.file_sha256(RUN_PHASES.phase_attempt_gate_path(task_path, 0, 2)),
+            )
 
     def test_execute_phase_stops_retry_when_scope_cleanup_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

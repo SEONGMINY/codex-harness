@@ -468,28 +468,56 @@ def phase_evidence_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-evidence.json"
 
 
+def phase_attempt_evidence_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-evidence-attempt{attempt}.json"
+
+
 def phase_reconciliation_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-reconciliation.json"
+
+
+def phase_attempt_reconciliation_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-reconciliation-attempt{attempt}.json"
 
 
 def phase_reconciliation_summary_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-reconciliation.md"
 
 
+def phase_attempt_reconciliation_summary_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-reconciliation-attempt{attempt}.md"
+
+
 def phase_gate_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-gate.json"
+
+
+def phase_attempt_gate_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-gate-attempt{attempt}.json"
 
 
 def phase_quality_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-quality.json"
 
 
+def phase_attempt_quality_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-quality-attempt{attempt}.json"
+
+
 def phase_repair_packet_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-repair-packet.json"
 
 
+def phase_attempt_repair_packet_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-repair-packet-attempt{attempt}.json"
+
+
 def phase_repair_packet_summary_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-repair-packet.md"
+
+
+def phase_attempt_repair_packet_summary_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-repair-packet-attempt{attempt}.md"
 
 
 def runner_lock_path(task_path: Path) -> Path:
@@ -1490,10 +1518,22 @@ def write_phase_result(
     after_snapshot: dict[str, str] | None = None,
     contract_path: Path | None = None,
     checklist_path: Path | None = None,
+    quality_path: Path | None = None,
+    evidence_path: Path | None = None,
+    reconciliation_path: Path | None = None,
+    reconciliation_summary_path: Path | None = None,
+    gate_path: Path | None = None,
 ) -> Path:
     contract = {}
     contract_artifact_path = contract_path or phase_contract_path(task_path, phase_number)
     checklist_artifact_path = checklist_path or phase_checklist_path(task_path, phase_number)
+    quality_artifact_path = quality_path or phase_quality_path(task_path, phase_number)
+    evidence_artifact_path = evidence_path or phase_evidence_path(task_path, phase_number)
+    reconciliation_artifact_path = reconciliation_path or phase_reconciliation_path(task_path, phase_number)
+    reconciliation_summary_artifact_path = (
+        reconciliation_summary_path or phase_reconciliation_summary_path(task_path, phase_number)
+    )
+    gate_artifact_path = gate_path or phase_gate_path(task_path, phase_number)
     try:
         contract = read_json(contract_artifact_path)
     except (OSError, json.JSONDecodeError):
@@ -1538,12 +1578,12 @@ def write_phase_result(
             "stdout": task_relative(output_path, task_path),
             "stderr": task_relative(stderr_path, task_path),
             "ac_results": task_relative(ac_results, task_path),
-            "quality": task_relative(phase_quality_path(task_path, phase_number), task_path),
+            "quality": task_relative(quality_artifact_path, task_path),
             "handoff": task_relative(phase_handoff_path(task_path, phase_number), task_path),
-            "evidence": task_relative(phase_evidence_path(task_path, phase_number), task_path),
-            "reconciliation": task_relative(phase_reconciliation_path(task_path, phase_number), task_path),
-            "reconciliation_summary": task_relative(phase_reconciliation_summary_path(task_path, phase_number), task_path),
-            "gate": task_relative(phase_gate_path(task_path, phase_number), task_path),
+            "evidence": task_relative(evidence_artifact_path, task_path),
+            "reconciliation": task_relative(reconciliation_artifact_path, task_path),
+            "reconciliation_summary": task_relative(reconciliation_summary_artifact_path, task_path),
+            "gate": task_relative(gate_artifact_path, task_path),
         },
     }
     approval_path = task_path / "context-pack" / "static" / "design-approval.json"
@@ -1598,8 +1638,19 @@ def write_phase_result(
         }
         write_json(ledger_path, ledger)
         result["artifacts"]["obligation_closure"] = task_relative(ledger_path, task_path)
-    repair_packet = phase_repair_packet_path(task_path, phase_number)
-    repair_packet_summary = phase_repair_packet_summary_path(task_path, phase_number)
+    previous_failed_attempt = attempt - 1
+    repair_packet = (
+        phase_attempt_repair_packet_path(task_path, phase_number, previous_failed_attempt)
+        if previous_failed_attempt > 0
+        and phase_attempt_repair_packet_path(task_path, phase_number, previous_failed_attempt).exists()
+        else phase_repair_packet_path(task_path, phase_number)
+    )
+    repair_packet_summary = (
+        phase_attempt_repair_packet_summary_path(task_path, phase_number, previous_failed_attempt)
+        if previous_failed_attempt > 0
+        and phase_attempt_repair_packet_summary_path(task_path, phase_number, previous_failed_attempt).exists()
+        else phase_repair_packet_summary_path(task_path, phase_number)
+    )
     if repair_packet.exists():
         result["artifacts"]["repair_packet"] = task_relative(repair_packet, task_path)
     if repair_packet_summary.exists():
@@ -2097,18 +2148,21 @@ def reconciliation_markdown(reconciliation: dict[str, object], gate: dict[str, o
 def write_runtime_review_artifacts(
     task_path: Path,
     phase_number: int,
+    attempt: int,
     contract: dict,
     evidence: dict[str, object],
     gate: dict[str, object],
 ) -> dict[str, object]:
     reconciliation = build_reconciliation(contract, evidence, gate)
+    summary = reconciliation_markdown(reconciliation, gate)
+    write_json(phase_attempt_evidence_path(task_path, phase_number, attempt), evidence)
+    write_json(phase_attempt_gate_path(task_path, phase_number, attempt), gate)
+    write_json(phase_attempt_reconciliation_path(task_path, phase_number, attempt), reconciliation)
+    atomic_write_text(phase_attempt_reconciliation_summary_path(task_path, phase_number, attempt), summary)
     write_json(phase_evidence_path(task_path, phase_number), evidence)
     write_json(phase_gate_path(task_path, phase_number), gate)
     write_json(phase_reconciliation_path(task_path, phase_number), reconciliation)
-    phase_reconciliation_summary_path(task_path, phase_number).write_text(
-        reconciliation_markdown(reconciliation, gate),
-        encoding="utf-8",
-    )
+    atomic_write_text(phase_reconciliation_summary_path(task_path, phase_number), summary)
     return reconciliation
 
 
@@ -2365,12 +2419,39 @@ def write_repair_packet(
     task_path: Path,
     phase_number: int,
     packet: dict[str, object],
+    attempt: int | None = None,
 ) -> None:
+    if attempt is not None:
+        artifact_paths = [
+            ("prompt", phase_attempt_prompt_path(task_path, phase_number, attempt)),
+            ("contract", phase_attempt_contract_path(task_path, phase_number, attempt)),
+            ("checklist", phase_attempt_checklist_path(task_path, phase_number, attempt)),
+            ("stdout", task_path / "context-pack" / "runtime" / f"phase{phase_number}-output-attempt{attempt}.jsonl"),
+            ("stderr", task_path / "context-pack" / "runtime" / f"phase{phase_number}-stderr-attempt{attempt}.txt"),
+            ("ac_results", ac_results_path(task_path, phase_number, attempt)),
+            ("quality", phase_attempt_quality_path(task_path, phase_number, attempt)),
+            ("evidence", phase_attempt_evidence_path(task_path, phase_number, attempt)),
+            ("gate", phase_attempt_gate_path(task_path, phase_number, attempt)),
+            ("reconciliation", phase_attempt_reconciliation_path(task_path, phase_number, attempt)),
+            ("reconciliation_summary", phase_attempt_reconciliation_summary_path(task_path, phase_number, attempt)),
+        ]
+        failed_attempt_artifacts = []
+        for name, path in artifact_paths:
+            entry: dict[str, object] = {
+                "name": name,
+                "path": task_relative(path, task_path),
+                "exists": path.exists(),
+            }
+            if path.exists() and path.is_file():
+                entry["sha256"] = file_sha256(path)
+            failed_attempt_artifacts.append(entry)
+        packet = {**packet, "failed_attempt_artifacts": failed_attempt_artifacts}
+    markdown = repair_packet_markdown(packet)
+    if attempt is not None:
+        write_json(phase_attempt_repair_packet_path(task_path, phase_number, attempt), packet)
+        atomic_write_text(phase_attempt_repair_packet_summary_path(task_path, phase_number, attempt), markdown)
     write_json(phase_repair_packet_path(task_path, phase_number), packet)
-    phase_repair_packet_summary_path(task_path, phase_number).write_text(
-        repair_packet_markdown(packet),
-        encoding="utf-8",
-    )
+    atomic_write_text(phase_repair_packet_summary_path(task_path, phase_number), markdown)
 
 
 def clear_attempt_artifacts(task_path: Path, phase_number: int) -> None:
@@ -2996,6 +3077,7 @@ def execute_phase(
                     contaminating_changes=contaminating_changes,
                     changed_files=changed_files,
                 ),
+                attempt=attempt,
             )
             if retryable:
                 continue
@@ -3080,6 +3162,7 @@ def execute_phase(
                         contaminating_changes=contaminating_changes,
                         changed_files=changed_files,
                     ),
+                    attempt=attempt,
                 )
                 if retryable:
                     break
@@ -3130,6 +3213,7 @@ def execute_phase(
                         contaminating_changes=contaminating_changes,
                         changed_files=changed_files,
                     ),
+                    attempt=attempt,
                 )
                 if retryable:
                     continue
@@ -3179,6 +3263,7 @@ def execute_phase(
                         contaminating_changes=contaminating_changes,
                         changed_files=changed_files,
                     ),
+                    attempt=attempt,
                 )
                 if retryable:
                     continue
@@ -3193,6 +3278,7 @@ def execute_phase(
             final_snapshot = worktree_snapshot(root)
             changed_files = phase_changed_paths(task_path, phase_start_snapshot, final_snapshot)
             quality_result = run_quality_checks(root, task_path, phase_number, changed_files)
+            write_json(phase_attempt_quality_path(task_path, phase_number, attempt), quality_result)
             evidence = build_evidence(
                 root,
                 phase_number,
@@ -3225,7 +3311,7 @@ def execute_phase(
                 handoff_trace_errors,
                 quality_result,
             )
-            reconciliation = write_runtime_review_artifacts(task_path, phase_number, contract, evidence, gate)
+            reconciliation = write_runtime_review_artifacts(task_path, phase_number, attempt, contract, evidence, gate)
             if gate.get("status") != "passed":
                 reasons = list(gate.get("blocking_reasons") or [])
                 message = "Phase gate failed: " + "; ".join(reasons)
@@ -3258,6 +3344,7 @@ def execute_phase(
                         gate=gate,
                         reconciliation=reconciliation,
                     ),
+                    attempt=attempt,
                 )
                 if retryable:
                     continue
@@ -3288,6 +3375,11 @@ def execute_phase(
                 after_snapshot=final_snapshot,
                 contract_path=contract_path,
                 checklist_path=checklist_path,
+                quality_path=phase_attempt_quality_path(task_path, phase_number, attempt),
+                evidence_path=phase_attempt_evidence_path(task_path, phase_number, attempt),
+                reconciliation_path=phase_attempt_reconciliation_path(task_path, phase_number, attempt),
+                reconciliation_summary_path=phase_attempt_reconciliation_summary_path(task_path, phase_number, attempt),
+                gate_path=phase_attempt_gate_path(task_path, phase_number, attempt),
             )
             write_phase_attempt_commit(task_path, phase_number, attempt, result_path)
             append_progress(task_path, f"phase {phase_number}: attempt {attempt} completed")

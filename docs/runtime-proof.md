@@ -21,6 +21,11 @@ phase<N>-checklist-attempt<M>.md
 phase<N>-output-attempt<M>.jsonl
 phase<N>-stderr-attempt<M>.txt
 phase<N>-ac-attempt<M>.json
+phase<N>-evidence-attempt<M>.json
+phase<N>-reconciliation-attempt<M>.json
+phase<N>-reconciliation-attempt<M>.md
+phase<N>-gate-attempt<M>.json
+phase<N>-quality-attempt<M>.json
 phase<N>-evidence.json
 phase<N>-reconciliation.json
 phase<N>-reconciliation.md
@@ -38,19 +43,29 @@ phase<N>-attempt<M>-commit.json
 phase<N>-prompt.md
 phase<N>-contract.json
 phase<N>-checklist.md
+phase<N>-evidence.json
+phase<N>-reconciliation.json
+phase<N>-reconciliation.md
+phase<N>-gate.json
+phase<N>-quality.json
 ```
 
 무결성 기준은 attempt-scoped 파일입니다. `phase<N>-attempt<M>-commit.json`은
-해당 attempt의 prompt, contract, checklist와 실행 산출물 hash를 고정합니다.
+해당 attempt의 prompt, contract, checklist, evidence, gate, quality, reconciliation과 실행 산출물 hash를 고정합니다.
 phase-scoped alias는 최신 attempt를 보기 위한 편의 파일이며 commit proof의 기준으로 쓰지 않습니다.
 
 실패하거나 다시 시도하면 다음 파일도 생깁니다.
 
 ```text
 phase<N>-last-error.md
+phase<N>-repair-packet-attempt<M>.json
+phase<N>-repair-packet-attempt<M>.md
 phase<N>-repair-packet.json
 phase<N>-repair-packet.md
 ```
+
+repair packet의 attempt-scoped 파일은 실패 attempt의 canonical snapshot입니다.
+phase-scoped repair packet은 최신 실패를 다음 prompt에 넣기 위한 alias입니다.
 
 긴 실행 중에는 진행 기록도 남깁니다.
 
@@ -102,7 +117,8 @@ runner는 이 결과를 gate 판정에 씁니다.
 
 ## evidence
 
-`phase<N>-evidence.json`은 관찰된 실행 증거입니다.
+`phase<N>-evidence-attempt<M>.json`은 관찰된 실행 증거입니다.
+`phase<N>-evidence.json`은 최신 attempt evidence의 alias입니다.
 
 주요 내용:
 
@@ -113,7 +129,8 @@ runner는 이 결과를 gate 판정에 씁니다.
 
 ## gate
 
-`phase<N>-gate.json`은 통과/실패 판정입니다.
+`phase<N>-gate-attempt<M>.json`은 통과/실패 판정입니다.
+`phase<N>-gate.json`은 최신 attempt gate의 alias입니다.
 
 기본 gate:
 
@@ -129,7 +146,8 @@ runner는 이 결과를 gate 판정에 씁니다.
 
 ## quality
 
-`phase<N>-quality.json`은 phase 종료 직전 실행한 quality check 결과입니다.
+`phase<N>-quality-attempt<M>.json`은 phase 종료 직전 실행한 quality check 결과입니다.
+`phase<N>-quality.json`은 최신 attempt quality 결과의 alias입니다.
 실행 가능한 기존 프로젝트 lint나 formatter가 있으면 먼저 사용하며, 기본 level은 warning입니다.
 실행 가능한 프로젝트 lint가 없으면 하네스 baseline 검사를 phase changed files 기준으로 block합니다.
 `CODEX_HARNESS_PROJECT_LINT_LEVEL=block`을 설정하면 프로젝트 lint 실패도 gate 실패가 됩니다.
@@ -139,7 +157,9 @@ child process env는 문서화된 하네스 컨텍스트 키만 전달합니다.
 
 ## reconciliation
 
-`phase<N>-reconciliation.json`은 contract 지시사항과 실행 증거를 대조한 결과입니다.
+`phase<N>-reconciliation-attempt<M>.json`은 contract 지시사항과 실행 증거를 대조한 결과입니다.
+`phase<N>-reconciliation-attempt<M>.md`는 같은 내용을 사람이 읽기 쉽게 요약한 파일입니다.
+`phase<N>-reconciliation.json`과 `phase<N>-reconciliation.md`는 최신 attempt reconciliation의 alias입니다.
 
 상태:
 
@@ -249,11 +269,15 @@ runner 시작 시에는 runtime proof와 `index.json` projection을 조정합니
 gate나 명령이 실패하면 runner는 repair packet을 씁니다.
 
 ```text
+phase<N>-repair-packet-attempt<M>.json
+phase<N>-repair-packet-attempt<M>.md
 phase<N>-repair-packet.json
 phase<N>-repair-packet.md
 ```
 
 다음 시도는 이 packet을 읽고 실패한 항목만 고칩니다.
+phase-scoped repair packet은 최신 실패를 가리키는 alias입니다.
+attempt-scoped repair packet은 retry가 진행되어도 실패 당시 context를 보존하는 canonical snapshot입니다.
 
 repair packet에는 다음이 들어갑니다.
 
@@ -264,6 +288,7 @@ repair packet에는 다음이 들어갑니다.
 - 빠진 산출물
 - 빠진 구현 산출물
 - 자동 재시도를 막는 허용 범위 밖 변경(`contaminating_changes`)
+- 실패 attempt artifact 경로, 존재 여부, sha256(`failed_attempt_artifacts`)
 - 범위 위반
 - 다시 확인할 지시사항
 - contract 요약
