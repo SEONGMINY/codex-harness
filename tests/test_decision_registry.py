@@ -304,6 +304,230 @@ class DecisionRegistryTest(unittest.TestCase):
 
         self.assertTrue(any("must be an object" in error for error in errors), errors)
 
+    def test_architecture_rejects_forbidden_edge_policy_by_role(self) -> None:
+        registry = self.registry()
+        registry["architecture"] = {
+            "nodes": [
+                {
+                    "id": "N-001",
+                    "name": "FeatureRepository",
+                    "role": "data_adapter",
+                    "responsibility": "Implement read adapters.",
+                },
+                {
+                    "id": "N-002",
+                    "name": "BackendRuntime",
+                    "role": "concrete_runtime",
+                    "responsibility": "Own concrete SDK calls.",
+                },
+            ],
+            "allowed_edges": [
+                {
+                    "id": "A-001",
+                    "from": "FeatureRepository",
+                    "to": "BackendRuntime",
+                    "reason": "Read backend state.",
+                }
+            ],
+            "forbidden_edges": [
+                {
+                    "from": "data_adapter",
+                    "to": "concrete_runtime",
+                    "reason": "Adapters must depend on protocol boundaries.",
+                }
+            ],
+            "decisions": [{"id": "AR-001", "summary": "Use backend state."}],
+            "forbid_cycles": True,
+        }
+
+        errors = DECISIONS.validate_decision_files(registry)
+
+        self.assertTrue(any("violates forbidden edge policy" in error for error in errors), errors)
+
+    def test_architecture_accepts_edge_through_protocol_boundary(self) -> None:
+        registry = self.registry()
+        registry["architecture"] = {
+            "nodes": [
+                {
+                    "id": "N-001",
+                    "name": "FeatureRepository",
+                    "role": "data_adapter",
+                    "responsibility": "Implement read adapters.",
+                },
+                {
+                    "id": "N-002",
+                    "name": "BackendBoundary",
+                    "kind": "protocol_boundary",
+                    "responsibility": "Define SDK-agnostic read protocols.",
+                },
+                {
+                    "id": "N-003",
+                    "name": "BackendRuntime",
+                    "role": "concrete_runtime",
+                    "responsibility": "Own concrete SDK calls.",
+                },
+            ],
+            "allowed_edges": [
+                {
+                    "id": "A-001",
+                    "from": "FeatureRepository",
+                    "to": "BackendBoundary",
+                    "reason": "Depend on SDK-agnostic reads.",
+                },
+                {
+                    "id": "A-002",
+                    "from": "BackendRuntime",
+                    "to": "BackendBoundary",
+                    "reason": "Implement the boundary.",
+                },
+            ],
+            "forbidden_edges": [
+                {
+                    "from": "data_adapter",
+                    "to": "concrete_runtime",
+                    "reason": "Adapters must depend on protocol boundaries.",
+                }
+            ],
+            "decisions": [{"id": "AR-001", "summary": "Use backend state."}],
+            "forbid_cycles": True,
+        }
+
+        errors = DECISIONS.validate_decision_files(registry)
+
+        self.assertEqual(errors, [])
+
+    def test_architecture_rejects_forbidden_edge_policy_by_layer(self) -> None:
+        registry = self.registry()
+        registry["architecture"] = {
+            "nodes": [
+                {
+                    "id": "N-001",
+                    "name": "HomeView",
+                    "layer": "ui",
+                    "responsibility": "Render home state.",
+                },
+                {
+                    "id": "N-002",
+                    "name": "SupabaseRuntime",
+                    "layer": "concrete_runtime",
+                    "responsibility": "Own SDK calls.",
+                },
+            ],
+            "allowed_edges": [
+                {"id": "A-001", "from": "HomeView", "to": "SupabaseRuntime", "reason": "Load data."}
+            ],
+            "forbidden_edges": [
+                {
+                    "from": "ui",
+                    "to": "concrete_runtime",
+                    "reason": "UI must use an application boundary.",
+                }
+            ],
+            "decisions": [{"id": "AR-001", "summary": "Render live data."}],
+            "forbid_cycles": True,
+        }
+
+        errors = DECISIONS.validate_decision_files(registry)
+
+        self.assertTrue(any("violates forbidden edge policy" in error for error in errors), errors)
+
+    def test_architecture_forbidden_edge_policy_can_target_node_names(self) -> None:
+        registry = self.registry()
+        registry["architecture"] = {
+            "nodes": [
+                {
+                    "id": "N-001",
+                    "name": "LegacyPresenter",
+                    "responsibility": "Render legacy state.",
+                },
+                {
+                    "id": "N-002",
+                    "name": "BackendRuntime",
+                    "responsibility": "Own concrete SDK calls.",
+                },
+            ],
+            "allowed_edges": [
+                {
+                    "id": "A-001",
+                    "from": "LegacyPresenter",
+                    "to": "BackendRuntime",
+                    "reason": "Read backend state.",
+                }
+            ],
+            "forbidden_edges": [
+                {
+                    "from": "LegacyPresenter",
+                    "to": "BackendRuntime",
+                    "reason": "Legacy presenter may not call runtime directly.",
+                }
+            ],
+            "decisions": [{"id": "AR-001", "summary": "Use backend state."}],
+            "forbid_cycles": True,
+        }
+
+        errors = DECISIONS.validate_decision_files(registry)
+
+        self.assertTrue(any("violates forbidden edge policy" in error for error in errors), errors)
+
+    def test_architecture_forbidden_edge_policy_can_target_tags(self) -> None:
+        registry = self.registry()
+        registry["architecture"] = {
+            "nodes": [
+                {
+                    "id": "N-001",
+                    "name": "ReadModel",
+                    "tags": ["data_adapter"],
+                    "responsibility": "Read backend state.",
+                },
+                {
+                    "id": "N-002",
+                    "name": "BackendRuntime",
+                    "tags": ["concrete_runtime"],
+                    "responsibility": "Own concrete SDK calls.",
+                },
+            ],
+            "allowed_edges": [
+                {
+                    "id": "A-001",
+                    "from": "ReadModel",
+                    "to": "BackendRuntime",
+                    "reason": "Read backend state.",
+                }
+            ],
+            "forbidden_edges": [
+                {
+                    "from": "data_adapter",
+                    "to": "concrete_runtime",
+                    "reason": "Adapters must use boundaries.",
+                }
+            ],
+            "decisions": [{"id": "AR-001", "summary": "Use backend state."}],
+            "forbid_cycles": True,
+        }
+
+        errors = DECISIONS.validate_decision_files(registry)
+
+        self.assertTrue(any("violates forbidden edge policy" in error for error in errors), errors)
+
+    def test_architecture_rejects_cycles_when_forbid_cycles_is_true(self) -> None:
+        registry = self.registry()
+        registry["architecture"] = {
+            "nodes": [
+                {"id": "N-001", "name": "A", "responsibility": "A."},
+                {"id": "N-002", "name": "B", "responsibility": "B."},
+            ],
+            "allowed_edges": [
+                {"id": "A-001", "from": "A", "to": "B", "reason": "A uses B."},
+                {"id": "A-002", "from": "B", "to": "A", "reason": "B uses A."},
+            ],
+            "decisions": [{"id": "AR-001", "summary": "Use two nodes."}],
+            "forbid_cycles": True,
+        }
+
+        errors = DECISIONS.validate_decision_files(registry)
+
+        self.assertTrue(any("acyclic" in error for error in errors), errors)
+
     def test_load_decision_registry_reads_expected_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             task_path = Path(raw_tmp) / "tasks" / "demo"

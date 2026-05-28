@@ -339,6 +339,7 @@ STATIC_JSON_TEMPLATES = {
     "architecture.json": {
         "nodes": [],
         "allowed_edges": [],
+        "forbidden_edges": [],
         "decisions": [],
         "forbid_cycles": True,
     },

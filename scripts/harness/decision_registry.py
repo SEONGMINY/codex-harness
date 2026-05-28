@@ -105,7 +105,7 @@ def _items(value: Any, field: str = "items") -> list[dict[str, Any]]:
     if not isinstance(value, dict):
         return []
     raw_items = value.get(field)
-    if raw_items is None:
+    if raw_items is None and field == "items":
         raw_items = value.get("decisions")
     if not isinstance(raw_items, list):
         return []
@@ -152,6 +152,120 @@ def _string_set(value: Any) -> set[str]:
     if not isinstance(value, list):
         return set()
     return {item for item in value if isinstance(item, str)}
+
+
+def _architecture_node_key(item: dict[str, Any]) -> str:
+    return str(item.get("id") or item.get("name") or "").strip()
+
+
+def _architecture_node_aliases(item: dict[str, Any]) -> set[str]:
+    aliases: set[str] = set()
+    for field in ["id", "name"]:
+        value = item.get(field)
+        if isinstance(value, str) and value.strip():
+            aliases.add(value.strip().lower())
+    return aliases
+
+
+def _architecture_node_roles(item: dict[str, Any]) -> set[str]:
+    roles: set[str] = set()
+    for field in ["role", "kind", "layer", "type"]:
+        value = item.get(field)
+        if isinstance(value, str) and value.strip():
+            roles.add(value.strip().lower())
+    for field in ["roles", "tags"]:
+        value = item.get(field)
+        if isinstance(value, list):
+            roles.update(str(entry).strip().lower() for entry in value if isinstance(entry, str) and entry.strip())
+    return roles
+
+
+def _architecture_selector_matches(item: dict[str, Any], selector: str) -> bool:
+    normalized = selector.strip().lower()
+    if not normalized:
+        return False
+    if normalized == "*":
+        return True
+    return normalized in _architecture_node_aliases(item) or normalized in _architecture_node_roles(item)
+
+
+def _validate_architecture_semantics(architecture: Any) -> list[str]:
+    if not isinstance(architecture, dict):
+        return []
+    nodes = _items(architecture, "nodes")
+    edges = _items(architecture, "allowed_edges")
+    errors: list[str] = []
+
+    node_by_key: dict[str, dict[str, Any]] = {}
+    seen_node_ids: set[str] = set()
+    for node in nodes:
+        node_id = node.get("id")
+        if isinstance(node_id, str) and node_id.strip():
+            if node_id in seen_node_ids:
+                errors.append(f"architecture.json duplicate node id: {node_id}")
+            seen_node_ids.add(node_id)
+        for alias in _architecture_node_aliases(node):
+            if alias in node_by_key and node_by_key[alias] is not node:
+                errors.append(f"architecture.json duplicate node reference: {alias}")
+            node_by_key[alias] = node
+
+    seen_edge_ids: set[str] = set()
+    graph: dict[str, list[str]] = {}
+    for edge in edges:
+        edge_id = edge.get("id")
+        if isinstance(edge_id, str) and edge_id.strip():
+            if edge_id in seen_edge_ids:
+                errors.append(f"architecture.json duplicate allowed edge id: {edge_id}")
+            seen_edge_ids.add(edge_id)
+        from_key = str(edge.get("from") or "").strip().lower()
+        to_key = str(edge.get("to") or "").strip().lower()
+        from_node = node_by_key.get(from_key)
+        to_node = node_by_key.get(to_key)
+        edge_label = str(edge.get("id") or f"{edge.get('from')} -> {edge.get('to')}")
+        if from_key and from_node is None:
+            errors.append(f"architecture.json allowed edge {edge_label} has unknown `from`: {edge.get('from')}")
+        if to_key and to_node is None:
+            errors.append(f"architecture.json allowed edge {edge_label} has unknown `to`: {edge.get('to')}")
+        if from_node is None or to_node is None:
+            continue
+        graph.setdefault(_architecture_node_key(from_node), []).append(_architecture_node_key(to_node))
+        for rule in _items(architecture, "forbidden_edges"):
+            from_selector = rule.get("from")
+            to_selector = rule.get("to")
+            if not isinstance(from_selector, str) or not isinstance(to_selector, str):
+                continue
+            if _architecture_selector_matches(from_node, from_selector) and _architecture_selector_matches(to_node, to_selector):
+                reason = rule.get("reason")
+                reason_text = f" reason={reason!r}" if isinstance(reason, str) and reason.strip() else ""
+                errors.append(
+                    "architecture.json allowed edge "
+                    f"{edge_label} violates forbidden edge policy: "
+                    f"{from_selector} -> {to_selector}.{reason_text}"
+                )
+
+    if architecture.get("forbid_cycles") is True:
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(node: str, stack: list[str]) -> None:
+            if node in visited:
+                return
+            if node in visiting:
+                cycle_start = stack.index(node) if node in stack else 0
+                errors.append(
+                    "architecture.json must be acyclic when `forbid_cycles` is true: "
+                    + " -> ".join([*stack[cycle_start:], node])
+                )
+                return
+            visiting.add(node)
+            for target in graph.get(node, []):
+                visit(target, [*stack, target])
+            visiting.remove(node)
+            visited.add(node)
+
+        for node in sorted(graph):
+            visit(node, [node])
+    return errors
 
 
 def approved_decision_ids(registry: dict[str, Any]) -> set[str]:
@@ -231,6 +345,7 @@ def validate_decision_files(registry: dict[str, Any]) -> list[str]:
         errors.append("architecture.json must contain an `allowed_edges` list.")
     errors.extend(_object_list_errors(architecture, "nodes", "architecture.json nodes"))
     errors.extend(_object_list_errors(architecture, "allowed_edges", "architecture.json allowed_edges"))
+    errors.extend(_object_list_errors(architecture, "forbidden_edges", "architecture.json forbidden_edges"))
     errors.extend(_object_list_errors(architecture, "decisions", "architecture.json decisions"))
     for item in _items(architecture, "nodes"):
         for field in ["id", "name", "responsibility"]:
@@ -241,10 +356,14 @@ def validate_decision_files(registry: dict[str, Any]) -> list[str]:
     for item in _items(architecture, "decisions"):
         for field in ["id", "summary"]:
             errors.extend(_validate_required_string(item, "architecture.json decisions", field))
+    for item in _items(architecture, "forbidden_edges"):
+        for field in ["from", "to", "reason"]:
+            errors.extend(_validate_required_string(item, "architecture.json forbidden_edges", field))
     if not architecture_ref_ids(registry):
         errors.append("architecture.json must contain at least one ref id in `decisions` or `allowed_edges`.")
     if isinstance(architecture, dict) and not isinstance(architecture.get("forbid_cycles"), bool):
         errors.append("architecture.json must contain boolean `forbid_cycles`.")
+    errors.extend(_validate_architecture_semantics(architecture))
 
     policy = registry.get("dependency_policy")
     mode = policy.get("new_dependencies") if isinstance(policy, dict) else None

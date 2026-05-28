@@ -247,6 +247,7 @@ Contract rules:
 - `interfaces` must describe function/class signatures for non-documentation phases.
 - `decision_refs` must list approved decisions from `decisions.json`.
 - `architecture_refs` must list approved architecture refs from `architecture.json`.
+- `architecture.json` may include `forbidden_edges`; each rule must use explicit node names, ids, roles, kinds, layers, or tags instead of product-specific harness code.
 - `dependency_policy.new_dependencies` must be `forbidden`, `approved_only`, or `allowed`.
 - A phase contract dependency policy must not be more permissive than `dependency-policy.json`.
 - If `new_dependencies` is `approved_only`, list both the approved packages and the approved dependency manifest paths.
