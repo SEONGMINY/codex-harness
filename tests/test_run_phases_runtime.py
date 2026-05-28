@@ -2002,6 +2002,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertIn("npm test", calls[3])
             self.assertIn("--full-auto", calls[3])
             self.assertIn("--yolo", calls[3])
+            self.assertIn("--task-lock-held", calls[3])
 
     def test_current_policy_lineage_errors_rejects_unapproved_current_policy(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

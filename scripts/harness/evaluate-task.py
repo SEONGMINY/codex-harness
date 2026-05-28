@@ -14,6 +14,7 @@ from typing import Iterable
 from artifact_io import atomic_write_json, atomic_write_text
 from codex_exec import add_output_schema, run_codex_exec
 from command_policy import run_command
+from file_lock import LockHandle, acquire_task_runtime_lock, release_lock
 from harness_attestation import harness_attestation
 from policy_pack import policy_pack_metadata
 from policy_lineage import policy_pack_fingerprint, validate_current_policy_lineage
@@ -268,58 +269,70 @@ def main() -> int:
         action="store_true",
         help="Pass --dangerously-bypass-approvals-and-sandbox to codex exec.",
     )
+    parser.add_argument("--task-lock-held", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
     task_path = resolve_task_path(root, args.task)
     runtime_dir = task_path / "context-pack" / "runtime"
+    lock_handle: LockHandle | None = None
 
-    task_index = read_json(task_path / "index.json")
-    commands = list(args.command or task_index.get("evaluation_commands") or [])
-    command_results = [run_shell(command, root, args.timeout) for command in commands]
+    try:
+        if not args.task_lock_held:
+            try:
+                lock_handle = acquire_task_runtime_lock(task_path, "evaluate-task")
+            except RuntimeError as exc:
+                print(f"Another codex-harness task operation is active: {exc}", file=sys.stderr)
+                return 1
 
-    results_path = runtime_dir / "evaluation-command-results.json"
-    metadata = {
-        "schema_version": 1,
-        "policy_pack": runtime_policy_pack(),
-        "harness_attestation": harness_attestation(),
-        "design_approval_scope_sha256": design_approval_scope_sha(task_path),
-        "commands": command_results,
-    }
-    atomic_write_json(results_path, metadata)
+        task_index = read_json(task_path / "index.json")
+        commands = list(args.command or task_index.get("evaluation_commands") or [])
+        command_results = [run_shell(command, root, args.timeout) for command in commands]
 
-    prompt = build_prompt(root, task_path, command_results)
-    prompt_path = runtime_dir / "evaluation-prompt.md"
-    atomic_write_text(prompt_path, prompt)
+        results_path = runtime_dir / "evaluation-command-results.json"
+        metadata = {
+            "schema_version": 1,
+            "policy_pack": runtime_policy_pack(),
+            "harness_attestation": harness_attestation(),
+            "design_approval_scope_sha256": design_approval_scope_sha(task_path),
+            "commands": command_results,
+        }
+        atomic_write_json(results_path, metadata)
 
-    failed_commands = [item for item in command_results if item["returncode"] != 0]
-    if args.dry_run:
-        print(prompt_path)
-        return 1 if failed_commands else 0
+        prompt = build_prompt(root, task_path, command_results)
+        prompt_path = runtime_dir / "evaluation-prompt.md"
+        atomic_write_text(prompt_path, prompt)
 
-    output_path = runtime_dir / "evaluation-output.jsonl"
-    stderr_path = runtime_dir / "evaluation-stderr.txt"
-    last_message_path = runtime_dir / "evaluation-last-message.json"
-    returncode = run_codex(
-        root,
-        prompt,
-        output_path,
-        stderr_path,
-        last_message_path,
-        args.codex_bin,
-        args.full_auto,
-        args.yolo,
-        args.codex_idle_timeout,
-        [runtime_dir],
-    )
-    if returncode != 0:
-        print(f"codex exec failed. See {stderr_path}.", file=sys.stderr)
-        return returncode
-    if failed_commands:
-        print(f"validation command failed. See {results_path}.", file=sys.stderr)
-        return 1
-    print(output_path)
-    return 0
+        failed_commands = [item for item in command_results if item["returncode"] != 0]
+        if args.dry_run:
+            print(prompt_path)
+            return 1 if failed_commands else 0
+
+        output_path = runtime_dir / "evaluation-output.jsonl"
+        stderr_path = runtime_dir / "evaluation-stderr.txt"
+        last_message_path = runtime_dir / "evaluation-last-message.json"
+        returncode = run_codex(
+            root,
+            prompt,
+            output_path,
+            stderr_path,
+            last_message_path,
+            args.codex_bin,
+            args.full_auto,
+            args.yolo,
+            args.codex_idle_timeout,
+            [runtime_dir],
+        )
+        if returncode != 0:
+            print(f"codex exec failed. See {stderr_path}.", file=sys.stderr)
+            return returncode
+        if failed_commands:
+            print(f"validation command failed. See {results_path}.", file=sys.stderr)
+            return 1
+        print(output_path)
+        return 0
+    finally:
+        release_lock(lock_handle)
 
 
 if __name__ == "__main__":

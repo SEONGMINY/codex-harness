@@ -136,6 +136,33 @@ class EvaluateTaskTest(unittest.TestCase):
             self.assertNotIn("policy_pack", prompt)
             self.assertIn('"command": "true"', prompt)
 
+    def test_standalone_evaluation_refuses_active_task_runtime_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            (task_path / "context-pack" / "runtime").mkdir(parents=True)
+            lock_handle = EVALUATE_TASK.acquire_task_runtime_lock(task_path, "run-phases")
+            try:
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(HARNESS_DIR / "evaluate-task.py"),
+                        "demo",
+                        "--root",
+                        str(root),
+                        "--dry-run",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+            finally:
+                EVALUATE_TASK.release_lock(lock_handle)
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Another codex-harness task operation is active", result.stderr)
+            self.assertFalse((task_path / "context-pack" / "runtime" / "evaluation-prompt.md").exists())
+
     def test_current_policy_lineage_errors_rejects_unapproved_evaluation_policy(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             task_path = Path(raw_tmp) / "tasks" / "demo"

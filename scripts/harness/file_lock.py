@@ -117,6 +117,24 @@ def acquire_lock(
         return LockHandle(path=path, identity=file_identity(path))
 
 
+def task_runtime_lock_path(task_path: Path) -> Path:
+    return task_path / "context-pack" / "runtime" / "run-phases.lock"
+
+
+def acquire_task_runtime_lock(
+    task_path: Path,
+    owner: str,
+    *,
+    wait_timeout_seconds: float = 0,
+) -> LockHandle:
+    return acquire_lock(
+        task_runtime_lock_path(task_path),
+        metadata={"owner": owner, "task_dir": task_path.name},
+        wait_timeout_seconds=wait_timeout_seconds,
+        boundary=task_path,
+    )
+
+
 def release_lock(handle: LockHandle | None) -> None:
     if handle is None:
         return

@@ -51,7 +51,14 @@ from phase_contract import (
 from phase_semantics import analyze_phase
 from command_policy import run_command
 from env_policy import sanitized_env
-from file_lock import LockHandle, acquire_lock, release_lock, remove_stale_lock
+from file_lock import (
+    LockHandle,
+    acquire_lock,
+    acquire_task_runtime_lock,
+    release_lock,
+    remove_stale_lock,
+    task_runtime_lock_path,
+)
 from harness_attestation import attestation_fingerprint, harness_attestation
 from obligation_ledger import build_phase_obligation_assertion_outcomes, design_obligations_by_id
 from policy_pack import policy_pack_metadata
@@ -500,7 +507,7 @@ def phase_attempt_repair_packet_summary_path(task_path: Path, phase_number: int,
 
 
 def runner_lock_path(task_path: Path) -> Path:
-    return task_path / "context-pack" / "runtime" / "run-phases.lock"
+    return task_runtime_lock_path(task_path)
 
 
 def phase_handoff_path(task_path: Path, phase_number: int) -> Path:
@@ -1259,7 +1266,7 @@ def acquire_runner_lock(task_path: Path, dry_run: bool) -> LockHandle | None:
     if dry_run:
         return None
     try:
-        return acquire_lock(runner_lock_path(task_path))
+        return acquire_task_runtime_lock(task_path, "run-phases")
     except RuntimeError as exc:
         raise RuntimeError(f"Another run-phases process is active: {runner_lock_path(task_path)}") from exc
 
@@ -2708,6 +2715,7 @@ def run_evaluation(root: Path, task_path: Path, args: argparse.Namespace) -> int
         command.append("--full-auto")
     if args.yolo:
         command.append("--yolo")
+    command.append("--task-lock-held")
     return subprocess.run(command, cwd=root, check=False).returncode
 
 

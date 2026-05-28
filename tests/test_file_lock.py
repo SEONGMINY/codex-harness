@@ -88,6 +88,22 @@ class FileLockTest(unittest.TestCase):
 
             self.assertFalse((outside / "tasks-index.lock").exists())
 
+    def test_task_runtime_lock_uses_canonical_runtime_lock_path(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            task_path = Path(raw_tmp) / "repo" / "tasks" / "demo"
+
+            handle = FILE_LOCK.acquire_task_runtime_lock(task_path, "evaluate-task")
+
+            lock_path = task_path / "context-pack" / "runtime" / "run-phases.lock"
+            payload = json.loads(lock_path.read_text(encoding="utf-8"))
+            self.assertEqual(handle.path, lock_path)
+            self.assertEqual(payload["owner"], "evaluate-task")
+            self.assertEqual(payload["task_dir"], "demo")
+
+            FILE_LOCK.release_lock(handle)
+
+            self.assertFalse(lock_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
