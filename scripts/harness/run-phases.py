@@ -559,11 +559,12 @@ def phase_baseline_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-baseline.json"
 
 
-def phase_reset_state(task_path: Path, phase_number: int) -> tuple[int, str]:
+def phase_reset_boundary(task_path: Path, phase_number: int) -> tuple[int, str, bool]:
     runtime_dir = task_path / "context-pack" / "runtime"
     best_generation = 0
     best_reset_at = ""
     best_is_own_marker = False
+    best_has_generation = False
     for path in runtime_dir.glob("phase*-reset-marker.json"):
         try:
             marker = read_json(path)
@@ -586,12 +587,19 @@ def phase_reset_state(task_path: Path, phase_number: int) -> tuple[int, str]:
         if reset_at == best_reset_at and best_is_own_marker and not is_own_marker:
             continue
         generation = marker.get("reset_generation")
+        marker_has_generation = isinstance(generation, int) and generation >= 0
         best_generation = (
-            generation if is_own_marker and isinstance(generation, int) and generation >= 0 else 0
+            generation if is_own_marker and marker_has_generation else 0
         )
+        best_has_generation = marker_has_generation
         best_is_own_marker = is_own_marker
         best_reset_at = reset_at
-    return best_generation, best_reset_at
+    return best_generation, best_reset_at, best_has_generation
+
+
+def phase_reset_state(task_path: Path, phase_number: int) -> tuple[int, str]:
+    reset_generation, reset_at, _has_generation = phase_reset_boundary(task_path, phase_number)
+    return reset_generation, reset_at
 
 
 def phase_own_reset_generation(task_path: Path, phase_number: int) -> int:
@@ -601,6 +609,14 @@ def phase_own_reset_generation(task_path: Path, phase_number: int) -> int:
         return 0
     generation = marker.get("reset_generation")
     return generation if isinstance(generation, int) and generation >= 0 else 0
+
+
+def phase_has_own_reset_marker_at(task_path: Path, phase_number: int, reset_at: str) -> bool:
+    try:
+        marker = read_json(phase_reset_marker_path(task_path, phase_number))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return marker.get("phase") == phase_number and str(marker.get("reset_at") or "") == reset_at
 
 
 def phase_obligation_closure_path(task_path: Path, phase_number: int, attempt: int) -> Path:
@@ -804,7 +820,7 @@ The runner also requires:
 {contract_data.get("missing_evidence_behavior")}
 
 The runner will decide success by process exit code, required outputs, and AC commands.
-The runner will generate `tasks/{task_path.name}/context-pack/runtime/phase{phase_number}-result.json`.
+The runner will snapshot the handoff and generate canonical attempt-scoped runtime proof plus latest aliases.
 {repair_mode}"""
 
     parts = [
@@ -1851,7 +1867,7 @@ def phase_attempt_commit_sort_key(path: Path) -> tuple[int, str]:
 
 
 def latest_valid_phase_attempt_commit(task_path: Path, phase_number: int) -> dict[str, object] | None:
-    reset_generation, reset_at = phase_reset_state(task_path, phase_number)
+    reset_generation, reset_at, reset_has_generation = phase_reset_boundary(task_path, phase_number)
     commits = sorted(
         (task_path / "context-pack" / "runtime").glob(f"phase{phase_number}-attempt*-commit.json"),
         key=phase_attempt_commit_sort_key,
@@ -1867,6 +1883,8 @@ def latest_valid_phase_attempt_commit(task_path: Path, phase_number: int) -> dic
             if not isinstance(commit_generation, int) or commit_generation != reset_generation:
                 continue
         elif reset_at:
+            if reset_has_generation:
+                continue
             if isinstance(commit_generation, int):
                 continue
             if str(data.get("committed_at") or "") <= reset_at:
@@ -1923,6 +1941,8 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
                 }
             )
             if not dry_run:
+                if not phase_has_own_reset_marker_at(task_path, phase_number, reset_at):
+                    write_phase_reset_marker(task_path, phase_number, reset_at, phase_number)
                 apply_reset_projection_to_phase(phase, reset_at)
             continue
         attempts = int(phase.get("attempts", 0) or 0)

@@ -159,8 +159,16 @@ def build_phase_obligation_assertion_outcomes(
     return outcomes
 
 
-def load_phase_result(task_path: Path, phase_number: int) -> dict[str, Any] | None:
-    path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-result.json"
+def load_phase_result(task_path: Path, phase_number: int, expected_attempt: int | None = None) -> dict[str, Any] | None:
+    runtime_dir = task_path / "context-pack" / "runtime"
+    canonical_path = (
+        runtime_dir / f"phase{phase_number}-result-attempt{expected_attempt}.json"
+        if isinstance(expected_attempt, int) and expected_attempt > 0
+        else None
+    )
+    if canonical_path is not None and not canonical_path.exists():
+        return None
+    path = canonical_path if canonical_path is not None else runtime_dir / f"phase{phase_number}-result.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

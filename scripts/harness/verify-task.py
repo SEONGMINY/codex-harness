@@ -846,6 +846,7 @@ def validate_artifacts(
     value: object,
     phase_number: int,
     attempt: int | None,
+    strict_attempt_artifacts: bool = False,
 ) -> list[str]:
     if not isinstance(value, dict):
         return ["`artifacts` must be an object."]
@@ -866,7 +867,12 @@ def validate_artifacts(
                 "stdout": f"context-pack/runtime/phase{phase_number}-output-attempt{attempt}.jsonl",
                 "stderr": f"context-pack/runtime/phase{phase_number}-stderr-attempt{attempt}.txt",
                 "ac_results": f"context-pack/runtime/phase{phase_number}-ac-attempt{attempt}.json",
+                "quality": f"context-pack/runtime/phase{phase_number}-quality-attempt{attempt}.json",
                 "handoff": f"context-pack/runtime/phase{phase_number}-handoff-attempt{attempt}.md",
+                "evidence": f"context-pack/runtime/phase{phase_number}-evidence-attempt{attempt}.json",
+                "reconciliation": f"context-pack/runtime/phase{phase_number}-reconciliation-attempt{attempt}.json",
+                "reconciliation_summary": f"context-pack/runtime/phase{phase_number}-reconciliation-attempt{attempt}.md",
+                "gate": f"context-pack/runtime/phase{phase_number}-gate-attempt{attempt}.json",
             }
         )
     legacy_paths = {
@@ -874,8 +880,32 @@ def validate_artifacts(
         "checklist": f"context-pack/runtime/phase{phase_number}-checklist.md",
         "prompt": f"context-pack/runtime/phase{phase_number}-prompt.md",
     }
-    required_artifact_keys = {"prompt", "stdout", "stderr", "ac_results", "quality", "handoff"}
-    for key in ["contract", "checklist", "prompt", "stdout", "stderr", "ac_results", "quality", "handoff"]:
+    required_artifact_keys = {
+        "prompt",
+        "stdout",
+        "stderr",
+        "ac_results",
+        "quality",
+        "handoff",
+        "evidence",
+        "reconciliation",
+        "reconciliation_summary",
+        "gate",
+    }
+    for key in [
+        "contract",
+        "checklist",
+        "prompt",
+        "stdout",
+        "stderr",
+        "ac_results",
+        "quality",
+        "handoff",
+        "evidence",
+        "reconciliation",
+        "reconciliation_summary",
+        "gate",
+    ]:
         raw_path = value.get(key)
         if not isinstance(raw_path, str) or not raw_path.strip():
             if key in required_artifact_keys:
@@ -884,8 +914,10 @@ def validate_artifacts(
         if (
             key in expected_paths
             and raw_path != expected_paths[key]
-            and raw_path != legacy_paths.get(key)
+            and (strict_attempt_artifacts or raw_path != legacy_paths.get(key))
             and not (
+                not strict_attempt_artifacts
+                and
                 key == "handoff"
                 and raw_path == f"context-pack/handoffs/phase{phase_number}.md"
             )
@@ -961,6 +993,20 @@ def validate_phase_reconciliation(root: Path, path: Path) -> list[str]:
     return []
 
 
+def phase_runtime_artifact_path(
+    task_path: Path,
+    phase_number: int,
+    stem: str,
+    suffix: str,
+    expected_attempt: int | None = None,
+) -> Path:
+    runtime_dir = task_path / "context-pack" / "runtime"
+    if isinstance(expected_attempt, int) and expected_attempt > 0:
+        attempt_path = runtime_dir / f"phase{phase_number}-{stem}-attempt{expected_attempt}{suffix}"
+        return attempt_path
+    return runtime_dir / f"phase{phase_number}-{stem}{suffix}"
+
+
 def validate_runtime_contract_bundle(
     root: Path,
     task_path: Path,
@@ -971,18 +1017,11 @@ def validate_runtime_contract_bundle(
     expected_attempt: int | None = None,
 ) -> list[str]:
     runtime_dir = task_path / "context-pack" / "runtime"
-    def attempt_or_alias(stem: str, suffix: str) -> Path:
-        if isinstance(expected_attempt, int) and expected_attempt > 0:
-            attempt_path = runtime_dir / f"phase{phase_number}-{stem}-attempt{expected_attempt}{suffix}"
-            if attempt_path.exists():
-                return attempt_path
-        return runtime_dir / f"phase{phase_number}-{stem}{suffix}"
-
-    contract_path = attempt_or_alias("contract", ".json")
-    evidence_path = attempt_or_alias("evidence", ".json")
-    reconciliation_path = attempt_or_alias("reconciliation", ".json")
-    gate_path = attempt_or_alias("gate", ".json")
-    quality_path = attempt_or_alias("quality", ".json")
+    contract_path = phase_runtime_artifact_path(task_path, phase_number, "contract", ".json", expected_attempt)
+    evidence_path = phase_runtime_artifact_path(task_path, phase_number, "evidence", ".json", expected_attempt)
+    reconciliation_path = phase_runtime_artifact_path(task_path, phase_number, "reconciliation", ".json", expected_attempt)
+    gate_path = phase_runtime_artifact_path(task_path, phase_number, "gate", ".json", expected_attempt)
+    quality_path = phase_runtime_artifact_path(task_path, phase_number, "quality", ".json", expected_attempt)
     errors: list[str] = []
 
     try:
@@ -1142,7 +1181,9 @@ def validate_phase_result(
         if isinstance(expected_attempt, int) and expected_attempt > 0
         else None
     )
-    result_path = canonical_result_path if canonical_result_path is not None and canonical_result_path.exists() else alias_result_path
+    if canonical_result_path is not None and not canonical_result_path.exists():
+        return [f"Missing phase result: {rel(root, canonical_result_path)}"]
+    result_path = canonical_result_path if canonical_result_path is not None else alias_result_path
     if not result_path.exists():
         expected_path = canonical_result_path or alias_result_path
         return [f"Missing phase result: {rel(root, expected_path)}"]
@@ -1190,10 +1231,23 @@ def validate_phase_result(
     errors.extend(validate_required_outputs(root, task_path, result.get("required_outputs"), expected_outputs))
     if expected_repo_outputs or "required_repo_outputs" in result:
         errors.extend(validate_required_repo_outputs(root, result.get("required_repo_outputs"), expected_repo_outputs))
-    errors.extend(validate_artifacts(root, task_path, result.get("artifacts"), phase_number, attempt))
+    errors.extend(
+        validate_artifacts(
+            root,
+            task_path,
+            result.get("artifacts"),
+            phase_number,
+            attempt,
+            strict_attempt_artifacts=isinstance(expected_attempt, int) and expected_attempt > 0,
+        )
+    )
     artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
-    expected_handoff_paths = {f"context-pack/handoffs/phase{phase_number}.md"}
-    if isinstance(attempt, int):
+    expected_handoff_paths = set()
+    if isinstance(expected_attempt, int) and expected_attempt > 0:
+        expected_handoff_paths.add(f"context-pack/runtime/phase{phase_number}-handoff-attempt{expected_attempt}.md")
+    else:
+        expected_handoff_paths.add(f"context-pack/handoffs/phase{phase_number}.md")
+    if isinstance(attempt, int) and not (isinstance(expected_attempt, int) and expected_attempt > 0):
         expected_handoff_paths.add(f"context-pack/runtime/phase{phase_number}-handoff-attempt{attempt}.md")
     if artifacts.get("handoff") not in expected_handoff_paths:
         errors.append(
@@ -1319,11 +1373,14 @@ def validate_phase_attempt_commit(
             continue
         entry = by_name.get(name)
         if not isinstance(entry, dict):
+            errors.append(f"{name} is missing from attempt_commit artifacts.")
             continue
         if entry.get("path") != path_value:
             errors.append(f"{name} path does not match attempt_commit.")
             continue
-        if artifact_path.exists() and entry.get("sha256") != file_sha256(artifact_path):
+        if not artifact_path.exists() or not artifact_path.is_file():
+            errors.append(f"{name} artifact path does not exist: {rel(root, artifact_path)}")
+        elif entry.get("sha256") != file_sha256(artifact_path):
             errors.append(f"{name} sha256 does not match attempt_commit.")
     return errors
 
@@ -1628,21 +1685,52 @@ def verify(
                     strict_current_harness=strict_current_harness,
                 )
             )
-            errors.extend(require_file(root, runtime_dir / f"phase{phase_number}-prompt.md", "runtime prompt"))
-            errors.extend(require_file(root, runtime_dir / f"phase{phase_number}-contract.json", "phase contract"))
-            errors.extend(require_file(root, runtime_dir / f"phase{phase_number}-checklist.md", "phase checklist"))
-            errors.extend(require_file(root, runtime_dir / f"phase{phase_number}-evidence.json", "phase evidence"))
+            expected_attempt = phase.get("attempts") if isinstance(phase.get("attempts"), int) else None
             errors.extend(
-                require_file(root, runtime_dir / f"phase{phase_number}-reconciliation.json", "phase reconciliation")
+                require_file(
+                    root,
+                    phase_runtime_artifact_path(task_path, phase_number, "prompt", ".md", expected_attempt),
+                    "runtime prompt",
+                )
             )
             errors.extend(
-                validate_phase_reconciliation(root, runtime_dir / f"phase{phase_number}-reconciliation.json")
+                require_file(
+                    root,
+                    phase_runtime_artifact_path(task_path, phase_number, "contract", ".json", expected_attempt),
+                    "phase contract",
+                )
             )
             errors.extend(
-                require_file(root, runtime_dir / f"phase{phase_number}-reconciliation.md", "phase reconciliation summary")
+                require_file(
+                    root,
+                    phase_runtime_artifact_path(task_path, phase_number, "checklist", ".md", expected_attempt),
+                    "phase checklist",
+                )
             )
-            errors.extend(require_file(root, runtime_dir / f"phase{phase_number}-gate.json", "phase gate"))
-            errors.extend(validate_phase_gate(root, runtime_dir / f"phase{phase_number}-gate.json"))
+            errors.extend(
+                require_file(
+                    root,
+                    phase_runtime_artifact_path(task_path, phase_number, "evidence", ".json", expected_attempt),
+                    "phase evidence",
+                )
+            )
+            reconciliation_path = phase_runtime_artifact_path(
+                task_path, phase_number, "reconciliation", ".json", expected_attempt
+            )
+            errors.extend(
+                require_file(root, reconciliation_path, "phase reconciliation")
+            )
+            errors.extend(validate_phase_reconciliation(root, reconciliation_path))
+            errors.extend(
+                require_file(
+                    root,
+                    phase_runtime_artifact_path(task_path, phase_number, "reconciliation", ".md", expected_attempt),
+                    "phase reconciliation summary",
+                )
+            )
+            gate_path = phase_runtime_artifact_path(task_path, phase_number, "gate", ".json", expected_attempt)
+            errors.extend(require_file(root, gate_path, "phase gate"))
+            errors.extend(validate_phase_gate(root, gate_path))
             errors.extend(
                 validate_runtime_contract_bundle(
                     root,
@@ -1651,7 +1739,7 @@ def verify(
                     expected_commands,
                     expected_outputs,
                     expected_repo_outputs,
-                    expected_attempt=phase.get("attempts") if isinstance(phase.get("attempts"), int) else None,
+                    expected_attempt=expected_attempt,
                 )
             )
             for attempt in phase_attempts(phase):

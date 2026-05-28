@@ -143,9 +143,11 @@ runner가 남기는 핵심 실행 증거는 다음입니다.
 - `phase<N>-evidence.json`
 - `phase<N>-gate.json`
 - `phase<N>-reconciliation.json`
-- `phase<N>-result.json`
+- `phase<N>-result-attempt<M>.json`
+- `phase<N>-attempt<M>-commit.json`
 
 이 파일들이 없으면 Codex가 완료했다고 말해도 완료가 아닙니다.
+`phase<N>-result.json`은 latest alias이므로 사람이 상태를 볼 때는 유용하지만, 완료 proof의 source of truth는 attempt commit과 attempt-scoped result입니다.
 
 ## 실패 처리
 

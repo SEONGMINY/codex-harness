@@ -65,7 +65,8 @@ codex-harness는 대화를 실행 상태로 쓰지 않습니다.
 
 완료 판정은 runner가 합니다.
 
-`phase<N>-result.json`, `phase<N>-gate.json`, `phase<N>-quality.json`이 없으면 완료가 아닙니다.
+`phase<N>-attempt<M>-commit.json`과 `phase<N>-result-attempt<M>.json`이 없으면 완료가 아닙니다.
+`phase<N>-result.json`, `phase<N>-gate.json`, `phase<N>-quality.json`은 최신 상태를 보기 위한 runner-owned alias입니다.
 
 자세한 실행 모델은 [docs/model.md](./docs/model.md)를 읽으세요.
 

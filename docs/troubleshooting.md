@@ -44,13 +44,15 @@ find tasks/<task-dir>/context-pack/handoffs -maxdepth 1 -type f | sort
 
 봐야 할 파일:
 
-- `phase<N>-result.json`
+- `phase<N>-result-attempt<M>.json`
+- `phase<N>-attempt<M>-commit.json`
 - `phase<N>-gate.json`
 - `phase<N>-reconciliation.md`
 - `phase<N>-ac-attempt<M>.json`
 - `context-pack/handoffs/phase<N>.md`
 
-`phase<N>-result.json`이 없으면 완료가 아닙니다.
+`phase<N>-result-attempt<M>.json` 또는 `phase<N>-attempt<M>-commit.json`이 없으면 완료가 아닙니다.
+`phase<N>-result.json`은 latest alias입니다.
 
 ## gate가 실패합니다
 

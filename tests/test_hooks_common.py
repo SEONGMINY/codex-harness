@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / ".codex" / "hooks"))
 import harness_pre_tool_use  # noqa: E402
 import harness_post_tool_use  # noqa: E402
 from harness_common import (  # noqa: E402
+    HarnessContext,
     HOOK_WRITE_TOOL_MATCHER,
     active_context,
     extract_tool_write_paths,
@@ -193,10 +194,33 @@ class HookContextTest(unittest.TestCase):
             assert ctx is not None
             self.assertEqual(scope_violations(ctx, ["src/app.py"]), [])
 
+    def test_scope_normalizes_relative_write_paths_from_event_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp).resolve()
+            task_path, contract_path = self.make_context_files(root)
+            subdir = root / "packages" / "web"
+            subdir.mkdir(parents=True)
+            contract = {"phase": 0, "scope": {"allowed_paths": ["src/**"]}}
+            ctx = HarnessContext(root, task_path, 0, contract_path, contract, subdir)
+
+            self.assertEqual(scope_violations(ctx, ["src/app.py"]), ["packages/web/src/app.py"])
+
     def test_runner_owned_patterns_cover_runtime_proof_artifacts(self) -> None:
         runner_paths = [
             "tasks/demo/context-pack/runtime/phase0-attempt1-commit.json",
             "tasks/demo/context-pack/runtime/phase0-obligation-closure-attempt1.json",
+            "tasks/demo/context-pack/runtime/phase0-result-attempt1.json",
+            "tasks/demo/context-pack/runtime/phase0-handoff-attempt1.md",
+            "tasks/demo/context-pack/runtime/phase0-contract-attempt1.json",
+            "tasks/demo/context-pack/runtime/phase0-checklist-attempt1.md",
+            "tasks/demo/context-pack/runtime/phase0-prompt-attempt1.md",
+            "tasks/demo/context-pack/runtime/phase0-evidence-attempt1.json",
+            "tasks/demo/context-pack/runtime/phase0-reconciliation-attempt1.json",
+            "tasks/demo/context-pack/runtime/phase0-reconciliation-attempt1.md",
+            "tasks/demo/context-pack/runtime/phase0-gate-attempt1.json",
+            "tasks/demo/context-pack/runtime/phase0-quality-attempt1.json",
+            "tasks/demo/context-pack/runtime/phase0-repair-packet-attempt1.json",
+            "tasks/demo/context-pack/runtime/phase0-repair-packet-attempt1.md",
             "tasks/demo/context-pack/runtime/phase0-baseline.json",
             "tasks/demo/context-pack/runtime/phase0-reset-marker.json",
             "tasks/demo/context-pack/runtime/evaluation-repair1-result.json",

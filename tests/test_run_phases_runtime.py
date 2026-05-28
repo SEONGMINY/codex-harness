@@ -1038,6 +1038,52 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(task_index["phases"][1]["status"], "pending")
             self.assertEqual(task_index["phases"][1]["reset_at"], propagated_reset_at)
 
+    def test_runtime_projection_rejects_legacy_future_commit_after_partial_propagated_reset_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True, exist_ok=True)
+            result_path = RUN_PHASES.phase_result_path(task_path, 1)
+            result = {"phase": 1, "attempt": 1, "status": "completed", "artifacts": {}}
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            RUN_PHASES.phase_attempt_commit_path(task_path, 1, 1).write_text(
+                json.dumps(
+                    {
+                        "phase": 1,
+                        "attempt": 1,
+                        "committed_at": "9999-01-01T00:00:00+09:00",
+                        "result": {
+                            "path": "context-pack/runtime/phase1-result.json",
+                            "sha256": RUN_PHASES.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            propagated_reset_at = "2026-01-01T00:00:01+09:00"
+            RUN_PHASES.write_phase_reset_marker(task_path, 0, propagated_reset_at, 0)
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "phases": [
+                            {"phase": 0, "name": "docs", "status": "pending", "attempts": 0},
+                            {"phase": 1, "name": "api", "status": "completed", "attempts": 1},
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertIsNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 1))
+            self.assertEqual(changes[0]["reason"], "reset_marker_without_projection")
+            self.assertEqual(task_index["phases"][1]["status"], "pending")
+
     def test_runtime_projection_rejects_commit_result_reset_generation_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from obligation_ledger import (  # noqa: E402
     command_output_truncated,
     design_obligations_by_id,
     display_value,
+    load_phase_result,
     output_satisfies_assertion,
     passed_commands_by_ref,
     passed_command_refs,
@@ -30,6 +33,50 @@ from obligation_ledger import (  # noqa: E402
 
 
 class ObligationLedgerTest(unittest.TestCase):
+    def test_load_phase_result_prefers_expected_attempt_canonical_result(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            task_path = Path(raw_tmp) / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            (runtime_dir / "phase0-result.json").write_text(
+                json.dumps({"phase": 0, "attempt": 2}) + "\n",
+                encoding="utf-8",
+            )
+            (runtime_dir / "phase0-result-attempt1.json").write_text(
+                json.dumps({"phase": 0, "attempt": 1}) + "\n",
+                encoding="utf-8",
+            )
+
+            result = load_phase_result(task_path, 0, expected_attempt=1)
+
+            self.assertEqual(result, {"phase": 0, "attempt": 1})
+
+    def test_load_phase_result_accepts_missing_latest_alias_when_canonical_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            task_path = Path(raw_tmp) / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            (runtime_dir / "phase0-result-attempt1.json").write_text(
+                json.dumps({"phase": 0, "attempt": 1}) + "\n",
+                encoding="utf-8",
+            )
+
+            result = load_phase_result(task_path, 0, expected_attempt=1)
+
+            self.assertEqual(result, {"phase": 0, "attempt": 1})
+
+    def test_load_phase_result_rejects_alias_fallback_when_expected_attempt_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            task_path = Path(raw_tmp) / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            (runtime_dir / "phase0-result.json").write_text(
+                json.dumps({"phase": 0, "attempt": 2}) + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(load_phase_result(task_path, 0, expected_attempt=1))
+
     def test_phase_closure_requires_passed_command_role(self) -> None:
         obligations = design_obligations_by_id(
             {

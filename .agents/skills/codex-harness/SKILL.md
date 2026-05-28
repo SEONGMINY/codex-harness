@@ -212,17 +212,20 @@ Generate is not complete unless these files exist:
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-output-attempt<M>.jsonl` for every executed phase
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-stderr-attempt<M>.txt` for every executed phase
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-ac-attempt<M>.json` for every executed phase
-- `tasks/<task-dir>/context-pack/runtime/phase<N>-evidence.json` for every executed phase
-- `tasks/<task-dir>/context-pack/runtime/phase<N>-reconciliation.json` for every executed phase
-- `tasks/<task-dir>/context-pack/runtime/phase<N>-reconciliation.md` for every executed phase
-- `tasks/<task-dir>/context-pack/runtime/phase<N>-gate.json` for every executed phase
-- `tasks/<task-dir>/context-pack/runtime/phase<N>-quality.json` for every executed phase
-- `tasks/<task-dir>/context-pack/runtime/phase<N>-result.json` for every completed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-evidence-attempt<M>.json` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-reconciliation-attempt<M>.json` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-reconciliation-attempt<M>.md` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-gate-attempt<M>.json` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-quality-attempt<M>.json` for every executed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-handoff-attempt<M>.md` for every completed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-result-attempt<M>.json` for every completed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-attempt<M>-commit.json` for every completed phase
+- `tasks/<task-dir>/context-pack/runtime/phase<N>-result.json` as latest alias for completed phases
 - `tasks/<task-dir>/context-pack/runtime/phase<N>-repair-packet.json` and `.md` for failed/retried attempts, when present
 - `tasks/<task-dir>/context-pack/runtime/docs-diff.md` after phase 0
 - `tasks/<task-dir>/context-pack/handoffs/phase<N>.md` for every completed phase
 
-`phase<N>-result.json` is runner-owned. It contains measured facts: exit codes, changed files, required output status, and artifact paths. Phase agents write handoffs, not result JSON.
+`phase<N>-result-attempt<M>.json` and `phase<N>-attempt<M>-commit.json` are the canonical completion proof. `phase<N>-result.json` is a latest alias for humans and compatibility. Phase agents write handoffs, not result JSON.
 `phase<N>-gate.json` is runner-owned. It must pass before the phase can be marked completed.
 `phase<N>-quality.json` is runner-owned. It records runnable project lint results, or harness baseline style checks when project lint is unavailable, and feeds the gate quality check.
 `phase<N>-repair-packet.*` is runner-owned. It summarizes retryable failures for the next attempt. If it contains `contaminating_changes`, the failure is not auto-retryable until the paths are reviewed, cleaned up, or explicitly brought into phase scope.

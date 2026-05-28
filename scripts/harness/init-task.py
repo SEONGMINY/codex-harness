@@ -516,7 +516,7 @@ def phase_template(
                 "reason": "The runner owns task and phase status.",
             },
             {
-                "rule": f"Do not write `context-pack/runtime/phase{phase}-result.json`.",
+                "rule": f"Do not write runner-owned `context-pack/runtime/phase{phase}-*.json` proof files.",
                 "reason": "The runner owns phase result proof.",
             },
             {
@@ -564,7 +564,7 @@ The runner uses `required_outputs` from the Contract block.
 ## Constraints
 
 - Do not update `tasks/*/index.json`; the runner owns status.
-- Do not write `context-pack/runtime/phase{phase}-result.json`; the runner generates it.
+- Do not write runner-owned `context-pack/runtime/phase{phase}-*.json` proof files; the runner generates them.
 - Do not spawn subagents for implementation.
 - Do not expand scope beyond this phase.
 - In `context-pack/handoffs/phase{phase}.md`, include `## Change Trace` and map every changed repository file to one or more instruction ids.

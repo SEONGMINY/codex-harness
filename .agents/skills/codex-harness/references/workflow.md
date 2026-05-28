@@ -242,16 +242,18 @@ Generate completion requires runtime proof:
 - `context-pack/runtime/phase<N>-output-attempt<M>.jsonl`
 - `context-pack/runtime/phase<N>-stderr-attempt<M>.txt`
 - `context-pack/runtime/phase<N>-ac-attempt<M>.json`
-- `context-pack/runtime/phase<N>-evidence.json`
-- `context-pack/runtime/phase<N>-reconciliation.json`
-- `context-pack/runtime/phase<N>-reconciliation.md`
-- `context-pack/runtime/phase<N>-gate.json`
-- `context-pack/runtime/phase<N>-result.json`
+- `context-pack/runtime/phase<N>-evidence-attempt<M>.json`
+- `context-pack/runtime/phase<N>-reconciliation-attempt<M>.json`
+- `context-pack/runtime/phase<N>-reconciliation-attempt<M>.md`
+- `context-pack/runtime/phase<N>-gate-attempt<M>.json`
+- `context-pack/runtime/phase<N>-result-attempt<M>.json`
+- `context-pack/runtime/phase<N>-attempt<M>-commit.json`
+- `context-pack/runtime/phase<N>-result.json` as latest alias
 - `context-pack/runtime/phase<N>-repair-packet.json` and `.md` for failed/retried attempts, when present
 - `context-pack/runtime/docs-diff.md` after phase 0
 - `context-pack/handoffs/phase<N>.md`
 
-The runner-generated phase result JSON is the machine-readable completion contract.
+The runner-generated attempt result and attempt commit marker are the machine-readable completion contract.
 The runner-generated gate JSON decides whether the phase may complete.
 For implementation phases, `required_repo_outputs` must name concrete repository files, and the gate checks that they exist.
 The gate fails if the handoff reports blocked, partial, skipped, workaround, or equivalent Korean wording.

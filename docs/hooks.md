@@ -120,5 +120,6 @@ hooks는 빠른 차단 장치입니다.
 
 ```text
 phase<N>-gate.json
-phase<N>-result.json
+phase<N>-result-attempt<M>.json
+phase<N>-attempt<M>-commit.json
 ```

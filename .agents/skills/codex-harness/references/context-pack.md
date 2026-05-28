@@ -57,7 +57,7 @@ Use for changing context:
 Runtime files are not strategic source of truth.
 Runtime files are execution proof.
 Do not create runner-owned proof files manually.
-The runner writes `phase<N>-result.json`.
+The runner writes `phase<N>-result-attempt<M>.json`, `phase<N>-attempt<M>-commit.json`, and latest aliases such as `phase<N>-result.json`.
 The phase agent writes only `handoffs/phase<N>.md`.
 
 Required Generate proof:
@@ -65,7 +65,8 @@ Required Generate proof:
 - `phase<N>-prompt.md`
 - `phase<N>-output-attempt<M>.jsonl`
 - `phase<N>-stderr-attempt<M>.txt`
-- `phase<N>-result.json`
+- `phase<N>-result-attempt<M>.json`
+- `phase<N>-attempt<M>-commit.json`
 - `docs-diff.md` after phase 0
 
 Required Evaluate proof:
@@ -76,7 +77,7 @@ Required Evaluate proof:
 - `evaluation-last-message.json`
 - `evaluation-repair<N>-result.json` when review improvement ran
 
-Runner-generated `phase<N>-result.json` schema:
+Runner-generated `phase<N>-result-attempt<M>.json` schema:
 
 ```json
 {

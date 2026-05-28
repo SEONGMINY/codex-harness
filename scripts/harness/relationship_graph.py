@@ -346,8 +346,10 @@ def add_contract_refs(builder: GraphBuilder, phase_id: str, contract: dict[str, 
 
 def add_runtime_proof(builder: GraphBuilder, root: Path, task_path: Path, phase_number: int, phase_id: str) -> None:
     runtime_dir = task_path / "context-pack" / "runtime"
-    for suffix in RUNTIME_PROOF_SUFFIXES:
-        path = runtime_dir / f"phase{phase_number}-{suffix}"
+    proof_paths = [runtime_dir / f"phase{phase_number}-{suffix}" for suffix in RUNTIME_PROOF_SUFFIXES]
+    proof_paths.extend(sorted(runtime_dir.glob(f"phase{phase_number}-result-attempt*.json")))
+    proof_paths.extend(sorted(runtime_dir.glob(f"phase{phase_number}-handoff-attempt*.md")))
+    for path in proof_paths:
         if not path.exists():
             continue
         raw_path = output_rel(root, path)

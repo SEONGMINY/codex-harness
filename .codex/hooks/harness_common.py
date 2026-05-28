@@ -34,9 +34,11 @@ RUNNER_OWNED_PATTERNS = [
     ),
     re.compile(
         r"^tasks/[^/]+/context-pack/runtime/phase\d+-"
-        r"(?:prompt|contract|checklist|output-attempt\d+|stderr-attempt\d+|"
-        r"ac-attempt\d+|evidence|reconciliation|reconciliation-summary|gate|quality|"
-        r"result|last-error|repair-packet|reset-marker|baseline|"
+        r"(?:prompt(?:-attempt\d+)?|contract(?:-attempt\d+)?|checklist(?:-attempt\d+)?|"
+        r"output-attempt\d+|stderr-attempt\d+|ac-attempt\d+|"
+        r"evidence(?:-attempt\d+)?|reconciliation(?:-attempt\d+)?|gate(?:-attempt\d+)?|"
+        r"quality(?:-attempt\d+)?|handoff-attempt\d+|result(?:-attempt\d+)?|"
+        r"last-error|repair-packet(?:-attempt\d+)?|reset-marker|baseline|"
         r"attempt\d+-commit|obligation-closure-attempt\d+)"
         r"\.(?:md|json|jsonl|txt)$"
     ),
@@ -57,6 +59,7 @@ class HarnessContext:
     phase: int
     contract_path: Path
     contract: dict[str, Any]
+    cwd: Path | None = None
 
 
 def read_event() -> dict[str, Any]:
@@ -158,7 +161,7 @@ def active_context(event: dict[str, Any]) -> HarnessContext | None:
     contract_phase = contract.get("phase")
     if isinstance(contract_phase, int) and contract_phase != phase:
         return None
-    return HarnessContext(root, task_path, phase, contract_path, contract)
+    return HarnessContext(root, task_path, phase, contract_path, contract, cwd)
 
 
 def flatten_strings(value: Any) -> list[str]:
@@ -301,7 +304,7 @@ def extract_tool_write_paths(event: dict[str, Any]) -> list[str]:
     return []
 
 
-def normalize_repo_path(root: Path, raw_path: str) -> str | None:
+def normalize_repo_path(root: Path, raw_path: str, cwd: Path | None = None) -> str | None:
     value = raw_path.strip().strip('"').strip("'")
     if not value or value.startswith("-") or "://" in value:
         return None
@@ -311,12 +314,12 @@ def normalize_repo_path(root: Path, raw_path: str) -> str | None:
             return str(path.resolve().relative_to(root))
         except ValueError:
             return str(path)
-    if ".." in path.parts:
+    base = (cwd or root).resolve()
+    resolved = (base / path).resolve()
+    try:
+        return str(resolved.relative_to(root))
+    except ValueError:
         return str(path)
-    normalized = str(path)
-    if normalized.startswith("./"):
-        normalized = normalized[2:]
-    return normalized
 
 
 def contract_allowed_paths(contract: dict[str, Any]) -> list[str]:
@@ -417,7 +420,7 @@ def scope_violations(ctx: HarnessContext, raw_paths: list[str]) -> list[str]:
     allowed = [*contract_allowed_paths(ctx.contract), *required_output_repo_paths(ctx)]
     violations = []
     for raw_path in raw_paths:
-        path = normalize_repo_path(ctx.root, raw_path)
+        path = normalize_repo_path(ctx.root, raw_path, ctx.cwd)
         if path is None:
             continue
         if runner_owned(path):

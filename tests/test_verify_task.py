@@ -2696,6 +2696,29 @@ classDiagram
 
             self.assertEqual(errors, [])
 
+    def test_completed_phase_result_rejects_alias_fallback_when_expected_attempt_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            (runtime_dir / "phase0-result.json").write_text(
+                json.dumps({"phase": 0, "status": "completed", "attempt": 2}) + "\n",
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.validate_phase_result(
+                root,
+                task_path,
+                0,
+                [],
+                [],
+                [],
+                expected_attempt=1,
+            )
+
+            self.assertTrue(any("phase0-result-attempt1.json" in error for error in errors), errors)
+
     def test_completed_phase_result_uses_canonical_attempt_result_when_alias_missing_or_stale(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "repo"
@@ -2711,7 +2734,11 @@ classDiagram
                 "context-pack/runtime/phase0-output-attempt1.jsonl",
                 "context-pack/runtime/phase0-stderr-attempt1.txt",
                 "context-pack/runtime/phase0-ac-attempt1.json",
-                "context-pack/runtime/phase0-quality.json",
+                "context-pack/runtime/phase0-quality-attempt1.json",
+                "context-pack/runtime/phase0-evidence-attempt1.json",
+                "context-pack/runtime/phase0-reconciliation-attempt1.json",
+                "context-pack/runtime/phase0-reconciliation-attempt1.md",
+                "context-pack/runtime/phase0-gate-attempt1.json",
                 "context-pack/runtime/phase0-handoff-attempt1.md",
                 "context-pack/handoffs/phase0.md",
             ]:
@@ -2735,7 +2762,11 @@ classDiagram
                     "stdout": "context-pack/runtime/phase0-output-attempt1.jsonl",
                     "stderr": "context-pack/runtime/phase0-stderr-attempt1.txt",
                     "ac_results": "context-pack/runtime/phase0-ac-attempt1.json",
-                    "quality": "context-pack/runtime/phase0-quality.json",
+                    "quality": "context-pack/runtime/phase0-quality-attempt1.json",
+                    "evidence": "context-pack/runtime/phase0-evidence-attempt1.json",
+                    "reconciliation": "context-pack/runtime/phase0-reconciliation-attempt1.json",
+                    "reconciliation_summary": "context-pack/runtime/phase0-reconciliation-attempt1.md",
+                    "gate": "context-pack/runtime/phase0-gate-attempt1.json",
                     "handoff": "context-pack/runtime/phase0-handoff-attempt1.md",
                     "attempt_commit": "context-pack/runtime/phase0-attempt1-commit.json",
                 },
@@ -2745,6 +2776,19 @@ classDiagram
                 json.dumps({**result, "attempt": 2}) + "\n",
                 encoding="utf-8",
             )
+            commit_artifacts = []
+            for name, relative in result["artifacts"].items():
+                if name == "attempt_commit":
+                    continue
+                artifact_path = task_path / relative
+                commit_artifacts.append(
+                    {
+                        "name": name,
+                        "path": relative,
+                        "exists": True,
+                        "sha256": VERIFY_TASK.file_sha256(artifact_path),
+                    }
+                )
             (runtime_dir / "phase0-attempt1-commit.json").write_text(
                 json.dumps(
                     {
@@ -2754,7 +2798,7 @@ classDiagram
                             "path": "context-pack/runtime/phase0-result-attempt1.json",
                             "sha256": VERIFY_TASK.file_sha256(result_path),
                         },
-                        "artifacts": [],
+                        "artifacts": commit_artifacts,
                     }
                 )
                 + "\n",
@@ -2887,6 +2931,59 @@ classDiagram
 
             self.assertTrue(any("must not escape" in error for error in errors), errors)
             self.assertTrue(any("path does not match" in error for error in errors), errors)
+
+    def test_phase_attempt_commit_rejects_missing_committed_artifact_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            result_data = {
+                "phase": 0,
+                "status": "completed",
+                "attempt": 1,
+                "artifacts": {
+                    "attempt_commit": "context-pack/runtime/phase0-attempt1-commit.json",
+                    "gate": "context-pack/runtime/phase0-gate-attempt1.json",
+                },
+            }
+            result_path = runtime_dir / "phase0-result-attempt1.json"
+            result_path.write_text(json.dumps(result_data) + "\n", encoding="utf-8")
+            commit_path = runtime_dir / "phase0-attempt1-commit.json"
+            commit_path.write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result-attempt1.json",
+                            "sha256": VERIFY_TASK.file_sha256(result_path),
+                        },
+                        "artifacts": [
+                            {
+                                "name": "gate",
+                                "path": "context-pack/runtime/phase0-gate-attempt1.json",
+                                "sha256": "missing",
+                                "exists": True,
+                            }
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.validate_phase_attempt_commit(
+                root,
+                task_path,
+                0,
+                1,
+                result_path,
+                result_data,
+                result_data["artifacts"],
+            )
+
+            self.assertTrue(any("artifact path does not exist" in error for error in errors), errors)
 
     def test_latest_repo_content_attestation_rejects_current_file_drift(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

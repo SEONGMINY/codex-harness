@@ -75,9 +75,9 @@ The Mermaid diagrams section must contain at least one `mermaid` block using `fl
 The `Files To Add/Change` section must list repository paths or path patterns. Implementation phase `scope.allowed_paths` and `required_repo_outputs` must be covered by these approved paths. For glob patterns, the verifier accepts the exact approved glob, or a phase glob under an approved directory prefix such as `scripts/harness/`.
 The orchestrator must treat status JSON as insufficient proof.
 Completed phases also require matching runtime output and handoff files.
-Completed phases also require a schema-valid `phase<N>-result.json`.
+Completed phases also require a schema-valid `phase<N>-result-attempt<M>.json` and matching `phase<N>-attempt<M>-commit.json`.
 Completed phases also require runner-generated contract, checklist, evidence, reconciliation, and gate files.
-The runner generates `phase<N>-result.json`; phase agents do not.
+The runner generates attempt-scoped runtime proof and updates `phase<N>-result.json` as the latest alias; phase agents do not.
 Failed or retried attempts may also have runner-generated `phase<N>-repair-packet.json` and `.md`.
 Use `.codex/harness/scripts/verify-task.py` to enforce this.
 
@@ -286,7 +286,7 @@ Phase agents must not:
 - update `tasks/*/index.json`
 - mark themselves completed
 - decide next phase
-- write `context-pack/runtime/phase<N>-result.json`
+- write runner-owned `context-pack/runtime/phase<N>-*.json` proof files
 - spawn subagents for Generate
 - commit unless the phase explicitly requires it
 - bypass codex-harness hooks when a hook blocks a tool call
