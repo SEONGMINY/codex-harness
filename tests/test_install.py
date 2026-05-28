@@ -26,6 +26,8 @@ HARNESS_ATTESTATION_SPEC = importlib.util.spec_from_file_location(
 SOURCE_HARNESS_ATTESTATION = importlib.util.module_from_spec(HARNESS_ATTESTATION_SPEC)
 assert HARNESS_ATTESTATION_SPEC.loader is not None
 HARNESS_ATTESTATION_SPEC.loader.exec_module(SOURCE_HARNESS_ATTESTATION)
+sys.path.insert(0, str(ROOT / ".codex" / "hooks"))
+import harness_common as SOURCE_HOOK_COMMON  # noqa: E402
 
 
 def load_attestation_module(path: Path):
@@ -337,6 +339,22 @@ class InstallCodexHarnessTest(unittest.TestCase):
             self.assertIn(".codex/hooks.json", gitignore)
             self.assertIn(".codex/hooks.optional.json", gitignore)
 
+    def test_hook_registration_uses_shared_write_tool_matcher(self) -> None:
+        matcher = INSTALL_MODULE.load_hook_write_tool_matcher(ROOT)
+
+        self.assertEqual(matcher, SOURCE_HOOK_COMMON.HOOK_WRITE_TOOL_MATCHER)
+        project_hooks = INSTALL_MODULE.project_hook_groups(optional_hooks=True, write_tool_matcher=matcher)
+        user_hooks = INSTALL_MODULE.user_hook_groups(
+            Path("/tmp/codex-home"),
+            optional_hooks=True,
+            write_tool_matcher=matcher,
+        )
+
+        self.assertEqual(project_hooks["PreToolUse"][0]["matcher"], SOURCE_HOOK_COMMON.HOOK_WRITE_TOOL_MATCHER)
+        self.assertEqual(project_hooks["PostToolUse"][0]["matcher"], SOURCE_HOOK_COMMON.HOOK_WRITE_TOOL_MATCHER)
+        self.assertEqual(user_hooks["PreToolUse"][0]["matcher"], SOURCE_HOOK_COMMON.HOOK_WRITE_TOOL_MATCHER)
+        self.assertEqual(user_hooks["PostToolUse"][0]["matcher"], SOURCE_HOOK_COMMON.HOOK_WRITE_TOOL_MATCHER)
+
     def test_project_hook_install_replaces_legacy_direct_hook_commands(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -350,7 +368,7 @@ class InstallCodexHarnessTest(unittest.TestCase):
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|apply_patch|Edit|Write",
+        "matcher": "Bash|apply_patch|Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [
           {
             "type": "command",

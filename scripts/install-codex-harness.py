@@ -42,6 +42,7 @@ MANAGED_HOOK_SCRIPT_NAMES = {
     "harness_stop.py",
     "harness_user_prompt_submit.py",
 }
+DEFAULT_HOOK_WRITE_TOOL_MATCHER = "Bash|apply_patch|Edit|Write|MultiEdit|NotebookEdit"
 
 
 def repo_root() -> Path:
@@ -129,15 +130,30 @@ def write_project_install_manifest(source_root: Path, target_root: Path) -> None
     target.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def load_hook_write_tool_matcher(source_root: Path) -> str:
+    path = source_root / USER_HOOKS_SOURCE / "harness_common.py"
+    spec = importlib.util.spec_from_file_location("source_harness_hook_common", path)
+    if spec is None or spec.loader is None:
+        return DEFAULT_HOOK_WRITE_TOOL_MATCHER
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    matcher = getattr(module, "HOOK_WRITE_TOOL_MATCHER", DEFAULT_HOOK_WRITE_TOOL_MATCHER)
+    return matcher if isinstance(matcher, str) and matcher.strip() else DEFAULT_HOOK_WRITE_TOOL_MATCHER
+
+
 def project_hook_command(script_name: str) -> str:
     return f'python3 "$(git rev-parse --show-toplevel)/.codex/hooks/codex-harness/{script_name}"'
 
 
-def project_hook_groups(optional_hooks: bool) -> dict[str, list[dict[str, object]]]:
+def project_hook_groups(
+    optional_hooks: bool,
+    write_tool_matcher: str = DEFAULT_HOOK_WRITE_TOOL_MATCHER,
+) -> dict[str, list[dict[str, object]]]:
     groups: dict[str, list[dict[str, object]]] = {
         "PreToolUse": [
             {
-                "matcher": "Bash|apply_patch|Edit|Write",
+                "matcher": write_tool_matcher,
                 "hooks": [
                     {
                         "type": "command",
@@ -164,7 +180,7 @@ def project_hook_groups(optional_hooks: bool) -> dict[str, list[dict[str, object
     if optional_hooks:
         groups["PostToolUse"] = [
             {
-                "matcher": "Bash|apply_patch|Edit|Write",
+                "matcher": write_tool_matcher,
                 "hooks": [
                     {
                         "type": "command",
@@ -192,7 +208,10 @@ def project_hook_groups(optional_hooks: bool) -> dict[str, list[dict[str, object
 
 def install_project_hooks(source_root: Path, target_root: Path, force: bool, optional_hooks: bool) -> None:
     copy_tree(source_root / PROJECT_HOOKS_SOURCE, target_root / PROJECT_HOOKS_TARGET, force)
-    merge_hooks_json(target_root / ".codex" / "hooks.json", project_hook_groups(optional_hooks))
+    merge_hooks_json(
+        target_root / ".codex" / "hooks.json",
+        project_hook_groups(optional_hooks, load_hook_write_tool_matcher(source_root)),
+    )
     copied_optional = copy_optional_file(
         source_root / Path(".codex") / "hooks.optional.json",
         target_root / Path(".codex") / "hooks.optional.json",
@@ -302,11 +321,15 @@ def hook_command(user_home: Path, script_name: str) -> str:
     return f'python3 "{user_home / USER_HOOKS_TARGET / script_name}"'
 
 
-def user_hook_groups(user_home: Path, optional_hooks: bool) -> dict[str, list[dict[str, object]]]:
+def user_hook_groups(
+    user_home: Path,
+    optional_hooks: bool,
+    write_tool_matcher: str = DEFAULT_HOOK_WRITE_TOOL_MATCHER,
+) -> dict[str, list[dict[str, object]]]:
     groups: dict[str, list[dict[str, object]]] = {
         "PreToolUse": [
             {
-                "matcher": "Bash|apply_patch|Edit|Write",
+                "matcher": write_tool_matcher,
                 "hooks": [
                     {
                         "type": "command",
@@ -333,7 +356,7 @@ def user_hook_groups(user_home: Path, optional_hooks: bool) -> dict[str, list[di
     if optional_hooks:
         groups["PostToolUse"] = [
             {
-                "matcher": "Bash|apply_patch|Edit|Write",
+                "matcher": write_tool_matcher,
                 "hooks": [
                     {
                         "type": "command",
@@ -477,7 +500,10 @@ def ensure_codex_hooks_feature(config_path: Path) -> None:
 
 def install_user_hooks(source_root: Path, user_home: Path, force: bool, optional_hooks: bool) -> None:
     copy_tree(source_root / USER_HOOKS_SOURCE, user_home / USER_HOOKS_TARGET, force)
-    merge_hooks_json(user_home / "hooks.json", user_hook_groups(user_home, optional_hooks))
+    merge_hooks_json(
+        user_home / "hooks.json",
+        user_hook_groups(user_home, optional_hooks, load_hook_write_tool_matcher(source_root)),
+    )
     ensure_codex_hooks_feature(user_home / "config.toml")
     print(f"installed user hooks {user_home / USER_HOOKS_TARGET}")
     print(f"updated {user_home / 'hooks.json'}")

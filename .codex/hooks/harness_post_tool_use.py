@@ -5,13 +5,10 @@ from __future__ import annotations
 
 from harness_common import (
     active_context,
-    extract_bash_write_paths,
-    extract_patch_paths,
+    extract_tool_write_paths,
     post_tool_block,
     read_event,
     scope_violations,
-    shell_command,
-    tool_text,
 )
 
 
@@ -21,14 +18,7 @@ def main() -> int:
     if ctx is None:
         return 0
 
-    tool_name = str(event.get("tool_name") or "")
-    text = tool_text(event)
-    paths: list[str] = []
-    if tool_name == "apply_patch" or "*** Begin Patch" in text:
-        paths.extend(extract_patch_paths(text))
-    elif tool_name == "Bash":
-        paths.extend(extract_bash_write_paths(shell_command(event)))
-
+    paths = extract_tool_write_paths(event)
     violations = scope_violations(ctx, paths)
     if not violations:
         return 0

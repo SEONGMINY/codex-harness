@@ -20,10 +20,14 @@ PATCH_MOVE_RE = re.compile(r"^\*\*\* Move to: (.+)$", re.MULTILINE)
 REDIRECT_RE = re.compile(r"(?:^|\s)(?:>|>>)\s*([^\s;&|]+)")
 SHELL_COMMAND_SEPARATORS = {"&&", "||", ";", "|"}
 REDIRECT_TOKENS = {">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>", "<", "<<", "<<<"}
+SUPPORTED_WRITE_TOOLS = ["Bash", "apply_patch", "Edit", "Write", "MultiEdit", "NotebookEdit"]
+HOOK_WRITE_TOOL_MATCHER = "|".join(SUPPORTED_WRITE_TOOLS)
 RUNNER_OWNED_PATTERNS = [
     re.compile(r"^tasks/index\.json$"),
     re.compile(r"^tasks/[^/]+/index\.json$"),
     re.compile(r"^tasks/[^/]+/context-pack/runtime/docs-diff\.md$"),
+    re.compile(r"^tasks/[^/]+/context-pack/runtime/progress\.md$"),
+    re.compile(r"^tasks/[^/]+/context-pack/runtime/install-preflight\.json$"),
     re.compile(
         r"^tasks/[^/]+/context-pack/runtime/evaluation-"
         r"(?:command-results|prompt|output)\.(?:json|md|jsonl)$"
@@ -31,8 +35,16 @@ RUNNER_OWNED_PATTERNS = [
     re.compile(
         r"^tasks/[^/]+/context-pack/runtime/phase\d+-"
         r"(?:prompt|contract|checklist|output-attempt\d+|stderr-attempt\d+|"
-        r"ac-attempt\d+|evidence|reconciliation|gate|result|last-error|repair-packet)"
+        r"ac-attempt\d+|evidence|reconciliation|reconciliation-summary|gate|quality|"
+        r"result|last-error|repair-packet|reset-marker|baseline|"
+        r"attempt\d+-commit|obligation-closure-attempt\d+)"
         r"\.(?:md|json|jsonl|txt)$"
+    ),
+    re.compile(r"^tasks/[^/]+/context-pack/runtime/run-phases\.lock$"),
+    re.compile(r"^tasks/[^/]+/context-pack/runtime/evaluation-last-message\.json$"),
+    re.compile(
+        r"^tasks/[^/]+/context-pack/runtime/evaluation-repair\d+-"
+        r"(?:prompt|output|stderr|last-message|result)\.(?:md|json|jsonl|txt)$"
     ),
 ]
 SCOPE_POLICY_CACHE: dict[str, Any] = {}
@@ -258,6 +270,35 @@ def extract_bash_write_paths(command: str) -> list[str]:
     for simple_command in _split_simple_commands(tokens):
         paths.extend(_simple_command_write_paths(simple_command))
     return paths
+
+
+def _extract_path_fields(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        result: list[str] = []
+        for key, item in value.items():
+            if key in {"file_path", "path", "new_path", "notebook_path"} and isinstance(item, str):
+                result.append(item)
+            else:
+                result.extend(_extract_path_fields(item))
+        return result
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            result.extend(_extract_path_fields(item))
+        return result
+    return []
+
+
+def extract_tool_write_paths(event: dict[str, Any]) -> list[str]:
+    tool_name = str(event.get("tool_name") or "")
+    text = tool_text(event)
+    if tool_name == "apply_patch" or "*** Begin Patch" in text:
+        return extract_patch_paths(text)
+    if tool_name == "Bash":
+        return extract_bash_write_paths(shell_command(event))
+    if tool_name in set(SUPPORTED_WRITE_TOOLS) - {"Bash", "apply_patch"}:
+        return _extract_path_fields(event.get("tool_input"))
+    return []
 
 
 def normalize_repo_path(root: Path, raw_path: str) -> str | None:
