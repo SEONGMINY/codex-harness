@@ -2940,6 +2940,8 @@ def run_evaluation(root: Path, task_path: Path, args: argparse.Namespace) -> int
         command.append("--full-auto")
     if args.yolo:
         command.append("--yolo")
+    if getattr(args, "strict_current_harness", False):
+        command.append("--strict-current-harness")
     command.extend(["--codex-max-runtime", str(getattr(args, "codex_max_runtime", 1800))])
     command.append("--task-lock-held")
     command.append("--repo-lock-held")
@@ -3244,7 +3246,12 @@ def verify_task(
 
 def finalize_completed_task(root: Path, task_path: Path, args: argparse.Namespace) -> int:
     generate_relationship_graph(root, task_path)
-    if verify_task(root, task_path, timeout=getattr(args, "subprocess_timeout", 1800)) != 0:
+    if verify_task(
+        root,
+        task_path,
+        strict_current_harness=getattr(args, "strict_current_harness", False),
+        timeout=getattr(args, "subprocess_timeout", 1800),
+    ) != 0:
         update_top_index(root, task_path.name, "error")
         args.failed = True
         return 1
@@ -3258,6 +3265,7 @@ def finalize_completed_task(root: Path, task_path: Path, args: argparse.Namespac
             root,
             task_path,
             require_evaluation=True,
+            strict_current_harness=getattr(args, "strict_current_harness", False),
             timeout=getattr(args, "subprocess_timeout", 1800),
         ) != 0:
             update_top_index(root, task_path.name, "error")
@@ -3345,7 +3353,12 @@ def execute_phase(
     phase = pending_phase(task_index)
     if not phase:
         if not args.dry_run:
-            if verify_task(root, task_path, timeout=getattr(args, "subprocess_timeout", 1800)) != 0:
+            if verify_task(
+                root,
+                task_path,
+                strict_current_harness=getattr(args, "strict_current_harness", False),
+                timeout=getattr(args, "subprocess_timeout", 1800),
+            ) != 0:
                 args.failed = True
                 update_top_index(root, task_path.name, "error")
                 return False
@@ -3364,10 +3377,11 @@ def execute_phase(
     if verify_task(
         root,
         task_path,
-        strict_current_harness=False,
+        strict_current_harness=getattr(args, "strict_current_harness", False),
         timeout=getattr(args, "subprocess_timeout", 1800),
     ) != 0:
         preflight_errors.append("Task verification failed before phase execution.")
+    preflight_errors.extend(current_policy_lineage_errors(task_path))
     preflight_errors.extend(nested_codex_preflight_errors(args))
     preflight_errors.extend(preflight_phase(root, task_path, task_index, phase))
     if preflight_errors:

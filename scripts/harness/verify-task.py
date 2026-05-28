@@ -1387,6 +1387,34 @@ def validate_phase_result(
         errors.append(f"`attempt` must match task index attempts ({expected_attempt}).")
     if result.get("codex_exit_code") != 0:
         errors.append("`codex_exit_code` must be 0 for a completed phase.")
+    approved_policy_packs, lineage_errors = approved_policy_pack_lineage(root, task_path)
+    errors.extend(lineage_errors)
+    policy_pack = result.get("policy_pack")
+    if strict_current_harness or policy_pack is not None:
+        errors.extend(
+            validate_policy_pack_metadata(
+                policy_pack,
+                f"Phase {phase_number} result",
+                strict_current=strict_current_harness,
+                approved_fingerprints=approved_policy_packs or None,
+            )
+        )
+    if strict_current_harness or result.get("runner_version") is not None:
+        errors.extend(
+            validate_runner_version(
+                result.get("runner_version"),
+                f"Phase {phase_number} result",
+                strict_current=strict_current_harness,
+            )
+        )
+    if strict_current_harness or result.get("harness_attestation") is not None:
+        errors.extend(
+            validate_harness_attestation_metadata(
+                result.get("harness_attestation"),
+                f"Phase {phase_number} result",
+                strict_current=strict_current_harness,
+            )
+        )
     errors.extend(require_string_list(result.get("changed_files"), "changed_files"))
     errors.extend(validate_commands_run(result.get("commands_run"), expected_commands))
     if result.get("tests_passed") is not True:
@@ -1405,6 +1433,18 @@ def validate_phase_result(
         )
     )
     artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+    if isinstance(attempt, int) and (strict_current_harness or isinstance(policy_pack, dict)):
+        errors.extend(
+            validate_ac_results_metadata(
+                root,
+                task_path,
+                phase_number,
+                attempt,
+                artifacts,
+                policy_pack if isinstance(policy_pack, dict) else None,
+                approved_policy_packs=approved_policy_packs or None,
+            )
+        )
     expected_handoff_paths = set()
     if isinstance(expected_attempt, int) and expected_attempt > 0:
         expected_handoff_paths.add(f"context-pack/runtime/phase{phase_number}-handoff-attempt{expected_attempt}.md")
@@ -1419,7 +1459,18 @@ def validate_phase_result(
     if "attempt_commit" not in artifacts:
         errors.append("Phase result artifacts must include attempt_commit.")
     elif isinstance(attempt, int):
-        errors.extend(validate_phase_attempt_commit(root, task_path, phase_number, attempt, result_path, result, artifacts))
+        errors.extend(
+            validate_phase_attempt_commit(
+                root,
+                task_path,
+                phase_number,
+                attempt,
+                result_path,
+                result,
+                artifacts,
+                strict_current_harness=strict_current_harness,
+            )
+        )
     if isinstance(attempt, int):
         try:
             contract_path = None
@@ -1480,6 +1531,8 @@ def validate_phase_attempt_commit(
     result_path: Path,
     result_data: dict[str, Any],
     artifacts: dict[str, Any],
+    *,
+    strict_current_harness: bool = False,
 ) -> list[str]:
     raw_path = artifacts.get("attempt_commit")
     if not isinstance(raw_path, str):
@@ -1493,6 +1546,58 @@ def validate_phase_attempt_commit(
     except (OSError, json.JSONDecodeError) as exc:
         return [f"Invalid attempt_commit JSON: {rel(root, commit_path)}: {exc}"]
     errors: list[str] = []
+    approved_policy_packs, lineage_errors = approved_policy_pack_lineage(root, task_path)
+    errors.extend(lineage_errors)
+    if strict_current_harness or "schema_version" in commit:
+        if commit.get("schema_version") != 1:
+            errors.append("attempt_commit schema_version must be 1.")
+    if strict_current_harness or "commit_scope" in commit:
+        if commit.get("commit_scope") != "runtime_attempt_bundle":
+            errors.append('attempt_commit commit_scope must be "runtime_attempt_bundle".')
+    if strict_current_harness or "status" in commit:
+        if commit.get("status") != "committed":
+            errors.append('attempt_commit status must be "committed".')
+    commit_policy_pack = commit.get("policy_pack")
+    result_policy_pack = result_data.get("policy_pack")
+    if (
+        isinstance(commit_policy_pack, dict)
+        and isinstance(result_policy_pack, dict)
+        and commit_policy_pack != result_policy_pack
+    ):
+        errors.append("attempt_commit policy_pack does not match phase result.")
+    if strict_current_harness or commit_policy_pack is not None:
+        errors.extend(
+            validate_policy_pack_metadata(
+                commit_policy_pack,
+                "attempt_commit",
+                strict_current=strict_current_harness,
+                approved_fingerprints=approved_policy_packs or None,
+            )
+        )
+    if strict_current_harness or commit.get("runner_version") is not None:
+        errors.extend(
+            validate_runner_version(
+                commit.get("runner_version"),
+                "attempt_commit",
+                strict_current=strict_current_harness,
+            )
+        )
+    result_attestation = result_data.get("harness_attestation")
+    commit_attestation = commit.get("harness_attestation")
+    if (
+        isinstance(commit_attestation, dict)
+        and isinstance(result_attestation, dict)
+        and commit_attestation != result_attestation
+    ):
+        errors.append("attempt_commit harness_attestation does not match phase result.")
+    if strict_current_harness or commit_attestation is not None:
+        errors.extend(
+            validate_harness_attestation_metadata(
+                commit_attestation,
+                "attempt_commit",
+                strict_current=strict_current_harness,
+            )
+        )
     if commit.get("phase") != phase_number or commit.get("attempt") != attempt:
         errors.append("attempt_commit phase/attempt does not match phase result.")
     if "reset_generation" in commit or "reset_generation" in result_data:

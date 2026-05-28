@@ -374,6 +374,11 @@ def main() -> int:
     parser.add_argument("--task-lock-held", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--repo-lock-held", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
+        "--strict-current-harness",
+        action="store_true",
+        help="Require evaluation to use the current harness policy lineage.",
+    )
+    parser.add_argument(
         "--repo-lock-timeout",
         type=int,
         default=0,
@@ -404,6 +409,13 @@ def main() -> int:
                 )
             except RuntimeError as exc:
                 print(f"Another codex-harness repo execution is active: {exc}", file=sys.stderr)
+                return 1
+
+        if args.strict_current_harness:
+            lineage_errors = current_policy_lineage_errors(task_path)
+            if lineage_errors:
+                for error in lineage_errors:
+                    print(error, file=sys.stderr)
                 return 1
 
         task_index = read_json(task_path / "index.json")

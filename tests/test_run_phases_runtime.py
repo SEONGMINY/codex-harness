@@ -2149,6 +2149,91 @@ class RunCodexRuntimeTest(unittest.TestCase):
             ).read_text(encoding="utf-8")
             self.assertIn("Task verification failed before phase execution.", last_error)
 
+    def test_execute_phase_forwards_strict_current_harness_to_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "docs": [],
+                        "common_docs": [],
+                        "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=1,
+                ac_timeout=600,
+                codex_bin=str(tmp / "unused-codex"),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+                subprocess_timeout=1800,
+                strict_current_harness=True,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=1) as verify_task,
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            verify_task.assert_called_once_with(root, task_path, strict_current_harness=True, timeout=1800)
+
+    def test_execute_phase_blocks_when_current_policy_lineage_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "docs": [],
+                        "common_docs": [],
+                        "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=1,
+                ac_timeout=600,
+                codex_bin=str(tmp / "unused-codex"),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+                subprocess_timeout=1800,
+                strict_current_harness=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "current_policy_lineage_errors", return_value=["Current policy pack is stale."]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "run_install_preflight") as install_preflight,
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            install_preflight.assert_not_called()
+            self.assertTrue(args.failed)
+            last_error = (
+                task_path / "context-pack" / "runtime" / "phase0-last-error.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn("Current policy pack is stale.", last_error)
+
     def test_execute_phase_marks_install_lock_contention_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -2382,6 +2467,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 eval_command=["npm test"],
                 full_auto=True,
                 yolo=True,
+                strict_current_harness=True,
                 codex_max_runtime=1800,
                 subprocess_timeout=1800,
             )
@@ -2411,6 +2497,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertIn("npm test", calls[3])
             self.assertIn("--full-auto", calls[3])
             self.assertIn("--yolo", calls[3])
+            self.assertIn("--strict-current-harness", calls[3])
             self.assertIn("--codex-max-runtime", calls[3])
             self.assertEqual(calls[3][calls[3].index("--codex-max-runtime") + 1], "1800")
             self.assertIn("--task-lock-held", calls[3])
@@ -2681,7 +2768,10 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 self.assertEqual(RUN_PHASES.finalize_completed_task(root, task_path, args), 1)
 
             self.assertEqual(verify.call_count, 2)
-            self.assertEqual(verify.call_args_list[1].kwargs, {"require_evaluation": True, "timeout": 1800})
+            self.assertEqual(
+                verify.call_args_list[1].kwargs,
+                {"require_evaluation": True, "strict_current_harness": False, "timeout": 1800},
+            )
             top_index = json.loads((root / "tasks" / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(top_index["tasks"][0]["status"], "error")
             self.assertIn("failed_at", top_index["tasks"][0])
@@ -2705,12 +2795,41 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 self.assertEqual(RUN_PHASES.finalize_completed_task(root, task_path, args), 0)
 
             self.assertEqual(verify.call_count, 2)
-            self.assertEqual(verify.call_args_list[1].kwargs, {"require_evaluation": True, "timeout": 1800})
+            self.assertEqual(
+                verify.call_args_list[1].kwargs,
+                {"require_evaluation": True, "strict_current_harness": False, "timeout": 1800},
+            )
             top_index = json.loads((root / "tasks" / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(top_index["tasks"][0]["status"], "completed")
             self.assertIn("completed_at", top_index["tasks"][0])
             self.assertNotIn("failed_at", top_index["tasks"][0])
             self.assertFalse(args.failed)
+
+    def test_finalize_completed_task_forwards_strict_current_harness_to_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (root / "tasks" / "index.json").write_text(
+                json.dumps({"tasks": [{"dir": "demo", "status": "running"}]}) + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(evaluate=True, failed=False, strict_current_harness=True)
+
+            with (
+                mock.patch.object(RUN_PHASES, "generate_relationship_graph"),
+                mock.patch.object(RUN_PHASES, "verify_task", side_effect=[0, 0]) as verify,
+                mock.patch.object(RUN_PHASES, "run_evaluation_review_loop", return_value=0),
+            ):
+                self.assertEqual(RUN_PHASES.finalize_completed_task(root, task_path, args), 0)
+
+            self.assertEqual(verify.call_count, 2)
+            self.assertEqual(
+                verify.call_args_list[0].kwargs,
+                {"strict_current_harness": True, "timeout": 1800},
+            )
+            self.assertEqual(
+                verify.call_args_list[1].kwargs,
+                {"require_evaluation": True, "strict_current_harness": True, "timeout": 1800},
+            )
 
     def test_evaluation_improvement_records_repo_content_attestation(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

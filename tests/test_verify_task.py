@@ -2908,6 +2908,108 @@ classDiagram
 
             self.assertEqual(errors, [])
 
+    def test_strict_phase_result_rejects_stale_runtime_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            handoff_dir = task_path / "context-pack" / "handoffs"
+            runtime_dir.mkdir(parents=True)
+            handoff_dir.mkdir(parents=True)
+            for relative in [
+                "context-pack/runtime/phase0-prompt.md",
+                "context-pack/runtime/phase0-output-attempt1.jsonl",
+                "context-pack/runtime/phase0-stderr-attempt1.txt",
+                "context-pack/runtime/phase0-quality.json",
+                "context-pack/handoffs/phase0.md",
+            ]:
+                path = task_path / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("ok\n", encoding="utf-8")
+            current_policy = VERIFY_TASK.policy_pack_metadata()
+            stale_policy = {
+                key: value
+                for key, value in current_policy.items()
+                if key in {"id", "schema_version", "sha256"}
+            }
+            stale_policy["sha256"] = "stale"
+            stale_attestation = VERIFY_TASK.harness_attestation()
+            stale_attestation["digest"] = "stale"
+            ac_path = runtime_dir / "phase0-ac-attempt1.json"
+            ac_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "phase": 0,
+                        "attempt": 1,
+                        "policy_pack": current_policy,
+                        "commands": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result_path = runtime_dir / "phase0-result.json"
+            result = {
+                "phase": 0,
+                "status": "completed",
+                "attempt": 1,
+                "runner_version": "0.0.0",
+                "policy_pack": stale_policy,
+                "harness_attestation": stale_attestation,
+                "codex_exit_code": 0,
+                "changed_files": [],
+                "commands_run": [{"command": "true", "exit_code": 0}],
+                "tests_passed": True,
+                "required_outputs": [{"path": "context-pack/handoffs/phase0.md", "exists": True}],
+                "artifacts": {
+                    "prompt": "context-pack/runtime/phase0-prompt.md",
+                    "stdout": "context-pack/runtime/phase0-output-attempt1.jsonl",
+                    "stderr": "context-pack/runtime/phase0-stderr-attempt1.txt",
+                    "ac_results": "context-pack/runtime/phase0-ac-attempt1.json",
+                    "quality": "context-pack/runtime/phase0-quality.json",
+                    "handoff": "context-pack/handoffs/phase0.md",
+                    "attempt_commit": "context-pack/runtime/phase0-attempt1-commit.json",
+                },
+            }
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            (runtime_dir / "phase0-attempt1-commit.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "runner_version": "0.0.0",
+                        "commit_scope": "runtime_attempt_bundle",
+                        "phase": 0,
+                        "attempt": 1,
+                        "status": "committed",
+                        "policy_pack": stale_policy,
+                        "harness_attestation": stale_attestation,
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result.json",
+                            "sha256": VERIFY_TASK.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                        "artifact_count": 0,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.validate_phase_result(
+                root,
+                task_path,
+                0,
+                ["true"],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                strict_current_harness=True,
+            )
+
+            self.assertTrue(any("runner_version must match current" in error for error in errors), errors)
+            self.assertTrue(any("policy_pack does not match current" in error for error in errors), errors)
+            self.assertTrue(any("harness_attestation" in error for error in errors), errors)
+
     def test_completed_phase_result_rejects_alias_fallback_when_expected_attempt_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "repo"

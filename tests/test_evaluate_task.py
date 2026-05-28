@@ -339,6 +339,53 @@ class EvaluateTaskTest(unittest.TestCase):
 
             self.assertTrue(any("active_policy_pack" in error for error in errors), errors)
 
+    def test_strict_current_harness_blocks_stale_policy_before_writing_evaluation_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            task_path = root / "tasks" / "demo"
+            static_dir = task_path / "context-pack" / "static"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            static_dir.mkdir(parents=True)
+            runtime_dir.mkdir(parents=True)
+            current = {
+                key: value
+                for key, value in EVALUATE_TASK.runtime_policy_pack().items()
+                if key in {"id", "schema_version", "sha256"}
+            }
+            stale = dict(current)
+            stale["sha256"] = "stale"
+            (static_dir / "design-approval.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "active_policy_pack": stale,
+                        "approved_policy_packs": [stale],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(HARNESS_DIR / "evaluate-task.py"),
+                    "demo",
+                    "--root",
+                    str(root),
+                    "--dry-run",
+                    "--strict-current-harness",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("active_policy_pack", result.stderr)
+            self.assertFalse((runtime_dir / "evaluation-command-results.json").exists())
+            self.assertFalse((runtime_dir / "evaluation-prompt.md").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
