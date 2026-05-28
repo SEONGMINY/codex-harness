@@ -415,6 +415,18 @@ def top_index_lock_path(root: Path) -> Path:
     return root / ".codex" / "harness" / "tasks-index.lock"
 
 
+def is_adoptable_task_orphan(path: Path) -> bool:
+    if not path.is_dir() or path.is_symlink():
+        return False
+    try:
+        next(path.iterdir())
+    except StopIteration:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def next_task_identity(top_index: dict, tasks_root: Path, task_name: str) -> tuple[int, str]:
     used_ids = []
     registered_dirs = set()
@@ -428,7 +440,10 @@ def next_task_identity(top_index: dict, tasks_root: Path, task_name: str) -> tup
     next_id = max(used_ids, default=-1) + 1
     while True:
         task_dir = f"{next_id}-{task_name}"
-        if task_dir not in registered_dirs:
+        candidate = tasks_root / task_dir
+        if task_dir not in registered_dirs and (
+            not candidate.exists() or is_adoptable_task_orphan(candidate)
+        ):
             return next_id, task_dir
         next_id += 1
 

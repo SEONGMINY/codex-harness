@@ -171,6 +171,25 @@ class InitTaskTest(unittest.TestCase):
             self.assertEqual(top_index["tasks"][0]["id"], 0)
             self.assertEqual(top_index["tasks"][0]["dir"], "0-recording-flow")
 
+    def test_task_creation_skips_partial_unregistered_orphan_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp) / "repo"
+            repo.mkdir()
+            orphan = repo / "tasks" / "0-recording-flow"
+            orphan_docs = orphan / "docs"
+            orphan_docs.mkdir(parents=True)
+            (orphan_docs / "prd.md").write_text("stale partial task\n", encoding="utf-8")
+
+            result = self.run_init_task(repo)
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertFalse((orphan / "index.json").exists())
+            self.assertEqual((orphan_docs / "prd.md").read_text(encoding="utf-8"), "stale partial task\n")
+            self.assertTrue((repo / "tasks" / "1-recording-flow" / "index.json").exists())
+            top_index = json.loads((repo / "tasks" / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(top_index["tasks"][0]["id"], 1)
+            self.assertEqual(top_index["tasks"][0]["dir"], "1-recording-flow")
+
 
 if __name__ == "__main__":
     unittest.main()
