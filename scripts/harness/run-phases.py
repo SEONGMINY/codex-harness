@@ -49,6 +49,7 @@ from policy_lineage import (
     stable_json_sha256,
     validate_current_policy_lineage,
 )
+from scope_policy import required_output_repo_paths, traceable_changed_files
 
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
@@ -120,6 +121,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "verify-task.py",
         root / ".codex" / "harness" / "scripts" / "run-quality-checks.py",
         root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
+        root / ".codex" / "harness" / "scripts" / "scope_policy.py",
     ]
     missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
     if missing_required:
@@ -902,15 +904,6 @@ def ignored_gate_paths(task_path: Path, required_outputs: list[str]) -> list[str
     ]
 
 
-def traceable_changed_files(task_path: Path, changed_files: list[str], required_outputs: list[str]) -> list[str]:
-    ignored_paths = ignored_gate_paths(task_path, required_outputs)
-    return [
-        path
-        for path in changed_files
-        if not path_allowed(path, ignored_paths)
-    ]
-
-
 def attempt_scope_violations(
     contract: dict | None,
     task_path: Path,
@@ -1469,10 +1462,6 @@ def write_phase_result(
     result["artifacts"]["attempt_commit"] = task_relative(phase_attempt_commit_path(task_path, phase_number, attempt), task_path)
     write_json(result_path, result)
     return result_path
-
-
-def required_output_repo_paths(task_path: Path, required_outputs: list[str]) -> list[str]:
-    return [f"tasks/{task_path.name}/{raw_path.strip('/')}" for raw_path in required_outputs]
 
 
 def _artifact_entry(name: str, task_path: Path, raw_path: object) -> dict[str, object] | None:

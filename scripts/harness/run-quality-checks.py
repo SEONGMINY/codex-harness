@@ -9,13 +9,13 @@ import os
 import shutil
 import sys
 import shlex
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
 from artifact_io import atomic_write_json
 from command_policy import run_command
 from redaction import redact_text
+from scope_policy import contract_allowed_paths, normalize_path, path_allowed
 
 CODE_EXTENSIONS = {
     ".c",
@@ -87,44 +87,13 @@ def repo_changed_files(root: Path) -> list[str]:
     return sorted(changed)
 
 
-def normalize_path(raw_path: str) -> str:
-    return raw_path.strip().lstrip("./")
-
-
-def path_allowed(path: str, allowed_paths: list[str]) -> bool:
-    if not allowed_paths:
-        return True
-    normalized = normalize_path(path)
-    for pattern in allowed_paths:
-        item = normalize_path(pattern)
-        if not item:
-            continue
-        if item.endswith("/**"):
-            prefix = item[:-3].rstrip("/")
-            if normalized == prefix or normalized.startswith(f"{prefix}/"):
-                return True
-        if fnmatchcase(normalized, item):
-            return True
-        if normalized == item or normalized.startswith(f"{item.rstrip('/')}/"):
-            return True
-    return False
-
-
-def contract_allowed_paths(contract: dict[str, Any]) -> list[str]:
-    scope = contract.get("scope")
-    if not isinstance(scope, dict):
-        return []
-    values = scope.get("allowed_paths")
-    if not isinstance(values, list):
-        return []
-    return [item for item in values if isinstance(item, str) and item.strip()]
-
-
 def changed_files_from_args(root: Path, raw_files: list[str], contract: dict[str, Any]) -> list[str]:
     files = [normalize_path(item) for item in raw_files if item.strip()]
     if not files:
         files = repo_changed_files(root)
     allowed = contract_allowed_paths(contract)
+    if not allowed:
+        return sorted(files if raw_files else [])
     return sorted(path for path in files if path_allowed(path, allowed))
 
 

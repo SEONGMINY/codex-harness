@@ -659,6 +659,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "review-phase-plan.py",
         root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
         root / ".codex" / "harness" / "scripts" / "gen-relationship-graph.py",
+        root / ".codex" / "harness" / "scripts" / "scope_policy.py",
     ]
     missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
     if missing_required:

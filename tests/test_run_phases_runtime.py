@@ -58,6 +58,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 "verify-task.py",
                 "run-quality-checks.py",
                 "relationship_graph.py",
+                "scope_policy.py",
                 "policy-packs/default-security.json",
                 "schemas/phase-final.schema.json",
                 "schemas/evaluation-final.schema.json",

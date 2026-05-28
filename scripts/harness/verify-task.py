@@ -58,6 +58,7 @@ from policy_lineage import (
     stable_json_sha256,
     validate_current_policy_lineage,
 )
+from scope_policy import required_output_repo_paths, traceable_changed_files
 
 
 HARNESS_VERSION = "0.1.5"
@@ -967,29 +968,6 @@ def validate_phase_reconciliation(root: Path, path: Path) -> list[str]:
     if any(item.get("status") == "unverified" for item in reconciliation.get("instruction_results") if isinstance(item, dict)):
         return [f"Phase reconciliation instruction_results must not be unverified: {rel(root, path)}"]
     return []
-
-
-def required_output_repo_paths(task_path: Path, required_outputs: list[str]) -> list[str]:
-    return [f"tasks/{task_path.name}/{raw_path.strip('/')}" for raw_path in required_outputs]
-
-
-def traceable_changed_files(task_path: Path, changed_files: list[str], required_outputs: list[str]) -> list[str]:
-    ignored_paths = required_output_repo_paths(task_path, required_outputs)
-    return [
-        path
-        for path in changed_files
-        if not path_allowed(path, ignored_paths)
-    ]
-
-
-def contract_allowed_paths(contract: dict) -> list[str]:
-    scope = contract.get("scope")
-    if not isinstance(scope, dict):
-        return []
-    values = scope.get("allowed_paths")
-    if not isinstance(values, list):
-        return []
-    return [item for item in values if isinstance(item, str) and item.strip()]
 
 
 def validate_runtime_contract_bundle(

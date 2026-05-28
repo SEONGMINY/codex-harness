@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import sys
+import importlib.util
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -34,6 +35,7 @@ RUNNER_OWNED_PATTERNS = [
         r"\.(?:md|json|jsonl|txt)$"
     ),
 ]
+SCOPE_POLICY_CACHE: dict[str, Any] = {}
 
 
 @dataclass(frozen=True)
@@ -298,7 +300,32 @@ def required_output_repo_paths(ctx: HarnessContext) -> list[str]:
     return [f"{task_rel}/{path.strip('/')}" for path in contract_required_outputs(ctx.contract)]
 
 
-def path_allowed(path: str, allowed_paths: list[str]) -> bool:
+def scope_policy_module(root: Path) -> Any | None:
+    candidates = [
+        root / ".codex" / "harness" / "scripts" / "scope_policy.py",
+        root / "scripts" / "harness" / "scope_policy.py",
+    ]
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        cache_key = str(candidate.resolve())
+        if cache_key in SCOPE_POLICY_CACHE:
+            return SCOPE_POLICY_CACHE[cache_key]
+        spec = importlib.util.spec_from_file_location("codex_harness_scope_policy", candidate)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        SCOPE_POLICY_CACHE[cache_key] = module
+        return module
+    return None
+
+
+def path_allowed(path: str, allowed_paths: list[str], root: Path | None = None) -> bool:
+    if root is not None:
+        module = scope_policy_module(root)
+        if module is not None:
+            return bool(module.path_allowed(path, allowed_paths))
     normalized = path.strip("/")
     for raw_allowed in allowed_paths:
         allowed = raw_allowed.strip("/")
@@ -355,7 +382,7 @@ def scope_violations(ctx: HarnessContext, raw_paths: list[str]) -> list[str]:
         if runner_owned(path):
             violations.append(f"{path} (runner-owned)")
             continue
-        if not path_allowed(path, allowed):
+        if not path_allowed(path, allowed, ctx.root):
             violations.append(path)
     return sorted(set(violations))
 

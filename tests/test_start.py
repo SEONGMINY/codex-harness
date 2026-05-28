@@ -115,6 +115,10 @@ class StartLauncherTest(unittest.TestCase):
             "# phase semantics helper\n",
             encoding="utf-8",
         )
+        (repo / ".codex" / "harness" / "scripts" / "scope_policy.py").write_text(
+            "# scope policy helper\n",
+            encoding="utf-8",
+        )
         (repo / ".codex" / "harness" / "scripts" / "policy_lineage.py").write_text(
             "# policy lineage helper\n",
             encoding="utf-8",
