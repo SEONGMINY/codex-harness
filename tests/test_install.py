@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import importlib.util
+import fcntl
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -59,6 +61,38 @@ class InstallCodexHarnessTest(unittest.TestCase):
                 )
 
             self.assertEqual((target_skill / "SKILL.md").read_text(encoding="utf-8"), "existing skill\n")
+
+    def test_project_install_fails_when_install_lock_is_held(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            target = tmp / "target"
+            target.mkdir()
+            lock_path = target / INSTALL_MODULE.PROJECT_INSTALL_LOCK_TARGET
+            lock_path.parent.mkdir(parents=True)
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o666)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(INSTALLER),
+                        str(target),
+                        "--scope",
+                        "project",
+                        "--force",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Another codex-harness project install is active", result.stderr)
+            self.assertFalse((target / ".codex" / "harness" / "scripts" / "start.py").exists())
 
     def test_bootstrap_uses_local_installer_for_harness_source_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

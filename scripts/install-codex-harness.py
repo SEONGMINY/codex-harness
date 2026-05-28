@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import importlib.util
 import json
 import os
@@ -21,6 +23,7 @@ INSTALL_FILES = [
     (Path("codex-harness.json"), Path("codex-harness.json")),
 ]
 PROJECT_INSTALL_MANIFEST_TARGET = Path(".codex") / "harness" / "install-manifest.json"
+PROJECT_INSTALL_LOCK_TARGET = Path(".codex") / "harness" / "install.lock"
 LEGACY_PROJECT_SCRIPT_TARGET = Path("scripts") / "harness"
 PROJECT_LOCAL_SKILL_TARGET = Path(".agents") / "skills" / "codex-harness"
 PROJECT_RUNTIME_SKILL_TARGET = Path(".codex") / "harness" / "scripts" / "skill"
@@ -90,6 +93,24 @@ def copy_optional_file(source: Path, target: Path, force: bool) -> bool:
         return False
     copy_file(source, target, force)
     return True
+
+
+@contextmanager
+def project_install_lock(target_root: Path):
+    path = target_root / PROJECT_INSTALL_LOCK_TARGET
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(f"Another codex-harness project install is active: {path}") from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def ensure_gitignore_entries(target_root: Path, entries: list[str]) -> None:
@@ -252,6 +273,18 @@ def install_project(
     if not target_root.exists() or not target_root.is_dir():
         raise FileNotFoundError(f"Target directory does not exist: {target_root}")
     ensure_project_install_sources(source_root, with_hooks)
+
+    with project_install_lock(target_root):
+        install_project_locked(source_root, target_root, force, with_hooks, optional_hooks)
+
+
+def install_project_locked(
+    source_root: Path,
+    target_root: Path,
+    force: bool,
+    with_hooks: bool,
+    optional_hooks: bool,
+) -> None:
 
     legacy_scripts = target_root / LEGACY_PROJECT_SCRIPT_TARGET
     source_legacy_scripts = source_root / LEGACY_PROJECT_SCRIPT_TARGET
@@ -558,7 +591,7 @@ def main() -> int:
                 install_user_hooks(source_root, user_home, args.force, args.optional_hooks)
             elif args.optional_hooks:
                 raise ValueError("--optional-hooks requires --user-hooks when --scope is user-only")
-    except (FileExistsError, FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+    except (FileExistsError, FileNotFoundError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
