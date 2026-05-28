@@ -50,6 +50,7 @@ from phase_contract import (
 )
 from phase_semantics import analyze_phase
 from command_policy import run_command
+from env_policy import sanitized_env
 from harness_attestation import attestation_fingerprint, harness_attestation
 from obligation_ledger import build_phase_obligation_assertion_outcomes, design_obligations_by_id
 from policy_pack import policy_pack_metadata
@@ -61,6 +62,7 @@ from policy_lineage import (
     validate_current_policy_lineage,
 )
 from scope_policy import required_output_repo_paths, traceable_changed_files
+from redaction import redact_text
 
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
@@ -311,18 +313,19 @@ def run_install_preflight(root: Path, task_path: Path, args: argparse.Namespace)
         result = subprocess.run(
             command,
             cwd=root,
+            env=sanitized_env(allow_harness_policy_controls=True),
             text=True,
             capture_output=True,
             timeout=getattr(args, "install_timeout", 600),
             check=False,
         )
         exit_code = result.returncode
-        output = (result.stdout + result.stderr).strip()
+        output = redact_text(subprocess_output_text(result.stdout) + subprocess_output_text(result.stderr)).strip()
         completed_at = now()
         lock_error = None
     except subprocess.TimeoutExpired as exc:
         exit_code = 124
-        output = ((exc.stdout or "") + (exc.stderr or "")).strip()
+        output = redact_text(subprocess_output_text(exc.stdout) + subprocess_output_text(exc.stderr)).strip()
         output = (output + f"\nTimed out after {getattr(args, 'install_timeout', 600)} seconds.").strip()
         completed_at = now()
         lock_error = None
@@ -338,6 +341,10 @@ def run_install_preflight(root: Path, task_path: Path, args: argparse.Namespace)
         "started_at": started_at,
         "completed_at": completed_at,
         "exit_code": exit_code,
+        "env_sanitized": True,
+        "output_redacted": True,
+        "install_timeout_seconds": getattr(args, "install_timeout", 600),
+        "policy_pack": runtime_policy_pack(),
         "output_tail": truncate_text(output, 6_000),
     }
     if lock_error is not None:
@@ -351,6 +358,14 @@ def run_install_preflight(root: Path, task_path: Path, args: argparse.Namespace)
             f"See {install_preflight_path(task_path).relative_to(root)}"
         ]
     return []
+
+
+def subprocess_output_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 def resolve_task_path(root: Path, task_arg: str) -> Path:

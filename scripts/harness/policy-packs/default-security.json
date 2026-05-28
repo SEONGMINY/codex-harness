@@ -62,6 +62,7 @@
     "replacement": "[REDACTED]",
     "secret_patterns": [
       "(?i)\\b(api[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|service[_-]?role[_-]?key|secret|password|passwd|pwd)\\b\\s*[:=]\\s*([\\\"']?)[^\\s\\\"']{8,}\\2",
+      "(?i)\\b(?:npm[_-]?token|node[_-]?auth[_-]?token|npm_config_[^\\s=]*_authToken|_authToken)\\b\\s*[:=]\\s*([\\\"']?)[^\\s\\\"']{8,}\\1",
       "\\bsk-[A-Za-z0-9_-]{20,}\\b",
       "\\bghp_[A-Za-z0-9_]{20,}\\b",
       "\\bgithub_pat_[A-Za-z0-9_]{20,}\\b",

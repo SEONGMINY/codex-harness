@@ -2651,6 +2651,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             pnpm.write_text(
                 "#!/usr/bin/env python3\n"
                 "import time\n"
+                "print('api_key=sk-timeoutabcdefghijklmnopqrstuvwxyz123456', flush=True)\n"
                 "time.sleep(2)\n",
                 encoding="utf-8",
             )
@@ -2666,7 +2667,68 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertTrue(any("exited 124" in error for error in errors), errors)
             payload = json.loads(RUN_PHASES.install_preflight_path(task_path).read_text(encoding="utf-8"))
             self.assertEqual(payload["exit_code"], 124)
+            self.assertIn("[REDACTED]", payload["output_tail"])
+            self.assertNotIn("sk-timeout", payload["output_tail"])
             self.assertFalse(RUN_PHASES.install_preflight_lock_path(root).exists())
+
+    def test_install_preflight_sanitizes_env_and_redacts_output(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (root / "package.json").write_text('{"packageManager":"pnpm@9.0.0"}\n', encoding="utf-8")
+            (root / "pnpm-workspace.yaml").write_text("packages: []\n", encoding="utf-8")
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            pnpm = fake_bin / "pnpm"
+            pnpm.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os\n"
+                "print('NPM_TOKEN=' + os.environ.get('NPM_TOKEN', 'missing'))\n"
+                "print('OPENAI_API_KEY=' + os.environ.get('OPENAI_API_KEY', 'missing'))\n"
+                "print('api_key=sk-abcdefghijklmnopqrstuvwxyz123456')\n"
+                "print('//registry.npmjs.org/:_authToken=npm_secret_token_1234567890')\n"
+                "raise SystemExit(1)\n",
+                encoding="utf-8",
+            )
+            pnpm.chmod(pnpm.stat().st_mode | 0o111)
+            old_path = os.environ.get("PATH", "")
+            old_npm_token = os.environ.get("NPM_TOKEN")
+            old_openai_key = os.environ.get("OPENAI_API_KEY")
+            old_env_allow = os.environ.get("CODEX_HARNESS_ENV_ALLOW")
+            os.environ["PATH"] = f"{fake_bin}:{old_path}"
+            os.environ["NPM_TOKEN"] = "npm_secret_token_1234567890"
+            os.environ["OPENAI_API_KEY"] = "sk-abcdefghijklmnopqrstuvwxyz999999"
+            os.environ["CODEX_HARNESS_ENV_ALLOW"] = "NPM_TOKEN"
+            try:
+                args = argparse.Namespace(skip_install=False, install_preflight_done=False, install_timeout=10)
+                errors = RUN_PHASES.run_install_preflight(root, task_path, args)
+            finally:
+                os.environ["PATH"] = old_path
+                if old_npm_token is None:
+                    os.environ.pop("NPM_TOKEN", None)
+                else:
+                    os.environ["NPM_TOKEN"] = old_npm_token
+                if old_openai_key is None:
+                    os.environ.pop("OPENAI_API_KEY", None)
+                else:
+                    os.environ["OPENAI_API_KEY"] = old_openai_key
+                if old_env_allow is None:
+                    os.environ.pop("CODEX_HARNESS_ENV_ALLOW", None)
+                else:
+                    os.environ["CODEX_HARNESS_ENV_ALLOW"] = old_env_allow
+
+            self.assertTrue(any("exited 1" in error for error in errors), errors)
+            payload = json.loads(RUN_PHASES.install_preflight_path(task_path).read_text(encoding="utf-8"))
+            output = payload["output_tail"]
+            self.assertTrue(payload["env_sanitized"])
+            self.assertTrue(payload["output_redacted"])
+            self.assertEqual(payload["install_timeout_seconds"], 10)
+            self.assertEqual(payload["policy_pack"], RUN_PHASES.runtime_policy_pack())
+            self.assertIn("NPM_TOKEN=missing", output)
+            self.assertIn("OPENAI_API_KEY=missing", output)
+            self.assertIn("[REDACTED]", output)
+            self.assertNotIn("npm_secret_token_1234567890", output)
+            self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz", output)
 
     def test_install_preflight_lock_contention_is_retryable_failure(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
