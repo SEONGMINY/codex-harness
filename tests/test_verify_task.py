@@ -2651,6 +2651,141 @@ classDiagram
 
             self.assertTrue(any("result path does not match" in error for error in errors), errors)
 
+    def test_phase_attempt_commit_accepts_canonical_attempt_result_with_phase_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            result_data = {
+                "phase": 0,
+                "status": "completed",
+                "attempt": 1,
+                "artifacts": {"attempt_commit": "context-pack/runtime/phase0-attempt1-commit.json"},
+            }
+            alias_result_path = runtime_dir / "phase0-result.json"
+            canonical_result_path = runtime_dir / "phase0-result-attempt1.json"
+            alias_result_path.write_text(json.dumps(result_data) + "\n", encoding="utf-8")
+            canonical_result_path.write_text(json.dumps(result_data) + "\n", encoding="utf-8")
+            commit_path = runtime_dir / "phase0-attempt1-commit.json"
+            commit_path.write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result-attempt1.json",
+                            "sha256": VERIFY_TASK.file_sha256(canonical_result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.validate_phase_attempt_commit(
+                root,
+                task_path,
+                0,
+                1,
+                alias_result_path,
+                result_data,
+                result_data["artifacts"],
+            )
+
+            self.assertEqual(errors, [])
+
+    def test_completed_phase_result_uses_canonical_attempt_result_when_alias_missing_or_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            handoff_dir = task_path / "context-pack" / "handoffs"
+            runtime_dir.mkdir(parents=True)
+            handoff_dir.mkdir(parents=True)
+            for relative in [
+                "context-pack/runtime/phase0-contract-attempt1.json",
+                "context-pack/runtime/phase0-checklist-attempt1.md",
+                "context-pack/runtime/phase0-prompt-attempt1.md",
+                "context-pack/runtime/phase0-output-attempt1.jsonl",
+                "context-pack/runtime/phase0-stderr-attempt1.txt",
+                "context-pack/runtime/phase0-ac-attempt1.json",
+                "context-pack/runtime/phase0-quality.json",
+                "context-pack/runtime/phase0-handoff-attempt1.md",
+                "context-pack/handoffs/phase0.md",
+            ]:
+                path = task_path / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("ok\n", encoding="utf-8")
+            result_path = runtime_dir / "phase0-result-attempt1.json"
+            result = {
+                "phase": 0,
+                "status": "completed",
+                "attempt": 1,
+                "codex_exit_code": 0,
+                "changed_files": [],
+                "commands_run": [{"command": "true", "exit_code": 0}],
+                "tests_passed": True,
+                "required_outputs": [{"path": "context-pack/handoffs/phase0.md", "exists": True}],
+                "artifacts": {
+                    "contract": "context-pack/runtime/phase0-contract-attempt1.json",
+                    "checklist": "context-pack/runtime/phase0-checklist-attempt1.md",
+                    "prompt": "context-pack/runtime/phase0-prompt-attempt1.md",
+                    "stdout": "context-pack/runtime/phase0-output-attempt1.jsonl",
+                    "stderr": "context-pack/runtime/phase0-stderr-attempt1.txt",
+                    "ac_results": "context-pack/runtime/phase0-ac-attempt1.json",
+                    "quality": "context-pack/runtime/phase0-quality.json",
+                    "handoff": "context-pack/runtime/phase0-handoff-attempt1.md",
+                    "attempt_commit": "context-pack/runtime/phase0-attempt1-commit.json",
+                },
+            }
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            (runtime_dir / "phase0-result.json").write_text(
+                json.dumps({**result, "attempt": 2}) + "\n",
+                encoding="utf-8",
+            )
+            (runtime_dir / "phase0-attempt1-commit.json").write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result-attempt1.json",
+                            "sha256": VERIFY_TASK.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.validate_phase_result(
+                root,
+                task_path,
+                0,
+                ["true"],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                expected_attempt=1,
+            )
+
+            self.assertEqual(errors, [])
+
+            (runtime_dir / "phase0-result.json").unlink()
+            errors = VERIFY_TASK.validate_phase_result(
+                root,
+                task_path,
+                0,
+                ["true"],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                expected_attempt=1,
+            )
+
+            self.assertEqual(errors, [])
+
     def test_phase_attempt_commit_rejects_internal_artifact_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "repo"

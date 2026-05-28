@@ -211,6 +211,8 @@ tasks/<task-dir>/
       phase<N>-quality-attempt<M>.json
       phase<N>-reconciliation-attempt<M>.json
       phase<N>-reconciliation-attempt<M>.md
+      phase<N>-handoff-attempt<M>.md
+      phase<N>-result-attempt<M>.json
       phase<N>-repair-packet-attempt<M>.json
       phase<N>-repair-packet-attempt<M>.md
       phase<N>-prompt.md

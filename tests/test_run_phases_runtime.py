@@ -411,8 +411,12 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(commit["status"], "committed")
             self.assertEqual(result["design_approval_bundle_sha256"], "approved-bundle")
             self.assertEqual(commit["design_approval_bundle_sha256"], "approved-bundle")
-            self.assertEqual(commit["result"]["path"], "context-pack/runtime/phase0-result.json")
+            self.assertEqual(commit["result"]["path"], "context-pack/runtime/phase0-result-attempt1.json")
             self.assertEqual(commit["result"]["sha256"], RUN_PHASES.file_sha256(result_path))
+            self.assertEqual(
+                json.loads(RUN_PHASES.phase_result_path(task_path, 0).read_text(encoding="utf-8")),
+                result,
+            )
             self.assertEqual(commit["artifact_count"], len(commit["artifacts"]))
             by_name = {item["name"]: item for item in commit["artifacts"]}
             self.assertEqual(by_name["gate"]["sha256"], RUN_PHASES.file_sha256(paths["gate"]))
@@ -429,6 +433,153 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 commit["repo_content"]["changed_files_digest"],
                 RUN_PHASES.stable_json_sha256(commit["repo_content"]["changed_files"]),
             )
+
+    def test_attempt_result_keeps_old_commit_valid_after_phase_result_alias_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            shared_paths = {
+                "contract": RUN_PHASES.phase_contract_path(task_path, 0),
+                "checklist": RUN_PHASES.phase_checklist_path(task_path, 0),
+                "quality": RUN_PHASES.phase_quality_path(task_path, 0),
+                "handoff": RUN_PHASES.phase_handoff_path(task_path, 0),
+                "evidence": RUN_PHASES.phase_evidence_path(task_path, 0),
+                "gate": RUN_PHASES.phase_gate_path(task_path, 0),
+                "reconciliation": RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                "reconciliation_summary": RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+            }
+            for name, path in shared_paths.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"{name}\n", encoding="utf-8")
+
+            def write_attempt(attempt: int) -> tuple[Path, Path]:
+                RUN_PHASES.phase_handoff_path(task_path, 0).write_text(
+                    f"handoff attempt {attempt}\n",
+                    encoding="utf-8",
+                )
+                prompt = RUN_PHASES.phase_attempt_prompt_path(task_path, 0, attempt)
+                stdout = runtime / f"phase0-output-attempt{attempt}.jsonl"
+                stderr = runtime / f"phase0-stderr-attempt{attempt}.txt"
+                ac = RUN_PHASES.ac_results_path(task_path, 0, attempt)
+                for path in [prompt, stdout, stderr, ac]:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(f"attempt {attempt}\n", encoding="utf-8")
+                result_path = RUN_PHASES.write_phase_result(
+                    root,
+                    task_path,
+                    0,
+                    attempt,
+                    0,
+                    [f"src/attempt{attempt}.py"],
+                    [{"command": "true", "exit_code": 0}],
+                    ["context-pack/handoffs/phase0.md"],
+                    [],
+                    prompt,
+                    stdout,
+                    stderr,
+                    ac,
+                )
+                return result_path, RUN_PHASES.write_phase_attempt_commit(task_path, 0, attempt, result_path)
+
+            result1, commit1 = write_attempt(1)
+            result2, commit2 = write_attempt(2)
+            alias_result = json.loads(RUN_PHASES.phase_result_path(task_path, 0).read_text(encoding="utf-8"))
+            self.assertEqual(alias_result["attempt"], 2)
+            self.assertEqual(json.loads(result1.read_text(encoding="utf-8"))["attempt"], 1)
+            self.assertEqual(json.loads(result2.read_text(encoding="utf-8"))["attempt"], 2)
+            commit2.unlink()
+
+            latest = RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 0)
+
+            self.assertIsNotNone(latest)
+            assert latest is not None
+            self.assertEqual(latest["attempt"], 1)
+            self.assertEqual(latest["result"]["path"], "context-pack/runtime/phase0-result-attempt1.json")
+            self.assertEqual(latest["result"]["sha256"], RUN_PHASES.file_sha256(result1))
+            latest_artifacts = {item["name"]: item for item in latest["artifacts"]}
+            self.assertEqual(
+                latest_artifacts["handoff"]["path"],
+                "context-pack/runtime/phase0-handoff-attempt1.md",
+            )
+            self.assertEqual(json.loads(commit1.read_text(encoding="utf-8"))["attempt"], 1)
+
+    def test_running_projection_does_not_recover_old_commit_after_new_result_before_commit_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            shared_paths = {
+                "contract": RUN_PHASES.phase_contract_path(task_path, 0),
+                "checklist": RUN_PHASES.phase_checklist_path(task_path, 0),
+                "quality": RUN_PHASES.phase_quality_path(task_path, 0),
+                "handoff": RUN_PHASES.phase_handoff_path(task_path, 0),
+                "evidence": RUN_PHASES.phase_evidence_path(task_path, 0),
+                "gate": RUN_PHASES.phase_gate_path(task_path, 0),
+                "reconciliation": RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                "reconciliation_summary": RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+            }
+            for name, path in shared_paths.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"{name}\n", encoding="utf-8")
+
+            def attempt_paths(attempt: int) -> tuple[Path, Path, Path, Path]:
+                prompt = RUN_PHASES.phase_attempt_prompt_path(task_path, 0, attempt)
+                stdout = runtime / f"phase0-output-attempt{attempt}.jsonl"
+                stderr = runtime / f"phase0-stderr-attempt{attempt}.txt"
+                ac = RUN_PHASES.ac_results_path(task_path, 0, attempt)
+                for path in [prompt, stdout, stderr, ac]:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(f"attempt {attempt}\n", encoding="utf-8")
+                return prompt, stdout, stderr, ac
+
+            prompt1, stdout1, stderr1, ac1 = attempt_paths(1)
+            result1 = RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                1,
+                0,
+                ["src/attempt1.py"],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                prompt1,
+                stdout1,
+                stderr1,
+                ac1,
+            )
+            RUN_PHASES.write_phase_attempt_commit(task_path, 0, 1, result1)
+            prompt2, stdout2, stderr2, ac2 = attempt_paths(2)
+            RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                2,
+                0,
+                ["src/attempt2.py"],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                prompt2,
+                stdout2,
+                stderr2,
+                ac2,
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "running", "attempts": 2}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(changes[0]["reason"], "interrupted_running_phase")
+            self.assertEqual(task_index["phases"][0]["status"], "error")
 
     def test_phase_result_records_runner_owned_obligation_assertion_outcomes(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -809,6 +960,84 @@ class RunCodexRuntimeTest(unittest.TestCase):
 
             self.assertIsNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 0))
 
+    def test_runtime_projection_rejects_legacy_commit_when_generation_marker_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True, exist_ok=True)
+            reset_at = "2026-01-01T00:00:00+09:00"
+            RUN_PHASES.write_phase_reset_marker(task_path, 0, reset_at, 0)
+            result_path = RUN_PHASES.phase_result_path(task_path, 0)
+            result = {"phase": 0, "attempt": 1, "status": "completed", "artifacts": {}}
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            RUN_PHASES.phase_attempt_commit_path(task_path, 0, 1).write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "committed_at": "9999-01-01T00:00:00+09:00",
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result.json",
+                            "sha256": RUN_PHASES.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 0))
+
+    def test_runtime_projection_rejects_generated_commit_after_partial_propagated_reset_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True, exist_ok=True)
+            RUN_PHASES.write_phase_reset_marker(task_path, 1, "2026-01-01T00:00:00+09:00", 1)
+            result_path = RUN_PHASES.phase_result_path(task_path, 1)
+            result = {"phase": 1, "attempt": 1, "status": "completed", "reset_generation": 1, "artifacts": {}}
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            RUN_PHASES.phase_attempt_commit_path(task_path, 1, 1).write_text(
+                json.dumps(
+                    {
+                        "phase": 1,
+                        "attempt": 1,
+                        "reset_generation": 1,
+                        "committed_at": "9999-01-01T00:00:00+09:00",
+                        "result": {
+                            "path": "context-pack/runtime/phase1-result.json",
+                            "sha256": RUN_PHASES.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            propagated_reset_at = "2026-01-01T00:00:01+09:00"
+            RUN_PHASES.write_phase_reset_marker(task_path, 0, propagated_reset_at, 0)
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "phases": [
+                            {"phase": 0, "name": "docs", "status": "pending", "attempts": 0},
+                            {"phase": 1, "name": "api", "status": "completed", "attempts": 1},
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertIsNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 1))
+            self.assertEqual(changes[0]["reason"], "reset_marker_without_projection")
+            self.assertEqual(task_index["phases"][1]["status"], "pending")
+            self.assertEqual(task_index["phases"][1]["reset_at"], propagated_reset_at)
+
     def test_runtime_projection_rejects_commit_result_reset_generation_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
@@ -934,6 +1163,40 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(changes[0]["reason"], "missing_attempt_commit")
             self.assertEqual(task_index["phases"][0]["status"], "error")
             self.assertIn("attempt commit", task_index["phases"][0]["error_message"])
+
+    def test_runtime_projection_marks_completed_phase_with_stale_attempt_commit_as_error(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True, exist_ok=True)
+            result_path = RUN_PHASES.phase_attempt_result_path(task_path, 0, 1)
+            result = {"phase": 0, "attempt": 1, "status": "completed", "artifacts": {}}
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            RUN_PHASES.phase_attempt_commit_path(task_path, 0, 1).write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result-attempt1.json",
+                            "sha256": RUN_PHASES.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed", "attempts": 2}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(changes[0]["reason"], "stale_attempt_commit")
+            self.assertEqual(task_index["phases"][0]["status"], "error")
 
     def test_reconcile_before_execution_repairs_stale_running_state(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -2140,6 +2403,18 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(RUN_PHASES.phase_reset_state(task_path, 0), (1, reset_at))
             self.assertEqual(RUN_PHASES.phase_reset_state(task_path, 1), (1, reset_at))
 
+    def test_phase_reset_marker_generation_uses_own_phase_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            RUN_PHASES.write_phase_reset_marker(task_path, 1, "2026-01-01T00:00:00+09:00", 1)
+            RUN_PHASES.write_phase_reset_marker(task_path, 0, "2026-01-01T00:00:01+09:00", 0)
+
+            marker_path = RUN_PHASES.write_phase_reset_marker(task_path, 1, "2026-01-01T00:00:01+09:00", 0)
+
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            self.assertEqual(marker["reset_generation"], 2)
+            self.assertEqual(marker["reset_id"], "phase1-reset2")
+
     def test_runner_relationship_graph_generation_is_non_blocking(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -2576,7 +2851,11 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertTrue(RUN_PHASES.phase_contract_path(task_path, 0).exists())
             self.assertTrue(RUN_PHASES.phase_checklist_path(task_path, 0).exists())
             self.assertEqual(result["repo_content"]["required_repo_outputs"][0]["before"]["exists"], False)
-            self.assertEqual(commit["result"]["sha256"], RUN_PHASES.file_sha256(RUN_PHASES.phase_result_path(task_path, 0)))
+            self.assertEqual(commit["result"]["path"], "context-pack/runtime/phase0-result-attempt1.json")
+            self.assertEqual(
+                commit["result"]["sha256"],
+                RUN_PHASES.file_sha256(RUN_PHASES.phase_attempt_result_path(task_path, 0, 1)),
+            )
             by_name = {item["name"]: item for item in commit["artifacts"]}
             self.assertEqual(
                 by_name["prompt"]["sha256"],

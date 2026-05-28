@@ -866,6 +866,7 @@ def validate_artifacts(
                 "stdout": f"context-pack/runtime/phase{phase_number}-output-attempt{attempt}.jsonl",
                 "stderr": f"context-pack/runtime/phase{phase_number}-stderr-attempt{attempt}.txt",
                 "ac_results": f"context-pack/runtime/phase{phase_number}-ac-attempt{attempt}.json",
+                "handoff": f"context-pack/runtime/phase{phase_number}-handoff-attempt{attempt}.md",
             }
         )
     legacy_paths = {
@@ -884,6 +885,10 @@ def validate_artifacts(
             key in expected_paths
             and raw_path != expected_paths[key]
             and raw_path != legacy_paths.get(key)
+            and not (
+                key == "handoff"
+                and raw_path == f"context-pack/handoffs/phase{phase_number}.md"
+            )
         ):
             errors.append(f"`artifacts.{key}` must be {expected_paths[key]}.")
         target, path_errors = resolve_task_relative_path(root, task_path, raw_path, f"artifacts.{key}")
@@ -963,13 +968,21 @@ def validate_runtime_contract_bundle(
     expected_commands: list[str],
     expected_outputs: list[str],
     expected_repo_outputs: list[str],
+    expected_attempt: int | None = None,
 ) -> list[str]:
     runtime_dir = task_path / "context-pack" / "runtime"
-    contract_path = runtime_dir / f"phase{phase_number}-contract.json"
-    evidence_path = runtime_dir / f"phase{phase_number}-evidence.json"
-    reconciliation_path = runtime_dir / f"phase{phase_number}-reconciliation.json"
-    gate_path = runtime_dir / f"phase{phase_number}-gate.json"
-    quality_path = runtime_dir / f"phase{phase_number}-quality.json"
+    def attempt_or_alias(stem: str, suffix: str) -> Path:
+        if isinstance(expected_attempt, int) and expected_attempt > 0:
+            attempt_path = runtime_dir / f"phase{phase_number}-{stem}-attempt{expected_attempt}{suffix}"
+            if attempt_path.exists():
+                return attempt_path
+        return runtime_dir / f"phase{phase_number}-{stem}{suffix}"
+
+    contract_path = attempt_or_alias("contract", ".json")
+    evidence_path = attempt_or_alias("evidence", ".json")
+    reconciliation_path = attempt_or_alias("reconciliation", ".json")
+    gate_path = attempt_or_alias("gate", ".json")
+    quality_path = attempt_or_alias("quality", ".json")
     errors: list[str] = []
 
     try:
@@ -1061,7 +1074,13 @@ def validate_runtime_contract_bundle(
     if violations:
         errors.append(f"Evidence changed_files include paths outside scope: {violations!r}")
 
-    handoff_path = task_path / "context-pack" / "handoffs" / f"phase{phase_number}.md"
+    handoff_path = (
+        runtime_dir / f"phase{phase_number}-handoff-attempt{expected_attempt}.md"
+        if isinstance(expected_attempt, int)
+        and expected_attempt > 0
+        and (runtime_dir / f"phase{phase_number}-handoff-attempt{expected_attempt}.md").exists()
+        else task_path / "context-pack" / "handoffs" / f"phase{phase_number}.md"
+    )
     if handoff_path.exists():
         instruction_ids = [
             item.get("id")
@@ -1113,11 +1132,20 @@ def validate_phase_result(
     expected_outputs: list[str],
     expected_repo_outputs: list[str],
     *,
+    expected_attempt: int | None = None,
     strict_current_harness: bool = False,
 ) -> list[str]:
-    result_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-result.json"
+    runtime_dir = task_path / "context-pack" / "runtime"
+    alias_result_path = runtime_dir / f"phase{phase_number}-result.json"
+    canonical_result_path = (
+        runtime_dir / f"phase{phase_number}-result-attempt{expected_attempt}.json"
+        if isinstance(expected_attempt, int) and expected_attempt > 0
+        else None
+    )
+    result_path = canonical_result_path if canonical_result_path is not None and canonical_result_path.exists() else alias_result_path
     if not result_path.exists():
-        return [f"Missing phase result: {rel(root, result_path)}"]
+        expected_path = canonical_result_path or alias_result_path
+        return [f"Missing phase result: {rel(root, expected_path)}"]
     try:
         result = json.loads(result_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -1151,6 +1179,8 @@ def validate_phase_result(
     if not isinstance(attempt, int) or attempt <= 0:
         errors.append("`attempt` must be a positive integer.")
         attempt = None
+    elif isinstance(expected_attempt, int) and expected_attempt > 0 and attempt != expected_attempt:
+        errors.append(f"`attempt` must match task index attempts ({expected_attempt}).")
     if result.get("codex_exit_code") != 0:
         errors.append("`codex_exit_code` must be 0 for a completed phase.")
     errors.extend(require_string_list(result.get("changed_files"), "changed_files"))
@@ -1162,19 +1192,32 @@ def validate_phase_result(
         errors.extend(validate_required_repo_outputs(root, result.get("required_repo_outputs"), expected_repo_outputs))
     errors.extend(validate_artifacts(root, task_path, result.get("artifacts"), phase_number, attempt))
     artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
-    if artifacts.get("handoff") != f"context-pack/handoffs/phase{phase_number}.md":
-        errors.append(f"`artifacts.handoff` must be context-pack/handoffs/phase{phase_number}.md.")
+    expected_handoff_paths = {f"context-pack/handoffs/phase{phase_number}.md"}
+    if isinstance(attempt, int):
+        expected_handoff_paths.add(f"context-pack/runtime/phase{phase_number}-handoff-attempt{attempt}.md")
+    if artifacts.get("handoff") not in expected_handoff_paths:
+        errors.append(
+            f"`artifacts.handoff` must be one of {sorted(expected_handoff_paths)!r}."
+        )
     if "attempt_commit" not in artifacts:
         errors.append("Phase result artifacts must include attempt_commit.")
     elif isinstance(attempt, int):
         errors.extend(validate_phase_attempt_commit(root, task_path, phase_number, attempt, result_path, result, artifacts))
     if isinstance(attempt, int):
         try:
-            contract = json.loads(
-                (task_path / "context-pack" / "runtime" / f"phase{phase_number}-contract.json").read_text(
-                    encoding="utf-8"
+            contract_path = None
+            raw_contract_path = artifacts.get("contract")
+            if isinstance(raw_contract_path, str):
+                contract_path, contract_path_errors = resolve_task_relative_path(
+                    root,
+                    task_path,
+                    raw_contract_path,
+                    "artifacts.contract",
                 )
-            )
+                errors.extend(contract_path_errors)
+            if contract_path is None:
+                contract_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-contract.json"
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             contract = {}
         if isinstance(contract, dict) and contract.get("closes_obligations"):
@@ -1222,6 +1265,7 @@ def validate_phase_attempt_commit(
             errors.append("attempt_commit reset_generation does not match phase result.")
     result_ref = commit.get("result") if isinstance(commit.get("result"), dict) else {}
     result_ref_path = result_ref.get("path")
+    commit_result_path: Path | None = None
     if not isinstance(result_ref_path, str):
         errors.append("attempt_commit result path must be a path.")
     else:
@@ -1233,8 +1277,23 @@ def validate_phase_attempt_commit(
         )
         errors.extend(path_errors)
         if commit_result_path is not None and commit_result_path != result_path.resolve():
-            errors.append("attempt_commit result path does not match phase result.")
-    if result_ref.get("sha256") != file_sha256(result_path):
+            expected_attempt_result = (
+                task_path / "context-pack" / "runtime" / f"phase{phase_number}-result-attempt{attempt}.json"
+            ).resolve()
+            if commit_result_path != expected_attempt_result:
+                errors.append("attempt_commit result path does not match phase result.")
+            else:
+                try:
+                    commit_result_data = json.loads(commit_result_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    errors.append(f"Invalid canonical phase result JSON: {rel(root, commit_result_path)}: {exc}")
+                else:
+                    if commit_result_data != result_data:
+                        errors.append("attempt_commit canonical result does not match phase result alias.")
+    result_hash_path = commit_result_path or result_path
+    if not result_hash_path.exists() or not result_hash_path.is_file():
+        errors.append(f"attempt_commit result path does not exist: {rel(root, result_hash_path)}")
+    elif result_ref.get("sha256") != file_sha256(result_hash_path):
         errors.append("attempt_commit result sha256 does not match phase result.")
     artifact_entries = commit.get("artifacts") if isinstance(commit.get("artifacts"), list) else []
     by_name = {item.get("name"): item for item in artifact_entries if isinstance(item, dict)}
@@ -1565,6 +1624,7 @@ def verify(
                     expected_commands,
                     expected_outputs,
                     expected_repo_outputs,
+                    expected_attempt=phase.get("attempts") if isinstance(phase.get("attempts"), int) else None,
                     strict_current_harness=strict_current_harness,
                 )
             )
@@ -1591,6 +1651,7 @@ def verify(
                     expected_commands,
                     expected_outputs,
                     expected_repo_outputs,
+                    expected_attempt=phase.get("attempts") if isinstance(phase.get("attempts"), int) else None,
                 )
             )
             for attempt in phase_attempts(phase):

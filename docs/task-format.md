@@ -320,7 +320,8 @@ tasks/<task-dir>/phases/phase<N>.md
   새 phase에서는 substring 위양성을 줄이기 위해 `exact_line`을 우선 사용합니다.
   `secret_sdk_boundary` 같은 보안 경계 obligation은 `contains`와 `closure_output_contains`를 사용할 수 없습니다.
   runner는 command 실행 직후 full output을 메모리에서 평가하고, `phase<N>-obligation-closure-attempt<M>.json`에는 assertion hash와 pass/fail만 저장합니다.
-  `phase<N>-result.json`은 이 ledger artifact를 참조하고 attempt commit marker가 ledger hash를 봉인합니다.
+  `phase<N>-result-attempt<M>.json`은 이 ledger artifact를 참조하고 attempt commit marker가 ledger hash를 봉인합니다.
+  runner는 latest handoff alias도 `phase<N>-handoff-attempt<M>.md`로 snapshot해 attempt commit marker에 봉인합니다.
   오래된 runtime result처럼 구조화 결과가 없고 command output이 잘린 경우에는 closure proof로 인정하지 않습니다.
 - `design-contract.json.obligations[*].closure_output_contains`는 기존 contract 호환용 alias입니다.
   쓰면 `{ "type": "contains", "value": "<entry>" }`와 같은 의미로 처리되며, `closure_command_refs`가 필요합니다.

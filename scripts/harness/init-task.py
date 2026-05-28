@@ -34,10 +34,13 @@ Completed phases require:
 - `context-pack/runtime/phase<N>-reconciliation.json`
 - `context-pack/runtime/phase<N>-reconciliation.md`
 - `context-pack/runtime/phase<N>-gate.json`
+- `context-pack/runtime/phase<N>-handoff-attempt<M>.md`
+- `context-pack/runtime/phase<N>-result-attempt<M>.json`
 - `context-pack/runtime/phase<N>-result.json`
 - `context-pack/handoffs/phase<N>.md`
 
-The runner generates `phase<N>-result.json`.
+The runner snapshots `context-pack/handoffs/phase<N>.md` into `phase<N>-handoff-attempt<M>.md`.
+The runner generates `phase<N>-result-attempt<M>.json` and updates `phase<N>-result.json` as the latest alias.
 The runner generates `phase<N>-gate.json`.
 Phase agents only write handoffs and implementation changes.
 Phase 0 also requires `context-pack/runtime/docs-diff.md`.

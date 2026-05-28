@@ -444,6 +444,10 @@ def phase_result_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-result.json"
 
 
+def phase_attempt_result_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-result-attempt{attempt}.json"
+
+
 def phase_contract_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-contract.json"
 
@@ -528,12 +532,23 @@ def phase_handoff_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "handoffs" / f"phase{phase_number}.md"
 
 
+def phase_attempt_handoff_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-handoff-attempt{attempt}.md"
+
+
 def ac_results_path(task_path: Path, phase_number: int, attempt: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-ac-attempt{attempt}.json"
 
 
 def phase_attempt_commit_path(task_path: Path, phase_number: int, attempt: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-attempt{attempt}-commit.json"
+
+
+def phase_result_artifacts_exist(task_path: Path, phase_number: int) -> bool:
+    runtime_dir = task_path / "context-pack" / "runtime"
+    return phase_result_path(task_path, phase_number).exists() or any(
+        runtime_dir.glob(f"phase{phase_number}-result-attempt*.json")
+    )
 
 
 def phase_reset_marker_path(task_path: Path, phase_number: int) -> Path:
@@ -577,6 +592,15 @@ def phase_reset_state(task_path: Path, phase_number: int) -> tuple[int, str]:
         best_is_own_marker = is_own_marker
         best_reset_at = reset_at
     return best_generation, best_reset_at
+
+
+def phase_own_reset_generation(task_path: Path, phase_number: int) -> int:
+    try:
+        marker = read_json(phase_reset_marker_path(task_path, phase_number))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    generation = marker.get("reset_generation")
+    return generation if isinstance(generation, int) and generation >= 0 else 0
 
 
 def phase_obligation_closure_path(task_path: Path, phase_number: int, attempt: int) -> Path:
@@ -1633,13 +1657,20 @@ def write_phase_result(
             "stderr": task_relative(stderr_path, task_path),
             "ac_results": task_relative(ac_results, task_path),
             "quality": task_relative(quality_artifact_path, task_path),
-            "handoff": task_relative(phase_handoff_path(task_path, phase_number), task_path),
             "evidence": task_relative(evidence_artifact_path, task_path),
             "reconciliation": task_relative(reconciliation_artifact_path, task_path),
             "reconciliation_summary": task_relative(reconciliation_summary_artifact_path, task_path),
             "gate": task_relative(gate_artifact_path, task_path),
         },
     }
+    handoff_path = phase_handoff_path(task_path, phase_number)
+    attempt_handoff_path = phase_attempt_handoff_path(task_path, phase_number, attempt)
+    if handoff_path.exists():
+        attempt_handoff_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(attempt_handoff_path, handoff_path.read_text(encoding="utf-8"))
+        result["artifacts"]["handoff"] = task_relative(attempt_handoff_path, task_path)
+    else:
+        result["artifacts"]["handoff"] = task_relative(handoff_path, task_path)
     approval_path = task_path / "context-pack" / "static" / "design-approval.json"
     if approval_path.exists():
         try:
@@ -1709,10 +1740,12 @@ def write_phase_result(
         result["artifacts"]["repair_packet"] = task_relative(repair_packet, task_path)
     if repair_packet_summary.exists():
         result["artifacts"]["repair_packet_summary"] = task_relative(repair_packet_summary, task_path)
-    result_path = phase_result_path(task_path, phase_number)
+    result_path = phase_attempt_result_path(task_path, phase_number, attempt)
+    result_alias_path = phase_result_path(task_path, phase_number)
     write_json(result_path, result)
     result["artifacts"]["attempt_commit"] = task_relative(phase_attempt_commit_path(task_path, phase_number, attempt), task_path)
     write_json(result_path, result)
+    write_json(result_alias_path, result)
     return result_path
 
 
@@ -1765,7 +1798,7 @@ def write_phase_attempt_commit(task_path: Path, phase_number: int, attempt: int,
 
 def write_phase_reset_marker(task_path: Path, phase_number: int, reset_at: str, from_phase: int) -> Path:
     path = phase_reset_marker_path(task_path, phase_number)
-    previous_generation, _previous_reset_at = phase_reset_state(task_path, phase_number)
+    previous_generation = phase_own_reset_generation(task_path, phase_number)
     reset_generation = previous_generation + 1
     write_json(
         path,
@@ -1830,11 +1863,14 @@ def latest_valid_phase_attempt_commit(task_path: Path, phase_number: int) -> dic
         except (OSError, json.JSONDecodeError):
             continue
         commit_generation = data.get("reset_generation")
-        if reset_generation > 0 and isinstance(commit_generation, int):
-            if commit_generation != reset_generation:
+        if reset_generation > 0:
+            if not isinstance(commit_generation, int) or commit_generation != reset_generation:
                 continue
-        elif reset_at and str(data.get("committed_at") or "") <= reset_at:
-            continue
+        elif reset_at:
+            if isinstance(commit_generation, int):
+                continue
+            if str(data.get("committed_at") or "") <= reset_at:
+                continue
         result_ref = data.get("result") if isinstance(data.get("result"), dict) else {}
         result_path = resolve_task_artifact_path(task_path, result_ref.get("path"))
         if result_path is None:
@@ -1889,18 +1925,26 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
             if not dry_run:
                 apply_reset_projection_to_phase(phase, reset_at)
             continue
-        if status == "running" and commit:
+        attempts = int(phase.get("attempts", 0) or 0)
+        commit_attempt = commit.get("attempt") if commit else None
+        commit_matches_phase_attempt = attempts <= 0 or commit_attempt == attempts
+        if status == "running" and commit and commit_matches_phase_attempt:
             changes.append({"phase": phase_number, "from_status": status, "to_status": "completed", "reason": "valid_attempt_commit"})
             if not dry_run:
                 phase["status"] = "completed"
                 phase["completed_at"] = now()
                 phase["attempts"] = commit.get("attempt")
-        elif status == "completed" and not commit:
-            changes.append({"phase": phase_number, "from_status": status, "to_status": "error", "reason": "missing_attempt_commit"})
+        elif status == "completed" and (not commit or not commit_matches_phase_attempt):
+            reason = "missing_attempt_commit" if not commit else "stale_attempt_commit"
+            changes.append({"phase": phase_number, "from_status": status, "to_status": "error", "reason": reason})
             if not dry_run:
                 phase["status"] = "error"
                 phase["error_message"] = "Completed phase is missing a valid attempt commit."
-        elif status == "running" and not commit and phase_result_path(task_path, phase_number).exists():
+        elif (
+            status == "running"
+            and (not commit or (attempts > 0 and commit_attempt != attempts))
+            and phase_result_artifacts_exist(task_path, phase_number)
+        ):
             has_commit = bool(list((task_path / "context-pack" / "runtime").glob(f"phase{phase_number}-attempt*-commit.json")))
             reason = "interrupted_running_phase" if has_commit else "invalid_attempt_commit"
             changes.append({"phase": phase_number, "from_status": status, "to_status": "error", "reason": reason})

@@ -26,6 +26,8 @@ phase<N>-reconciliation-attempt<M>.json
 phase<N>-reconciliation-attempt<M>.md
 phase<N>-gate-attempt<M>.json
 phase<N>-quality-attempt<M>.json
+phase<N>-handoff-attempt<M>.md
+phase<N>-result-attempt<M>.json
 phase<N>-evidence.json
 phase<N>-reconciliation.json
 phase<N>-reconciliation.md
@@ -48,10 +50,11 @@ phase<N>-reconciliation.json
 phase<N>-reconciliation.md
 phase<N>-gate.json
 phase<N>-quality.json
+phase<N>-result.json
 ```
 
 무결성 기준은 attempt-scoped 파일입니다. `phase<N>-attempt<M>-commit.json`은
-해당 attempt의 prompt, contract, checklist, evidence, gate, quality, reconciliation과 실행 산출물 hash를 고정합니다.
+해당 attempt의 prompt, contract, checklist, handoff, evidence, gate, quality, reconciliation, result와 실행 산출물 hash를 고정합니다.
 phase-scoped alias는 최신 attempt를 보기 위한 편의 파일이며 commit proof의 기준으로 쓰지 않습니다.
 
 실패하거나 다시 시도하면 다음 파일도 생깁니다.
@@ -172,7 +175,9 @@ child process env는 문서화된 하네스 컨텍스트 키만 전달합니다.
 
 ## result
 
-`phase<N>-result.json`은 완료된 phase의 최종 기록입니다.
+`phase<N>-result-attempt<M>.json`은 완료된 attempt의 최종 기록입니다.
+`phase<N>-result.json`은 최신 completed attempt result의 alias입니다.
+crash recovery와 verifier는 task index의 completed attempt가 가리키는 attempt-scoped result를 우선합니다.
 
 이 파일은 runner가 씁니다.
 phase를 실행하는 Codex가 직접 쓰면 안 됩니다.
@@ -197,7 +202,7 @@ phase를 실행하는 Codex가 직접 쓰면 안 됩니다.
 
 `phase<N>-obligation-closure-attempt<M>.json`이 있으면 runner가 command 실행 직후 full output을 메모리에서 평가한 결과입니다.
 이 artifact는 raw matcher value나 full output을 저장하지 않고 obligation id, assertion hash, command ref, pass/fail, attempt, runner version, contract hash, command output hash만 남깁니다.
-`phase<N>-result.json`은 이 artifact를 `artifacts.obligation_closure`로 참조하고, attempt commit marker는 해당 artifact의 sha256을 봉인합니다.
+`phase<N>-result-attempt<M>.json`은 이 artifact를 `artifacts.obligation_closure`로 참조하고, attempt commit marker는 해당 artifact의 sha256을 봉인합니다.
 검증자는 이 구조화 ledger를 우선 사용하고, 오래된 result에 이 artifact가 없을 때만 `output_tail` compatibility path를 사용합니다.
 
 ## attempt commit
@@ -221,8 +226,8 @@ marker는 다음을 기록합니다.
 - 적용된 policy pack metadata
 - design approval scope SHA-256
 - runtime proof profile의 harness attestation digest
-- `phase<N>-result.json` 경로와 sha256
-- result가 참조하는 runtime proof artifact들의 경로, 존재 여부, sha256
+- `phase<N>-result-attempt<M>.json` 경로와 sha256
+- result가 참조하는 runtime proof artifact들의 경로, 존재 여부, sha256. runner는 `context-pack/handoffs/phase<N>.md`를 `phase<N>-handoff-attempt<M>.md`로 snapshot한 뒤 commit marker에 봉인합니다.
 - phase result의 `changed_files`에 대한 before/after digest와 canonical digest
 - `required_repo_outputs`의 before/after 존재 상태와 file sha256
 
