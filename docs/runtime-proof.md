@@ -58,6 +58,10 @@ phase<N>-result.json
 해당 attempt의 prompt, contract, checklist, handoff, evidence, gate, quality, reconciliation, result와 실행 산출물 hash를 고정합니다.
 phase-scoped alias는 최신 attempt를 보기 위한 편의 파일이며 commit proof의 기준으로 쓰지 않습니다.
 `phase<N>-attempt-manifest.jsonl`은 attempt lifecycle ledger입니다. attempt start, failed terminal state, interrupted terminal state, committed terminal state를 구조화해 남기지만, 완료 판정은 여전히 `phase<N>-result-attempt<M>.json`과 `phase<N>-attempt<M>-commit.json`의 hash 검증을 기준으로 합니다.
+현재 하네스는 completed phase에 `attempt_committed` manifest record가 없으면 검증 실패로 봅니다.
+기존 runtime proof에서 valid attempt commit은 있지만 manifest row만 없는 경우에는 일반 Generate 경로가 자동 수정하지 않습니다.
+운영자는 `run-phases.py <task> --doctor-runtime`으로 상태를 진단하고, 결과가 backfillable일 때만 `--doctor-runtime --backfill-attempt-manifests`를 명시해 valid commit에서 terminal ledger row를 append-only로 보강합니다.
+invalid manifest, stale commit, missing commit, active repair alias, failed/interrupted terminal conflict는 backfill하지 않고 reset/rerun 또는 수동 조사 대상으로 남깁니다.
 
 실패하거나 다시 시도하면 다음 파일도 생깁니다.
 

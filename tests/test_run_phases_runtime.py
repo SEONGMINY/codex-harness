@@ -27,6 +27,11 @@ assert SPEC is not None
 RUN_PHASES = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(RUN_PHASES)
+VERIFY_SPEC = importlib.util.spec_from_file_location("verify_task", HARNESS_DIR / "verify-task.py")
+assert VERIFY_SPEC is not None
+VERIFY_TASK = importlib.util.module_from_spec(VERIFY_SPEC)
+assert VERIFY_SPEC.loader is not None
+VERIFY_SPEC.loader.exec_module(VERIFY_TASK)
 import env_policy  # noqa: E402
 import file_lock  # noqa: E402
 
@@ -1301,6 +1306,104 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertFalse(RUN_PHASES.phase_repair_packet_path(task_path, 0).exists())
             self.assertFalse(RUN_PHASES.phase_repair_packet_summary_path(task_path, 0).exists())
 
+    def test_runtime_doctor_reports_backfillable_completed_phase_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_valid_attempt_commit(root, task_path, phase=0, attempt=1)
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=False)
+
+            self.assertEqual(report["status"], "fail")
+            self.assertEqual(report["checks"][0]["id"], "phase.attempt_manifest.missing_committed_record")
+            self.assertFalse(RUN_PHASES.phase_attempt_manifest_path(task_path, 0).exists())
+
+    def test_runtime_doctor_backfills_completed_phase_manifest_from_valid_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_valid_attempt_commit(root, task_path, phase=0, attempt=1)
+            phase = {"phase": 0, "name": "demo", "status": "completed", "attempts": 1}
+            (task_path / "index.json").write_text(json.dumps({"phases": [phase]}) + "\n", encoding="utf-8")
+
+            report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=True)
+
+            self.assertEqual(report["status"], "ok")
+            self.assertEqual(report["checks"][0]["id"], "phase.attempt_manifest.backfilled")
+            manifest = self.read_attempt_manifest(task_path, 0)
+            self.assertEqual(len(manifest), 1)
+            self.assertEqual(manifest[0]["record_type"], "attempt_committed")
+            self.assertEqual(manifest[0]["recovery_action"], "backfilled_from_valid_attempt_commit")
+            self.assertEqual(manifest[0]["backfill_reason"], "legacy_completed_phase_missing_attempt_manifest")
+            self.assertEqual(
+                VERIFY_TASK.validate_phase_attempt_manifest(root, task_path, phase),
+                [],
+            )
+
+            second_report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=True)
+            self.assertEqual(second_report["status"], "ok")
+            self.assertEqual(second_report["checks"][0]["id"], "phase.attempt_manifest.committed_present")
+            self.assertEqual(len(self.read_attempt_manifest(task_path, 0)), 1)
+
+    def test_runtime_doctor_refuses_backfill_when_completed_phase_has_active_repair_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            result_path, commit_path = self.write_valid_attempt_commit(root, task_path, phase=0, attempt=1)
+            RUN_PHASES.append_attempt_manifest_record(
+                task_path,
+                0,
+                1,
+                "attempt_committed",
+                status="committed",
+                result=RUN_PHASES.artifact_ref(task_path, "result", result_path),
+                attempt_commit=RUN_PHASES.artifact_ref(task_path, "attempt_commit", commit_path),
+            )
+            packet = RUN_PHASES.build_repair_packet(
+                task_path,
+                0,
+                {"phase": 0, "name": "demo"},
+                1,
+                "acceptance_commands",
+                "stale alias",
+                retryable=True,
+            )
+            RUN_PHASES.write_json(RUN_PHASES.phase_repair_packet_path(task_path, 0), packet)
+            RUN_PHASES.phase_repair_packet_summary_path(task_path, 0).write_text(
+                RUN_PHASES.repair_packet_markdown(packet),
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=True)
+
+            self.assertEqual(report["status"], "fail")
+            self.assertEqual(report["checks"][0]["id"], "phase.repair_alias.active_after_completion")
+            self.assertEqual(len(self.read_attempt_manifest(task_path, 0)), 1)
+
+    def test_runtime_doctor_refuses_backfill_when_manifest_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_valid_attempt_commit(root, task_path, phase=0, attempt=1)
+            RUN_PHASES.phase_attempt_manifest_path(task_path, 0).write_text("{not-json}\n", encoding="utf-8")
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=True)
+
+            self.assertEqual(report["status"], "fail")
+            self.assertEqual(report["checks"][0]["id"], "phase.attempt_manifest.invalid")
+            self.assertEqual(
+                RUN_PHASES.phase_attempt_manifest_path(task_path, 0).read_text(encoding="utf-8"),
+                "{not-json}\n",
+            )
+
     def test_runtime_projection_rejects_valid_commit_with_conflicting_terminal_record(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
@@ -2202,6 +2305,47 @@ class RunCodexRuntimeTest(unittest.TestCase):
             ).splitlines()
             if line.strip()
         ]
+
+    def write_valid_attempt_commit(self, root: Path, task_path: Path, phase: int = 0, attempt: int = 1) -> tuple[Path, Path]:
+        runtime = task_path / "context-pack" / "runtime"
+        handoffs = task_path / "context-pack" / "handoffs"
+        runtime.mkdir(parents=True, exist_ok=True)
+        handoffs.mkdir(parents=True, exist_ok=True)
+        for name, path in {
+            "contract": RUN_PHASES.phase_contract_path(task_path, phase),
+            "checklist": RUN_PHASES.phase_checklist_path(task_path, phase),
+            "quality": RUN_PHASES.phase_quality_path(task_path, phase),
+            "handoff": RUN_PHASES.phase_handoff_path(task_path, phase),
+            "evidence": RUN_PHASES.phase_evidence_path(task_path, phase),
+            "gate": RUN_PHASES.phase_gate_path(task_path, phase),
+            "reconciliation": RUN_PHASES.phase_reconciliation_path(task_path, phase),
+            "reconciliation_summary": RUN_PHASES.phase_reconciliation_summary_path(task_path, phase),
+        }.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{name}\n", encoding="utf-8")
+        prompt = RUN_PHASES.phase_attempt_prompt_path(task_path, phase, attempt)
+        stdout = runtime / f"phase{phase}-output-attempt{attempt}.jsonl"
+        stderr = runtime / f"phase{phase}-stderr-attempt{attempt}.txt"
+        ac = RUN_PHASES.ac_results_path(task_path, phase, attempt)
+        for path in [prompt, stdout, stderr, ac]:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"attempt {attempt}\n", encoding="utf-8")
+        result_path = RUN_PHASES.write_phase_result(
+            root,
+            task_path,
+            phase,
+            attempt,
+            0,
+            [],
+            [{"command": "true", "exit_code": 0}],
+            [f"context-pack/handoffs/phase{phase}.md"],
+            [],
+            prompt,
+            stdout,
+            stderr,
+            ac,
+        )
+        return result_path, RUN_PHASES.write_phase_attempt_commit(task_path, phase, attempt, result_path)
 
     def write_contract(self, root: Path, task_path: Path, allowed_paths: list[str]) -> None:
         contract_path = task_path / "context-pack" / "runtime" / "phase1-contract.json"

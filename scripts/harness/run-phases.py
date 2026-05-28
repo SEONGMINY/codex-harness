@@ -1806,7 +1806,7 @@ def append_attempt_manifest_record(
         "recorded_at": now(),
         "runner_version": HARNESS_VERSION,
         "policy_pack": policy_pack_fingerprint(runtime_policy_pack()),
-        "harness_attestation": attestation_fingerprint(RUNTIME_HARNESS_ATTESTATION),
+        "harness_attestation": RUNTIME_HARNESS_ATTESTATION,
         **fields,
     }
     with open_append_text(phase_attempt_manifest_path(task_path, phase_number)) as handle:
@@ -2204,6 +2204,9 @@ def terminalize_recovered_attempt_commit(
     phase_number: int,
     commit: dict[str, object],
     current_reset_generation: int,
+    *,
+    recovery_action: str = "recovered_from_valid_attempt_commit",
+    extra_fields: dict[str, object] | None = None,
 ) -> None:
     attempt = commit.get("attempt")
     if not isinstance(attempt, int) or attempt <= 0:
@@ -2229,9 +2232,184 @@ def terminalize_recovered_attempt_commit(
             status="committed",
             result=result_ref,
             attempt_commit=artifact_ref(task_path, "attempt_commit", commit_path),
-            recovery_action="recovered_from_valid_attempt_commit",
+            recovery_action=recovery_action,
+            **(extra_fields or {}),
         )
     clear_repair_packet(task_path, phase_number)
+
+
+def active_repair_alias_paths(task_path: Path, phase_number: int) -> list[str]:
+    paths = [
+        phase_repair_packet_path(task_path, phase_number),
+        phase_repair_packet_summary_path(task_path, phase_number),
+    ]
+    return [task_relative(path, task_path) for path in paths if path.exists()]
+
+
+def task_relative_resolved(path: Path, task_path: Path) -> str:
+    return str(path.resolve().relative_to(task_path.resolve()))
+
+
+def completed_phase_runtime_check(
+    task_path: Path,
+    phase: dict[str, object],
+    *,
+    apply_backfill: bool,
+) -> dict[str, object] | None:
+    if phase.get("status") != "completed":
+        return None
+    phase_number = int(phase["phase"])
+    attempts = phase.get("attempts")
+    if not isinstance(attempts, int) or attempts <= 0:
+        return {
+            "id": "phase.completed_without_attempt",
+            "severity": "error",
+            "phase": phase_number,
+            "message": "Completed phase has no positive attempt count.",
+            "operator_action": "Reset and rerun the phase so runtime proof can be generated.",
+        }
+
+    records, manifest_errors = read_attempt_manifest_records_with_errors(task_path, phase_number)
+    semantic_errors = attempt_manifest_semantic_errors(task_path, phase_number, records)
+    if manifest_errors or semantic_errors:
+        return {
+            "id": "phase.attempt_manifest.invalid",
+            "severity": "error",
+            "phase": phase_number,
+            "attempt": attempts,
+            "message": "Completed phase attempt manifest is invalid.",
+            "errors": manifest_errors + semantic_errors,
+            "operator_action": "Do not backfill this phase; inspect or reset from a trusted runtime state.",
+        }
+
+    reset_generation = phase_reset_state(task_path, phase_number)[0]
+    active_aliases = active_repair_alias_paths(task_path, phase_number)
+    if active_aliases:
+        return {
+            "id": "phase.repair_alias.active_after_completion",
+            "severity": "error",
+            "phase": phase_number,
+            "attempt": attempts,
+            "paths": active_aliases,
+            "message": "Completed phase still has active repair aliases.",
+            "operator_action": "Inspect canonical attempt artifacts before removing aliases or resetting the phase.",
+        }
+
+    terminal = attempt_terminal_manifest_record(task_path, phase_number, attempts, reset_generation)
+    if terminal and terminal.get("record_type") == "attempt_committed":
+        return {
+            "id": "phase.attempt_manifest.committed_present",
+            "severity": "info",
+            "phase": phase_number,
+            "attempt": attempts,
+            "message": "Completed phase already has an attempt_committed manifest record.",
+        }
+    if terminal:
+        return {
+            "id": "phase.attempt_manifest.conflicting_terminal_record",
+            "severity": "error",
+            "phase": phase_number,
+            "attempt": attempts,
+            "record_type": terminal.get("record_type"),
+            "message": "Completed phase has a conflicting terminal manifest record.",
+            "operator_action": "Reset and rerun the phase; do not synthesize a commit over failed/interrupted proof.",
+        }
+
+    commit = latest_valid_phase_attempt_commit(task_path, phase_number)
+    commit_attempt = commit.get("attempt") if commit else None
+    if not commit or commit_attempt != attempts:
+        reason = (
+            "missing_attempt_commit"
+            if not commit and not phase_attempt_commit_files_exist(task_path, phase_number)
+            else "stale_attempt_commit"
+        )
+        return {
+            "id": f"phase.attempt_commit.{reason}",
+            "severity": "error",
+            "phase": phase_number,
+            "attempt": attempts,
+            "message": "Completed phase is missing a valid matching attempt commit.",
+            "operator_action": "Reset and rerun the phase from a clean approved state.",
+        }
+
+    raw_commit_path = commit.get("_path")
+    commit_path = Path(raw_commit_path) if isinstance(raw_commit_path, str) else phase_attempt_commit_path(task_path, phase_number, attempts)
+    result_ref = commit.get("result") if isinstance(commit.get("result"), dict) else {}
+    result_path = resolve_task_artifact_path(task_path, result_ref.get("path"))
+    check: dict[str, object] = {
+        "id": "phase.attempt_manifest.missing_committed_record",
+        "severity": "warning",
+        "phase": phase_number,
+        "attempt": attempts,
+        "message": "Completed phase has a valid attempt commit but no attempt_committed manifest record.",
+        "operator_action": "Run with --backfill-attempt-manifests to append the missing terminal ledger row.",
+        "attempt_commit_path": task_relative_resolved(commit_path, task_path),
+        "attempt_commit_sha256": file_sha256(commit_path) if commit_path.exists() else None,
+        "result_path": task_relative_resolved(result_path, task_path) if result_path is not None else result_ref.get("path"),
+        "result_sha256": file_sha256(result_path) if result_path is not None and result_path.exists() else None,
+    }
+    if not apply_backfill:
+        return check
+
+    terminalize_recovered_attempt_commit(
+        task_path,
+        phase_number,
+        commit,
+        reset_generation,
+        recovery_action="backfilled_from_valid_attempt_commit",
+        extra_fields={
+            "backfill_reason": "legacy_completed_phase_missing_attempt_manifest",
+            "source_commit_path": check["attempt_commit_path"],
+            "source_commit_sha256": check["attempt_commit_sha256"],
+            "source_result_path": check["result_path"],
+            "source_result_sha256": check["result_sha256"],
+        },
+    )
+    records_after, errors_after = read_attempt_manifest_records_with_errors(task_path, phase_number)
+    errors_after.extend(attempt_manifest_semantic_errors(task_path, phase_number, records_after))
+    if errors_after:
+        return {
+            "id": "phase.attempt_manifest.backfill_failed",
+            "severity": "error",
+            "phase": phase_number,
+            "attempt": attempts,
+            "message": "Backfill wrote a record but manifest validation still fails.",
+            "errors": errors_after,
+            "operator_action": "Inspect the attempt manifest and reset from a trusted state if needed.",
+        }
+    check["id"] = "phase.attempt_manifest.backfilled"
+    check["severity"] = "info"
+    check["message"] = "Appended missing attempt_committed manifest record from a valid attempt commit."
+    check.pop("operator_action", None)
+    return check
+
+
+def doctor_runtime_proof(root: Path, task_path: Path, *, apply_backfill: bool) -> dict[str, object]:
+    task_index = read_json(task_path / "index.json")
+    checks: list[dict[str, object]] = []
+    for phase in task_index.get("phases") or []:
+        if not isinstance(phase, dict) or "phase" not in phase:
+            continue
+        check = completed_phase_runtime_check(task_path, phase, apply_backfill=apply_backfill)
+        if check is not None:
+            checks.append(check)
+    blocking = [
+        check
+        for check in checks
+        if check.get("severity") in {"error", "warning"}
+        and check.get("id") != "phase.attempt_manifest.backfilled"
+    ]
+    report = {
+        "schema_version": 1,
+        "status": "fail" if blocking else "ok",
+        "root": str(root),
+        "task": str(task_path.relative_to(root)),
+        "applied": apply_backfill,
+        "checks": checks,
+    }
+    if apply_backfill and any(check.get("id") == "phase.attempt_manifest.backfilled" for check in checks):
+        append_progress(task_path, "runtime proof doctor backfilled completed phase attempt manifests")
+    return report
 
 
 def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> list[dict[str, object]]:
@@ -4266,6 +4444,16 @@ def main() -> int:
     parser.add_argument("--full-auto", action="store_true", help="Pass --full-auto to codex exec.")
     parser.add_argument("--strict-current-harness", action="store_true", help="Require current harness runtime metadata.")
     parser.add_argument(
+        "--doctor-runtime",
+        action="store_true",
+        help="Diagnose completed phase runtime proof without running phases.",
+    )
+    parser.add_argument(
+        "--backfill-attempt-manifests",
+        action="store_true",
+        help="With --doctor-runtime, append missing completed-phase attempt_committed manifest records from valid attempt commits.",
+    )
+    parser.add_argument(
         "--yolo",
         action="store_true",
         help="Pass --dangerously-bypass-approvals-and-sandbox to codex exec.",
@@ -4288,7 +4476,8 @@ def main() -> int:
     try:
         try:
             runner_lock = acquire_runner_lock(task_path, args.dry_run)
-            repo_lock = acquire_repo_execution_lock(root, task_path, args)
+            if not args.doctor_runtime or args.backfill_attempt_manifests:
+                repo_lock = acquire_repo_execution_lock(root, task_path, args)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             return 1
@@ -4296,6 +4485,13 @@ def main() -> int:
         if args.from_phase is not None and args.resume_repair:
             print("--from and --resume-repair cannot be used together.", file=sys.stderr)
             return 1
+        if args.backfill_attempt_manifests and not args.doctor_runtime:
+            print("--backfill-attempt-manifests requires --doctor-runtime.", file=sys.stderr)
+            return 1
+        if args.doctor_runtime:
+            report = doctor_runtime_proof(root, task_path, apply_backfill=args.backfill_attempt_manifests)
+            print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0 if report.get("status") == "ok" else 1
         task_index_override = (
             apply_repair_resume(root, task_path, args.dry_run)
             if args.resume_repair
