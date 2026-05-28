@@ -79,6 +79,7 @@ from redaction import redact_text
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
 RUNNABLE_PHASE_STATUSES = {"pending", "running"}
+TERMINAL_ATTEMPT_RECORD_TYPES = {"attempt_committed", "attempt_failed", "attempt_interrupted"}
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUNTIME_HARNESS_ATTESTATION = harness_attestation()
@@ -1780,6 +1781,106 @@ def append_attempt_manifest_record(
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def read_attempt_manifest_records(task_path: Path, phase_number: int) -> list[dict[str, object]]:
+    path = phase_attempt_manifest_path(task_path, phase_number)
+    if not path.exists():
+        return []
+    records: list[dict[str, object]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def manifest_record_matches_current_reset(
+    record: dict[str, object],
+    current_reset_generation: int,
+) -> bool:
+    record_generation = record.get("reset_generation")
+    if current_reset_generation > 0:
+        return record_generation == current_reset_generation
+    return not isinstance(record_generation, int) or record_generation == current_reset_generation
+
+
+def attempt_terminal_manifest_record_type(
+    task_path: Path,
+    phase_number: int,
+    attempt: int,
+    current_reset_generation: int,
+) -> str | None:
+    terminal_type: str | None = None
+    for record in read_attempt_manifest_records(task_path, phase_number):
+        record_type = record.get("record_type")
+        if (
+            record.get("attempt") == attempt
+            and isinstance(record_type, str)
+            and record_type in TERMINAL_ATTEMPT_RECORD_TYPES
+            and manifest_record_matches_current_reset(record, current_reset_generation)
+        ):
+            terminal_type = record_type
+    return terminal_type
+
+
+def attempt_runtime_artifact_refs(task_path: Path, phase_number: int, attempt: int) -> list[dict[str, object]]:
+    artifact_paths = [
+        ("prompt", phase_attempt_prompt_path(task_path, phase_number, attempt)),
+        ("contract", phase_attempt_contract_path(task_path, phase_number, attempt)),
+        ("checklist", phase_attempt_checklist_path(task_path, phase_number, attempt)),
+        ("stdout", task_path / "context-pack" / "runtime" / f"phase{phase_number}-output-attempt{attempt}.jsonl"),
+        ("stderr", task_path / "context-pack" / "runtime" / f"phase{phase_number}-stderr-attempt{attempt}.txt"),
+        ("ac_results", ac_results_path(task_path, phase_number, attempt)),
+        ("quality", phase_attempt_quality_path(task_path, phase_number, attempt)),
+        ("evidence", phase_attempt_evidence_path(task_path, phase_number, attempt)),
+        ("gate", phase_attempt_gate_path(task_path, phase_number, attempt)),
+        ("reconciliation", phase_attempt_reconciliation_path(task_path, phase_number, attempt)),
+        ("reconciliation_summary", phase_attempt_reconciliation_summary_path(task_path, phase_number, attempt)),
+        ("handoff", phase_attempt_handoff_path(task_path, phase_number, attempt)),
+    ]
+    return [artifact_ref(task_path, name, path) for name, path in artifact_paths]
+
+
+def write_interrupted_attempt_repair_packet(
+    task_path: Path,
+    phase_number: int,
+    packet: dict[str, object],
+    attempt: int,
+) -> None:
+    snapshot_attempt_handoff(task_path, phase_number, attempt)
+    observed_artifacts = attempt_runtime_artifact_refs(task_path, phase_number, attempt)
+    packet = {**packet, "failed_attempt_artifacts": observed_artifacts}
+    markdown = repair_packet_markdown(packet)
+    write_json(phase_attempt_repair_packet_path(task_path, phase_number, attempt), packet)
+    atomic_write_text(phase_attempt_repair_packet_summary_path(task_path, phase_number, attempt), markdown)
+    write_json(phase_repair_packet_path(task_path, phase_number), packet)
+    atomic_write_text(phase_repair_packet_summary_path(task_path, phase_number), markdown)
+    append_attempt_manifest_record(
+        task_path,
+        phase_number,
+        attempt,
+        "attempt_interrupted",
+        status="interrupted",
+        reason="runner_recovery_without_terminal_record",
+        recovery_action="manual_required",
+        repair_packet=artifact_ref(
+            task_path,
+            "repair_packet",
+            phase_attempt_repair_packet_path(task_path, phase_number, attempt),
+        ),
+        repair_packet_summary=artifact_ref(
+            task_path,
+            "repair_packet_summary",
+            phase_attempt_repair_packet_summary_path(task_path, phase_number, attempt),
+        ),
+        observed_artifacts=observed_artifacts,
+    )
+
+
 def snapshot_attempt_handoff(task_path: Path, phase_number: int, attempt: int) -> Path | None:
     handoff_path = phase_handoff_path(task_path, phase_number)
     if not handoff_path.exists():
@@ -1942,7 +2043,7 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
         phase_number = int(phase["phase"])
         status = phase.get("status")
         commit = latest_valid_phase_attempt_commit(task_path, phase_number)
-        _reset_generation, reset_at = phase_reset_state(task_path, phase_number)
+        reset_generation, reset_at = phase_reset_state(task_path, phase_number)
         if reset_at and status != "pending" and str(phase.get("reset_at") or "") != reset_at:
             changes.append(
                 {
@@ -1975,14 +2076,57 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
         elif (
             status == "running"
             and (not commit or (attempts > 0 and commit_attempt != attempts))
-            and phase_result_artifacts_exist(task_path, phase_number)
         ):
+            terminal_record_type = (
+                attempt_terminal_manifest_record_type(task_path, phase_number, attempts, reset_generation)
+                if attempts > 0
+                else None
+            )
+            has_result_artifact = phase_result_artifacts_exist(task_path, phase_number)
             has_commit = bool(list((task_path / "context-pack" / "runtime").glob(f"phase{phase_number}-attempt*-commit.json")))
-            reason = "interrupted_running_phase" if has_commit else "invalid_attempt_commit"
+            reason = (
+                "interrupted_running_phase"
+                if terminal_record_type or has_result_artifact or has_commit
+                else "interrupted_running_attempt"
+            )
+            message = (
+                "Phase attempt was interrupted before terminal runtime proof was written."
+                if not has_result_artifact
+                else "Phase result exists without a valid attempt commit."
+            )
             changes.append({"phase": phase_number, "from_status": status, "to_status": "error", "reason": reason})
             if not dry_run:
                 phase["status"] = "error"
-                phase["error_message"] = "Phase result exists without a valid attempt commit."
+                phase["failed_at"] = now()
+                phase["error_message"] = message
+                write_last_error(task_path, phase_number, message)
+                if attempts > 0 and terminal_record_type is None:
+                    try:
+                        contract = runtime_phase_contract(task_path, phase_number, attempts)
+                    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+                        try:
+                            contract = runtime_phase_contract(task_path, phase_number)
+                        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+                            contract = None
+                    required_outputs = contract_outputs(phase, contract) if contract else []
+                    required_repo_outputs = contract_repo_outputs(contract) if contract else []
+                    write_interrupted_attempt_repair_packet(
+                        task_path,
+                        phase_number,
+                        build_repair_packet(
+                            task_path,
+                            phase_number,
+                            phase,
+                            attempts,
+                            reason,
+                            message,
+                            retryable=False,
+                            contract=contract,
+                            required_outputs=required_outputs,
+                            required_repo_outputs=required_repo_outputs,
+                        ),
+                        attempts,
+                    )
     if changes and not dry_run:
         write_json(index_path, task_index)
     return changes
@@ -3791,7 +3935,14 @@ def main() -> int:
             if args.resume_repair
             else apply_phase_reset(root, task_path, args.from_phase, args.dry_run)
         )
-        reconcile_before_execution(root, task_path, args)
+        reconciliation_changes = reconcile_before_execution(root, task_path, args)
+        if (
+            not args.dry_run
+            and any(item.get("to_status") == "error" for item in reconciliation_changes)
+        ):
+            update_top_index(root, task_path.name, "error")
+            args.failed = True
+            return 1
 
         while True:
             progressed = execute_phase(root, task_path, args, task_index_override)

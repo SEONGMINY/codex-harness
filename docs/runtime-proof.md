@@ -57,7 +57,7 @@ phase<N>-result.json
 무결성 기준은 attempt-scoped 파일입니다. `phase<N>-attempt<M>-commit.json`은
 해당 attempt의 prompt, contract, checklist, handoff, evidence, gate, quality, reconciliation, result와 실행 산출물 hash를 고정합니다.
 phase-scoped alias는 최신 attempt를 보기 위한 편의 파일이며 commit proof의 기준으로 쓰지 않습니다.
-`phase<N>-attempt-manifest.jsonl`은 attempt lifecycle ledger입니다. attempt start, failed terminal state, committed terminal state를 구조화해 남기지만, 완료 판정은 여전히 `phase<N>-result-attempt<M>.json`과 `phase<N>-attempt<M>-commit.json`의 hash 검증을 기준으로 합니다.
+`phase<N>-attempt-manifest.jsonl`은 attempt lifecycle ledger입니다. attempt start, failed terminal state, interrupted terminal state, committed terminal state를 구조화해 남기지만, 완료 판정은 여전히 `phase<N>-result-attempt<M>.json`과 `phase<N>-attempt<M>-commit.json`의 hash 검증을 기준으로 합니다.
 
 실패하거나 다시 시도하면 다음 파일도 생깁니다.
 
@@ -278,6 +278,9 @@ runner 시작 시에는 runtime proof와 `index.json` projection을 조정합니
 - `index.json`이 running인데 valid commit marker가 없으면 이전 runner가 attempt 중간에 멈춘 것으로 보고 error projection으로 바꿉니다.
 
 이 복구는 marker를 source of truth로 삼기 위한 최소 reconciliation입니다.
+running attempt가 terminal manifest record 없이 중단된 경우 runner는 같은 attempt를 실패로 관측했다고 주장하지 않습니다.
+대신 `attempt_interrupted` terminal record와 repair packet을 쓰고 phase projection만 `error`로 바꿉니다.
+이 상태에서는 자동으로 다음 attempt를 시작하지 않고, 사람이 repair packet을 확인한 뒤 `--resume-repair` 또는 `--from <N>`으로 재개해야 합니다.
 장기적으로는 `index.json`을 runtime ledger에서 재생성 가능한 projection으로 낮추는 방향이 더 안전합니다.
 
 ## repair packet
