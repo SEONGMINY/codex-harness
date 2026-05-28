@@ -714,6 +714,181 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(task_index["phases"][0]["status"], "pending")
             self.assertEqual(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 0), None)
 
+    def test_runtime_projection_ignores_legacy_commit_at_same_second_as_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True, exist_ok=True)
+            result_path = RUN_PHASES.phase_result_path(task_path, 0)
+            result = {"phase": 0, "attempt": 1, "status": "completed", "artifacts": {}}
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            reset_at = "2026-01-01T00:00:00+09:00"
+            RUN_PHASES.phase_attempt_commit_path(task_path, 0, 1).write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "committed_at": reset_at,
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result.json",
+                            "sha256": RUN_PHASES.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            RUN_PHASES.phase_reset_marker_path(task_path, 0).write_text(
+                json.dumps({"schema_version": 1, "phase": 0, "reset_at": reset_at}) + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 0))
+
+    def test_runtime_projection_uses_reset_generation_over_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True, exist_ok=True)
+            reset_at = "2026-01-01T00:00:00+09:00"
+            RUN_PHASES.write_phase_reset_marker(task_path, 0, reset_at, 0)
+            result_path = RUN_PHASES.phase_result_path(task_path, 0)
+            result = {"phase": 0, "attempt": 1, "status": "completed", "reset_generation": 1, "artifacts": {}}
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            RUN_PHASES.phase_attempt_commit_path(task_path, 0, 1).write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "reset_generation": 1,
+                        "committed_at": reset_at,
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result.json",
+                            "sha256": RUN_PHASES.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            commit = RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 0)
+
+            self.assertIsNotNone(commit)
+            self.assertEqual(commit["reset_generation"], 1)
+
+    def test_runtime_projection_rejects_commit_from_previous_reset_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True, exist_ok=True)
+            RUN_PHASES.write_phase_reset_marker(task_path, 0, "2026-01-01T00:00:00+09:00", 0)
+            RUN_PHASES.write_phase_reset_marker(task_path, 0, "2026-01-01T00:00:01+09:00", 0)
+            result_path = RUN_PHASES.phase_result_path(task_path, 0)
+            result = {"phase": 0, "attempt": 1, "status": "completed", "reset_generation": 1, "artifacts": {}}
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            RUN_PHASES.phase_attempt_commit_path(task_path, 0, 1).write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "reset_generation": 1,
+                        "committed_at": "2026-01-01T00:00:02+09:00",
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result.json",
+                            "sha256": RUN_PHASES.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 0))
+
+    def test_runtime_projection_rejects_commit_result_reset_generation_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True, exist_ok=True)
+            RUN_PHASES.write_phase_reset_marker(task_path, 0, "2026-01-01T00:00:00+09:00", 0)
+            result_path = RUN_PHASES.phase_result_path(task_path, 0)
+            result = {"phase": 0, "attempt": 1, "status": "completed", "reset_generation": 1, "artifacts": {}}
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            RUN_PHASES.phase_attempt_commit_path(task_path, 0, 1).write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "reset_generation": 2,
+                        "committed_at": "2026-01-01T00:00:01+09:00",
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result.json",
+                            "sha256": RUN_PHASES.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 0))
+
+    def test_runtime_projection_rejects_commit_result_attempt_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True, exist_ok=True)
+            result_path = RUN_PHASES.phase_result_path(task_path, 0)
+            result = {"phase": 0, "attempt": 2, "status": "completed", "artifacts": {}}
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            RUN_PHASES.phase_attempt_commit_path(task_path, 0, 1).write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result.json",
+                            "sha256": RUN_PHASES.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 0))
+
+    def test_runtime_projection_rejects_attempt_commit_paths_escaping_task(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True, exist_ok=True)
+            escaped = root / "outside-proof.json"
+            escaped.write_text("outside\n", encoding="utf-8")
+            RUN_PHASES.phase_attempt_commit_path(task_path, 0, 1).write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "result": {
+                            "path": "../../outside-proof.json",
+                            "sha256": RUN_PHASES.file_sha256(escaped),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertIsNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 0))
+
     def test_phase_reset_writes_marker_to_invalidate_previous_attempt_commit(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
@@ -734,6 +909,8 @@ class RunCodexRuntimeTest(unittest.TestCase):
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(marker["phase"], 0)
             self.assertEqual(marker["from_phase"], 0)
+            self.assertEqual(marker["reset_generation"], 1)
+            self.assertEqual(marker["reset_id"], "phase0-reset1")
             self.assertEqual(task_index["phases"][0]["status"], "pending")
             self.assertEqual(task_index["phases"][0]["reset_at"], marker["reset_at"])
             self.assertFalse(RUN_PHASES.phase_baseline_path(task_path, 0).exists())
@@ -1826,7 +2003,142 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(task_index["phases"][1]["status"], "pending")
             self.assertEqual(task_index["phases"][1]["attempts"], 0)
             self.assertEqual(task_index["phases"][2]["status"], "pending")
+            self.assertTrue(RUN_PHASES.phase_reset_marker_path(task_path, 1).exists())
+            self.assertTrue(RUN_PHASES.phase_reset_marker_path(task_path, 2).exists())
             self.assertTrue(repair_packet.exists())
+
+    def test_resume_repair_finds_attempt_scoped_repair_packet_without_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (root / "tasks").mkdir(parents=True, exist_ok=True)
+            (root / "tasks" / "index.json").write_text(
+                json.dumps({"tasks": [{"dir": "demo", "status": "error"}]}) + "\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "phases": [
+                            {"phase": 0, "name": "docs", "status": "completed", "attempts": 1},
+                            {"phase": 1, "name": "api", "status": "pending", "attempts": 0},
+                            {"phase": 2, "name": "web", "status": "pending", "attempts": 0},
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            repair_packet = RUN_PHASES.phase_attempt_repair_packet_path(task_path, 1, 1)
+            repair_packet.parent.mkdir(parents=True, exist_ok=True)
+            repair_packet.write_text('{"phase":1,"attempt":1}\n', encoding="utf-8")
+
+            RUN_PHASES.apply_repair_resume(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(task_index["phases"][0]["status"], "completed")
+            self.assertEqual(task_index["phases"][1]["status"], "pending")
+            self.assertTrue(RUN_PHASES.phase_reset_marker_path(task_path, 1).exists())
+            self.assertTrue(repair_packet.exists())
+
+    def test_reconcile_projection_recovers_marker_first_reset_crash_to_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True, exist_ok=True)
+            result_path = RUN_PHASES.phase_result_path(task_path, 0)
+            result = {"phase": 0, "attempt": 1, "status": "completed", "reset_generation": 0, "artifacts": {}}
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            RUN_PHASES.phase_attempt_commit_path(task_path, 0, 1).write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "reset_generation": 0,
+                        "committed_at": "2026-01-01T00:00:00+09:00",
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result.json",
+                            "sha256": RUN_PHASES.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            reset_at = "2026-01-01T00:00:01+09:00"
+            RUN_PHASES.write_phase_reset_marker(task_path, 0, reset_at, 0)
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(changes[0]["reason"], "reset_marker_without_projection")
+            self.assertEqual(task_index["phases"][0]["status"], "pending")
+            self.assertEqual(task_index["phases"][0]["attempts"], 0)
+            self.assertEqual(task_index["phases"][0]["reset_at"], reset_at)
+
+    def test_reconcile_projection_applies_partial_multi_phase_reset_marker_to_later_phases(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True, exist_ok=True)
+            result_path = RUN_PHASES.phase_result_path(task_path, 1)
+            result = {"phase": 1, "attempt": 1, "status": "completed", "reset_generation": 0, "artifacts": {}}
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            RUN_PHASES.phase_attempt_commit_path(task_path, 1, 1).write_text(
+                json.dumps(
+                    {
+                        "phase": 1,
+                        "attempt": 1,
+                        "reset_generation": 0,
+                        "committed_at": "2026-01-01T00:00:00+09:00",
+                        "result": {
+                            "path": "context-pack/runtime/phase1-result.json",
+                            "sha256": RUN_PHASES.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            reset_at = "2026-01-01T00:00:01+09:00"
+            RUN_PHASES.write_phase_reset_marker(task_path, 0, reset_at, 0)
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "phases": [
+                            {"phase": 0, "name": "docs", "status": "pending", "attempts": 0},
+                            {"phase": 1, "name": "api", "status": "completed", "attempts": 1},
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            by_phase = {item["phase"]: item for item in changes}
+            self.assertEqual(by_phase[1]["reason"], "reset_marker_without_projection")
+            self.assertEqual(task_index["phases"][1]["status"], "pending")
+            self.assertEqual(task_index["phases"][1]["reset_at"], reset_at)
+            self.assertIsNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 1))
+
+    def test_phase_reset_state_does_not_propagate_later_phase_marker_backward(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            reset_at = "2026-01-01T00:00:00+09:00"
+            RUN_PHASES.write_phase_reset_marker(task_path, 0, reset_at, 0)
+            RUN_PHASES.write_phase_reset_marker(task_path, 1, reset_at, 0)
+
+            self.assertEqual(RUN_PHASES.phase_reset_state(task_path, 0), (1, reset_at))
+            self.assertEqual(RUN_PHASES.phase_reset_state(task_path, 1), (1, reset_at))
 
     def test_runner_relationship_graph_generation_is_non_blocking(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

@@ -1206,7 +1206,10 @@ def validate_phase_attempt_commit(
     raw_path = artifacts.get("attempt_commit")
     if not isinstance(raw_path, str):
         return ["Phase result artifacts attempt_commit must be a path."]
-    commit_path = task_path / raw_path
+    commit_path, path_errors = resolve_task_relative_path(root, task_path, raw_path, "artifacts.attempt_commit")
+    if path_errors:
+        return path_errors
+    assert commit_path is not None
     try:
         commit = json.loads(commit_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -1214,18 +1217,53 @@ def validate_phase_attempt_commit(
     errors: list[str] = []
     if commit.get("phase") != phase_number or commit.get("attempt") != attempt:
         errors.append("attempt_commit phase/attempt does not match phase result.")
+    if "reset_generation" in commit or "reset_generation" in result_data:
+        if commit.get("reset_generation") != result_data.get("reset_generation"):
+            errors.append("attempt_commit reset_generation does not match phase result.")
     result_ref = commit.get("result") if isinstance(commit.get("result"), dict) else {}
+    result_ref_path = result_ref.get("path")
+    if not isinstance(result_ref_path, str):
+        errors.append("attempt_commit result path must be a path.")
+    else:
+        commit_result_path, path_errors = resolve_task_relative_path(
+            root,
+            task_path,
+            result_ref_path,
+            "attempt_commit.result.path",
+        )
+        errors.extend(path_errors)
+        if commit_result_path is not None and commit_result_path != result_path.resolve():
+            errors.append("attempt_commit result path does not match phase result.")
     if result_ref.get("sha256") != file_sha256(result_path):
         errors.append("attempt_commit result sha256 does not match phase result.")
     artifact_entries = commit.get("artifacts") if isinstance(commit.get("artifacts"), list) else []
     by_name = {item.get("name"): item for item in artifact_entries if isinstance(item, dict)}
+    for item in artifact_entries:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "unknown")
+        entry_path = item.get("path")
+        if isinstance(entry_path, str):
+            _target, path_errors = resolve_task_relative_path(
+                root,
+                task_path,
+                entry_path,
+                f"attempt_commit.artifacts.{name}.path",
+            )
+            errors.extend(path_errors)
     for name, path_value in artifacts.items():
         if name == "attempt_commit" or not isinstance(path_value, str):
+            continue
+        artifact_path, path_errors = resolve_task_relative_path(root, task_path, path_value, f"artifacts.{name}")
+        errors.extend(path_errors)
+        if artifact_path is None:
             continue
         entry = by_name.get(name)
         if not isinstance(entry, dict):
             continue
-        artifact_path = task_path / path_value
+        if entry.get("path") != path_value:
+            errors.append(f"{name} path does not match attempt_commit.")
+            continue
         if artifact_path.exists() and entry.get("sha256") != file_sha256(artifact_path):
             errors.append(f"{name} sha256 does not match attempt_commit.")
     return errors

@@ -544,6 +544,41 @@ def phase_baseline_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-baseline.json"
 
 
+def phase_reset_state(task_path: Path, phase_number: int) -> tuple[int, str]:
+    runtime_dir = task_path / "context-pack" / "runtime"
+    best_generation = 0
+    best_reset_at = ""
+    best_is_own_marker = False
+    for path in runtime_dir.glob("phase*-reset-marker.json"):
+        try:
+            marker = read_json(path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        marker_phase = marker.get("phase")
+        from_phase = marker.get("from_phase")
+        if not isinstance(marker_phase, int):
+            continue
+        if not isinstance(from_phase, int):
+            from_phase = marker_phase
+        if marker_phase > phase_number:
+            continue
+        if marker_phase != phase_number and from_phase > phase_number:
+            continue
+        reset_at = str(marker.get("reset_at") or "")
+        if reset_at < best_reset_at:
+            continue
+        is_own_marker = marker_phase == phase_number
+        if reset_at == best_reset_at and best_is_own_marker and not is_own_marker:
+            continue
+        generation = marker.get("reset_generation")
+        best_generation = (
+            generation if is_own_marker and isinstance(generation, int) and generation >= 0 else 0
+        )
+        best_is_own_marker = is_own_marker
+        best_reset_at = reset_at
+    return best_generation, best_reset_at
+
+
 def phase_obligation_closure_path(task_path: Path, phase_number: int, attempt: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-obligation-closure-attempt{attempt}.json"
 
@@ -1106,11 +1141,7 @@ def reset_phase_statuses(task_index: dict, from_phase: int, reset_at: str) -> li
         if phase_number < from_phase:
             continue
 
-        phase["status"] = "pending"
-        phase["reset_at"] = reset_at
-        phase["attempts"] = 0
-        for field in ["started_at", "completed_at", "failed_at", "error_message"]:
-            phase.pop(field, None)
+        apply_reset_projection_to_phase(phase, reset_at)
         reset_results.append(
             {
                 "phase": phase_number,
@@ -1120,6 +1151,14 @@ def reset_phase_statuses(task_index: dict, from_phase: int, reset_at: str) -> li
             }
         )
     return reset_results
+
+
+def apply_reset_projection_to_phase(phase: dict[str, object], reset_at: str) -> None:
+    phase["status"] = "pending"
+    phase["reset_at"] = reset_at
+    phase["attempts"] = 0
+    for field in ["started_at", "completed_at", "failed_at", "error_message"]:
+        phase.pop(field, None)
 
 
 def print_reset_summary(from_phase: int, reset_results: list[dict], dry_run: bool) -> None:
@@ -1481,6 +1520,20 @@ def task_relative(path: Path, task_path: Path) -> str:
     return str(path.relative_to(task_path))
 
 
+def resolve_task_artifact_path(task_path: Path, raw_path: object) -> Path | None:
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    path = Path(raw_path)
+    if path.is_absolute():
+        return None
+    target = (task_path / path).resolve()
+    try:
+        target.relative_to(task_path.resolve())
+    except ValueError:
+        return None
+    return target
+
+
 def write_ac_results(
     task_path: Path,
     phase_number: int,
@@ -1562,6 +1615,7 @@ def write_phase_result(
         "phase": phase_number,
         "status": "completed",
         "attempt": attempt,
+        "reset_generation": phase_reset_state(task_path, phase_number)[0],
         "codex_exit_code": codex_exit_code,
         "changed_files": changed_files,
         "commands_run": commands_run,
@@ -1665,7 +1719,9 @@ def write_phase_result(
 def _artifact_entry(name: str, task_path: Path, raw_path: object) -> dict[str, object] | None:
     if not isinstance(raw_path, str) or not raw_path:
         return None
-    path = task_path / raw_path
+    path = resolve_task_artifact_path(task_path, raw_path)
+    if path is None:
+        return {"name": name, "path": raw_path, "exists": False}
     entry: dict[str, object] = {"name": name, "path": raw_path, "exists": path.exists()}
     if path.exists() and path.is_file():
         entry["sha256"] = file_sha256(path)
@@ -1688,6 +1744,7 @@ def write_phase_attempt_commit(task_path: Path, phase_number: int, attempt: int,
         "commit_scope": "runtime_attempt_bundle",
         "phase": phase_number,
         "attempt": attempt,
+        "reset_generation": result.get("reset_generation", phase_reset_state(task_path, phase_number)[0]),
         "status": "committed",
         "policy_pack": result.get("policy_pack", runtime_policy_pack()),
         "harness_attestation": result.get("harness_attestation", RUNTIME_HARNESS_ATTESTATION),
@@ -1708,7 +1765,19 @@ def write_phase_attempt_commit(task_path: Path, phase_number: int, attempt: int,
 
 def write_phase_reset_marker(task_path: Path, phase_number: int, reset_at: str, from_phase: int) -> Path:
     path = phase_reset_marker_path(task_path, phase_number)
-    write_json(path, {"schema_version": 1, "phase": phase_number, "from_phase": from_phase, "reset_at": reset_at})
+    previous_generation, _previous_reset_at = phase_reset_state(task_path, phase_number)
+    reset_generation = previous_generation + 1
+    write_json(
+        path,
+        {
+            "schema_version": 1,
+            "phase": phase_number,
+            "from_phase": from_phase,
+            "reset_generation": reset_generation,
+            "reset_id": f"phase{phase_number}-reset{reset_generation}",
+            "reset_at": reset_at,
+        },
+    )
     return path
 
 
@@ -1732,9 +1801,9 @@ def attempt_commit_artifacts_valid(
         if not isinstance(item, dict):
             return False
         raw_path = item.get("path")
-        if not isinstance(raw_path, str) or not raw_path:
+        path = resolve_task_artifact_path(task_path, raw_path)
+        if path is None:
             return False
-        path = task_path / raw_path
         if not path.exists() or not path.is_file():
             return False
         if item.get("sha256") != file_sha256(path):
@@ -1742,32 +1811,48 @@ def attempt_commit_artifacts_valid(
     return True
 
 
+def phase_attempt_commit_sort_key(path: Path) -> tuple[int, str]:
+    match = re.search(r"-attempt(\d+)-commit\.json$", path.name)
+    attempt = int(match.group(1)) if match else -1
+    return attempt, path.name
+
+
 def latest_valid_phase_attempt_commit(task_path: Path, phase_number: int) -> dict[str, object] | None:
-    marker_path = phase_reset_marker_path(task_path, phase_number)
-    reset_at = ""
-    if marker_path.exists():
-        try:
-            marker = read_json(marker_path)
-            reset_at = str(marker.get("reset_at") or "")
-        except (OSError, json.JSONDecodeError):
-            reset_at = ""
-    commits = sorted((task_path / "context-pack" / "runtime").glob(f"phase{phase_number}-attempt*-commit.json"))
+    reset_generation, reset_at = phase_reset_state(task_path, phase_number)
+    commits = sorted(
+        (task_path / "context-pack" / "runtime").glob(f"phase{phase_number}-attempt*-commit.json"),
+        key=phase_attempt_commit_sort_key,
+    )
     valid: dict[str, object] | None = None
     for path in commits:
         try:
             data = read_json(path)
         except (OSError, json.JSONDecodeError):
             continue
-        if reset_at and str(data.get("committed_at") or "") < reset_at:
+        commit_generation = data.get("reset_generation")
+        if reset_generation > 0 and isinstance(commit_generation, int):
+            if commit_generation != reset_generation:
+                continue
+        elif reset_at and str(data.get("committed_at") or "") <= reset_at:
             continue
         result_ref = data.get("result") if isinstance(data.get("result"), dict) else {}
-        result_path = task_path / str(result_ref.get("path") or "")
+        result_path = resolve_task_artifact_path(task_path, result_ref.get("path"))
+        if result_path is None:
+            continue
         if not result_path.exists() or result_ref.get("sha256") != file_sha256(result_path):
             continue
         try:
             result_data = read_json(result_path)
         except (OSError, json.JSONDecodeError):
             continue
+        attempt = data.get("attempt")
+        if data.get("phase") != phase_number or result_data.get("phase") != phase_number:
+            continue
+        if not isinstance(attempt, int) or result_data.get("attempt") != attempt:
+            continue
+        if "reset_generation" in data or "reset_generation" in result_data:
+            if data.get("reset_generation") != result_data.get("reset_generation"):
+                continue
         if not attempt_commit_artifacts_valid(task_path, data, result_data):
             continue
         lineage, lineage_errors = approved_policy_pack_lineage(task_path)
@@ -1791,6 +1876,19 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
         phase_number = int(phase["phase"])
         status = phase.get("status")
         commit = latest_valid_phase_attempt_commit(task_path, phase_number)
+        _reset_generation, reset_at = phase_reset_state(task_path, phase_number)
+        if reset_at and status != "pending" and str(phase.get("reset_at") or "") != reset_at:
+            changes.append(
+                {
+                    "phase": phase_number,
+                    "from_status": status,
+                    "to_status": "pending",
+                    "reason": "reset_marker_without_projection",
+                }
+            )
+            if not dry_run:
+                apply_reset_projection_to_phase(phase, reset_at)
+            continue
         if status == "running" and commit:
             changes.append({"phase": phase_number, "from_status": status, "to_status": "completed", "reason": "valid_attempt_commit"})
             if not dry_run:
@@ -2818,13 +2916,13 @@ def apply_phase_reset(
         return task_index
 
     if reset_results:
-        write_json(index_path, task_index)
-        update_top_index(root, task_path.name, "pending")
         for item in reset_results:
             phase_number = int(item["phase"])
             write_phase_reset_marker(task_path, phase_number, reset_at, from_phase)
             phase_baseline_path(task_path, phase_number).unlink(missing_ok=True)
             clear_repair_packet(task_path, phase_number)
+        write_json(index_path, task_index)
+        update_top_index(root, task_path.name, "pending")
     return None
 
 
@@ -2837,6 +2935,10 @@ def earliest_repair_phase(task_path: Path, task_index: dict) -> int | None:
             candidates.append(phase_number)
         if (runtime_dir / f"phase{phase_number}-repair-packet.json").exists():
             candidates.append(phase_number)
+    for packet_path in runtime_dir.glob("phase*-repair-packet-attempt*.json"):
+        match = re.match(r"phase(\d+)-repair-packet-attempt\d+\.json$", packet_path.name)
+        if match:
+            candidates.append(int(match.group(1)))
     return min(candidates) if candidates else None
 
 
@@ -2847,15 +2949,18 @@ def apply_repair_resume(root: Path, task_path: Path, dry_run: bool) -> dict | No
     if from_phase is None:
         print("No repair packet or failed phase found.")
         return task_index if dry_run else None
-    reset_results = reset_phase_statuses(task_index, from_phase, now())
+    reset_at = now()
+    reset_results = reset_phase_statuses(task_index, from_phase, reset_at)
     print_reset_summary(from_phase, reset_results, dry_run)
     if dry_run:
         return task_index
     if reset_results:
+        for item in reset_results:
+            phase_number = int(item["phase"])
+            write_phase_reset_marker(task_path, phase_number, reset_at, from_phase)
+            phase_baseline_path(task_path, phase_number).unlink(missing_ok=True)
         write_json(index_path, task_index)
         update_top_index(root, task_path.name, "pending")
-        for item in reset_results:
-            phase_baseline_path(task_path, int(item["phase"])).unlink(missing_ok=True)
     return None
 
 

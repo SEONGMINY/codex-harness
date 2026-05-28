@@ -216,6 +216,7 @@ marker는 다음을 기록합니다.
 - schema version
 - runner version
 - phase와 attempt
+- reset generation
 - committed status와 committed_at
 - 적용된 policy pack metadata
 - design approval scope SHA-256
@@ -254,6 +255,13 @@ custom overlay의 policy fingerprint는 원본 파일 hash가 아니라 합성�
 검증자는 marker가 없거나 hash가 맞지 않으면 해당 completed phase를 신뢰하지 않습니다.
 `phase<N>-result.json`만 있고 commit marker가 없으면 partial commit으로 봅니다.
 `index.json`이 completed인데 marker가 없으면 projection corruption으로 보고 verify가 실패해야 합니다.
+
+reset은 timestamp만으로 구분하지 않습니다.
+`phase<N>-reset-marker.json`은 `reset_generation`을 증가시키고, 이후 생성되는 phase result와 attempt commit은 같은 `reset_generation`을 기록합니다.
+검증자는 현재 reset marker와 generation이 다른 commit을 이전 실행의 증거로 보고 무시합니다.
+generation이 없는 오래된 marker/commit은 backward compatibility를 위해 `reset_at`을 사용하지만, 같은 초에 reset된 legacy commit도 무효로 처리합니다.
+multi-phase reset은 marker를 index projection보다 먼저 씁니다.
+reset 도중 runner가 중단되어 일부 phase marker만 남아도, `from_phase` 이후 phase는 그 marker를 reset boundary로 사용해 old commit을 current projection으로 복구하지 않습니다.
 
 runner 시작 시에는 runtime proof와 `index.json` projection을 조정합니다.
 

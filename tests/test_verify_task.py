@@ -2485,6 +2485,274 @@ classDiagram
 
             self.assertTrue(any("obligation_closure sha256 does not match" in error for error in errors), errors)
 
+    def test_phase_attempt_commit_detects_reset_generation_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            result_data = {
+                "phase": 0,
+                "status": "completed",
+                "attempt": 1,
+                "reset_generation": 2,
+                "artifacts": {"attempt_commit": "context-pack/runtime/phase0-attempt1-commit.json"},
+            }
+            result_path = runtime_dir / "phase0-result.json"
+            result_path.write_text(json.dumps(result_data) + "\n", encoding="utf-8")
+            commit_path = runtime_dir / "phase0-attempt1-commit.json"
+            commit_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "runner_version": "0.1.5",
+                        "commit_scope": "runtime_attempt_bundle",
+                        "phase": 0,
+                        "attempt": 1,
+                        "reset_generation": 1,
+                        "status": "committed",
+                        "policy_pack": {},
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result.json",
+                            "sha256": VERIFY_TASK.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                        "artifact_count": 0,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.validate_phase_attempt_commit(
+                root,
+                task_path,
+                0,
+                1,
+                result_path,
+                result_data,
+                result_data["artifacts"],
+            )
+
+            self.assertTrue(any("reset_generation" in error for error in errors), errors)
+
+    def test_phase_attempt_commit_rejects_paths_escaping_task(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            result_path = runtime_dir / "phase0-result.json"
+            result_data = {
+                "phase": 0,
+                "status": "completed",
+                "attempt": 1,
+                "artifacts": {"attempt_commit": "../../outside-commit.json"},
+            }
+            result_path.write_text(json.dumps(result_data) + "\n", encoding="utf-8")
+
+            errors = VERIFY_TASK.validate_phase_attempt_commit(
+                root,
+                task_path,
+                0,
+                1,
+                result_path,
+                result_data,
+                result_data["artifacts"],
+            )
+
+            self.assertTrue(any("must not escape" in error for error in errors), errors)
+
+    def test_phase_attempt_commit_rejects_result_pointer_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            result_data = {
+                "phase": 0,
+                "status": "completed",
+                "attempt": 1,
+                "artifacts": {"attempt_commit": "context-pack/runtime/phase0-attempt1-commit.json"},
+            }
+            result_path = runtime_dir / "phase0-result.json"
+            result_path.write_text(json.dumps(result_data) + "\n", encoding="utf-8")
+            commit_path = runtime_dir / "phase0-attempt1-commit.json"
+            commit_path.write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "result": {
+                            "path": "../../outside-result.json",
+                            "sha256": VERIFY_TASK.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.validate_phase_attempt_commit(
+                root,
+                task_path,
+                0,
+                1,
+                result_path,
+                result_data,
+                result_data["artifacts"],
+            )
+
+            self.assertTrue(any("attempt_commit.result.path" in error for error in errors), errors)
+
+    def test_phase_attempt_commit_rejects_result_pointer_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            other_result = runtime_dir / "phase0-other-result.json"
+            other_result.write_text('{"phase":0}\n', encoding="utf-8")
+            result_data = {
+                "phase": 0,
+                "status": "completed",
+                "attempt": 1,
+                "artifacts": {"attempt_commit": "context-pack/runtime/phase0-attempt1-commit.json"},
+            }
+            result_path = runtime_dir / "phase0-result.json"
+            result_path.write_text(json.dumps(result_data) + "\n", encoding="utf-8")
+            commit_path = runtime_dir / "phase0-attempt1-commit.json"
+            commit_path.write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "result": {
+                            "path": "context-pack/runtime/phase0-other-result.json",
+                            "sha256": VERIFY_TASK.file_sha256(result_path),
+                        },
+                        "artifacts": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.validate_phase_attempt_commit(
+                root,
+                task_path,
+                0,
+                1,
+                result_path,
+                result_data,
+                result_data["artifacts"],
+            )
+
+            self.assertTrue(any("result path does not match" in error for error in errors), errors)
+
+    def test_phase_attempt_commit_rejects_internal_artifact_path_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            result_data = {
+                "phase": 0,
+                "status": "completed",
+                "attempt": 1,
+                "artifacts": {
+                    "attempt_commit": "context-pack/runtime/phase0-attempt1-commit.json",
+                    "gate": "../../outside-gate.json",
+                },
+            }
+            result_path = runtime_dir / "phase0-result.json"
+            result_path.write_text(json.dumps(result_data) + "\n", encoding="utf-8")
+            commit_path = runtime_dir / "phase0-attempt1-commit.json"
+            commit_path.write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result.json",
+                            "sha256": VERIFY_TASK.file_sha256(result_path),
+                        },
+                        "artifacts": [{"name": "gate", "path": "../../outside-gate.json", "exists": False}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.validate_phase_attempt_commit(
+                root,
+                task_path,
+                0,
+                1,
+                result_path,
+                result_data,
+                result_data["artifacts"],
+            )
+
+            self.assertTrue(any("must not escape" in error for error in errors), errors)
+
+    def test_phase_attempt_commit_rejects_commit_entry_path_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            gate_path = runtime_dir / "phase0-gate-attempt1.json"
+            gate_path.write_text('{"status":"passed"}\n', encoding="utf-8")
+            result_data = {
+                "phase": 0,
+                "status": "completed",
+                "attempt": 1,
+                "artifacts": {
+                    "attempt_commit": "context-pack/runtime/phase0-attempt1-commit.json",
+                    "gate": "context-pack/runtime/phase0-gate-attempt1.json",
+                },
+            }
+            result_path = runtime_dir / "phase0-result.json"
+            result_path.write_text(json.dumps(result_data) + "\n", encoding="utf-8")
+            commit_path = runtime_dir / "phase0-attempt1-commit.json"
+            commit_path.write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "result": {
+                            "path": "context-pack/runtime/phase0-result.json",
+                            "sha256": VERIFY_TASK.file_sha256(result_path),
+                        },
+                        "artifacts": [
+                            {
+                                "name": "gate",
+                                "path": "../../outside-gate.json",
+                                "sha256": VERIFY_TASK.file_sha256(gate_path),
+                                "exists": True,
+                            }
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.validate_phase_attempt_commit(
+                root,
+                task_path,
+                0,
+                1,
+                result_path,
+                result_data,
+                result_data["artifacts"],
+            )
+
+            self.assertTrue(any("must not escape" in error for error in errors), errors)
+            self.assertTrue(any("path does not match" in error for error in errors), errors)
+
     def test_latest_repo_content_attestation_rejects_current_file_drift(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "repo"
