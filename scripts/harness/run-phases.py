@@ -2930,6 +2930,60 @@ def clear_repair_packet(task_path: Path, phase_number: int) -> None:
         path.unlink(missing_ok=True)
 
 
+def repair_context_integrity_errors(task_path: Path, phase_number: int) -> list[str]:
+    packet_path = phase_repair_packet_path(task_path, phase_number)
+    summary_path = phase_repair_packet_summary_path(task_path, phase_number)
+    if not packet_path.exists() and not summary_path.exists():
+        return []
+    errors: list[str] = []
+    if not packet_path.exists() or not summary_path.exists():
+        return [f"Phase {phase_number} repair context requires both packet JSON and summary markdown."]
+    try:
+        packet = read_json(packet_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"Invalid phase {phase_number} repair packet JSON: {exc}"]
+    if not isinstance(packet, dict):
+        return [f"Phase {phase_number} repair packet must be a JSON object."]
+    if repair_packet_markdown(packet) != summary_path.read_text(encoding="utf-8", errors="replace"):
+        errors.append(f"Phase {phase_number} repair packet summary does not match packet JSON.")
+    attempt = packet.get("attempt")
+    if not isinstance(attempt, int) or attempt <= 0:
+        return errors
+    attempt_packet_path = phase_attempt_repair_packet_path(task_path, phase_number, attempt)
+    attempt_summary_path = phase_attempt_repair_packet_summary_path(task_path, phase_number, attempt)
+    if not attempt_packet_path.exists() or not attempt_summary_path.exists():
+        errors.append(f"Phase {phase_number} repair packet alias is missing attempt-scoped repair artifacts.")
+        return errors
+    try:
+        attempt_packet = read_json(attempt_packet_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        errors.append(f"Invalid phase {phase_number} attempt {attempt} repair packet JSON: {exc}")
+        attempt_packet = None
+    if isinstance(attempt_packet, dict) and attempt_packet != packet:
+        errors.append(f"Phase {phase_number} repair packet alias does not match attempt-scoped repair packet.")
+    if attempt_summary_path.read_text(encoding="utf-8", errors="replace") != summary_path.read_text(
+        encoding="utf-8", errors="replace"
+    ):
+        errors.append(f"Phase {phase_number} repair packet summary alias does not match attempt-scoped summary.")
+    matching_records = [
+        record
+        for record in read_attempt_manifest_records(task_path, phase_number)
+        if record.get("attempt") == attempt and record.get("record_type") in {"attempt_failed", "attempt_interrupted"}
+    ]
+    if not matching_records:
+        errors.append(f"Phase {phase_number} repair packet has no matching failed/interrupted manifest record.")
+        return errors
+    record = matching_records[-1]
+    for key, expected_path in [
+        ("repair_packet", attempt_packet_path),
+        ("repair_packet_summary", attempt_summary_path),
+    ]:
+        ref = record.get(key) if isinstance(record.get(key), dict) else {}
+        if ref.get("sha256") != file_sha256(expected_path):
+            errors.append(f"Phase {phase_number} manifest {key} sha256 does not match repair artifact.")
+    return errors
+
+
 def generate_docs_diff(root: Path, task_path: Path, baseline: str | None) -> None:
     output_path = task_path / "context-pack" / "runtime" / "docs-diff.md"
     if not baseline:
@@ -3452,6 +3506,7 @@ def execute_phase(
     preflight_errors.extend(current_policy_lineage_errors(task_path))
     preflight_errors.extend(nested_codex_preflight_errors(args))
     preflight_errors.extend(preflight_phase(root, task_path, task_index, phase))
+    preflight_errors.extend(repair_context_integrity_errors(task_path, phase_number))
     if preflight_errors:
         message = "Preflight failed:\n" + "\n".join(f"- {error}" for error in preflight_errors)
         if not args.dry_run:

@@ -1070,6 +1070,44 @@ def validate_commit_artifact_ref(
     return errors
 
 
+def validate_runtime_artifact_ref(
+    root: Path,
+    task_path: Path,
+    entry: object,
+    label: str,
+    *,
+    expected_name: str | None = None,
+    expected_path: str | None = None,
+) -> list[str]:
+    if not isinstance(entry, dict):
+        return [f"{label} must be an artifact reference."]
+    errors: list[str] = []
+    if expected_name is not None and entry.get("name") != expected_name:
+        errors.append(f"{label} name must be {expected_name}.")
+    raw_path = entry.get("path")
+    if expected_path is not None and raw_path != expected_path:
+        errors.append(f"{label} path must be {expected_path}.")
+    if not isinstance(raw_path, str) or not raw_path:
+        errors.append(f"{label} path must be a non-empty string.")
+        return errors
+    target, path_errors = resolve_task_relative_path(root, task_path, raw_path, f"{label}.path")
+    errors.extend(path_errors)
+    if target is None:
+        return errors
+    exists = entry.get("exists")
+    if exists is True:
+        if not target.exists() or not target.is_file():
+            errors.append(f"{label} path does not exist: {rel(root, target)}")
+        elif entry.get("sha256") != file_sha256(target):
+            errors.append(f"{label} sha256 does not match current artifact.")
+    elif exists is False:
+        if target.exists():
+            errors.append(f"{label} exists is false but path exists: {rel(root, target)}")
+    else:
+        errors.append(f"{label} exists must be true or false.")
+    return errors
+
+
 def validate_evaluation_commit(
     root: Path,
     task_path: Path,
@@ -1925,6 +1963,214 @@ def validate_obligation_closure_ledger(
     return errors
 
 
+TERMINAL_ATTEMPT_RECORD_TYPES = {"attempt_committed", "attempt_failed", "attempt_interrupted"}
+
+
+def phase_attempt_manifest_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-attempt-manifest.jsonl"
+
+
+def phase_repair_packet_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-repair-packet.json"
+
+
+def phase_repair_packet_summary_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-repair-packet.md"
+
+
+def phase_attempt_repair_packet_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-repair-packet-attempt{attempt}.json"
+
+
+def phase_attempt_repair_packet_summary_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-repair-packet-attempt{attempt}.md"
+
+
+def read_phase_attempt_manifest(
+    root: Path,
+    task_path: Path,
+    phase_number: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    path = phase_attempt_manifest_path(task_path, phase_number)
+    if not path.exists():
+        return [], []
+    records: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            errors.append(f"Invalid attempt manifest JSON: {rel(root, path)}:{line_number}: {exc}")
+            continue
+        if not isinstance(record, dict):
+            errors.append(f"Attempt manifest record must be a JSON object: {rel(root, path)}:{line_number}")
+            continue
+        records.append(record)
+    return records, errors
+
+
+def validate_repair_packet_file(
+    root: Path,
+    task_path: Path,
+    path: Path,
+    phase_number: int,
+    *,
+    expected_attempt: int | None = None,
+    expected_failure: object = None,
+    expected_artifacts: object = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    try:
+        packet = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, [f"Invalid repair packet JSON: {rel(root, path)}: {exc}"]
+    if not isinstance(packet, dict):
+        return None, [f"Repair packet must be a JSON object: {rel(root, path)}"]
+    errors: list[str] = []
+    if packet.get("phase") != phase_number:
+        errors.append(f"Repair packet phase must be {phase_number}: {rel(root, path)}")
+    attempt = packet.get("attempt")
+    if expected_attempt is not None and attempt != expected_attempt:
+        errors.append(f"Repair packet attempt must be {expected_attempt}: {rel(root, path)}")
+    if packet.get("status") != "repair_required":
+        errors.append(f'Repair packet status must be "repair_required": {rel(root, path)}')
+    failure = packet.get("failure")
+    if not isinstance(failure, dict):
+        errors.append(f"Repair packet failure must be an object: {rel(root, path)}")
+    else:
+        if not isinstance(failure.get("type"), str) or not failure.get("type"):
+            errors.append(f"Repair packet failure.type must be a non-empty string: {rel(root, path)}")
+        if not isinstance(failure.get("message"), str) or not failure.get("message"):
+            errors.append(f"Repair packet failure.message must be a non-empty string: {rel(root, path)}")
+        if not isinstance(failure.get("retryable"), bool):
+            errors.append(f"Repair packet failure.retryable must be boolean: {rel(root, path)}")
+    if isinstance(expected_failure, dict) and failure != expected_failure:
+        errors.append(f"Repair packet failure does not match attempt manifest: {rel(root, path)}")
+    artifacts = packet.get("failed_attempt_artifacts")
+    if artifacts is not None:
+        if not isinstance(artifacts, list):
+            errors.append(f"Repair packet failed_attempt_artifacts must be a list: {rel(root, path)}")
+        else:
+            for index, entry in enumerate(artifacts):
+                errors.extend(
+                    validate_runtime_artifact_ref(
+                        root,
+                        task_path,
+                        entry,
+                        f"Repair packet failed_attempt_artifacts[{index}]",
+                    )
+                )
+    if isinstance(expected_artifacts, list) and artifacts != expected_artifacts:
+        errors.append(f"Repair packet failed_attempt_artifacts do not match attempt manifest: {rel(root, path)}")
+    return packet, errors
+
+
+def validate_phase_attempt_manifest(
+    root: Path,
+    task_path: Path,
+    phase: dict[str, Any],
+) -> list[str]:
+    phase_number = int(phase["phase"])
+    records, errors = read_phase_attempt_manifest(root, task_path, phase_number)
+    terminal_by_attempt: dict[int, list[dict[str, Any]]] = {}
+    for index, record in enumerate(records):
+        label = f"Attempt manifest phase {phase_number} record {index + 1}"
+        if record.get("schema_version") != 1:
+            errors.append(f"{label} schema_version must be 1.")
+        if record.get("artifact_kind") != "phase_attempt_manifest_record":
+            errors.append(f'{label} artifact_kind must be "phase_attempt_manifest_record".')
+        record_type = record.get("record_type")
+        if record_type not in {"attempt_started", *TERMINAL_ATTEMPT_RECORD_TYPES}:
+            errors.append(f"{label} record_type is invalid: {record_type!r}")
+        if record.get("phase") != phase_number:
+            errors.append(f"{label} phase must be {phase_number}.")
+        attempt = record.get("attempt")
+        if not isinstance(attempt, int) or attempt <= 0:
+            errors.append(f"{label} attempt must be a positive integer.")
+            continue
+        if isinstance(record_type, str) and record_type in TERMINAL_ATTEMPT_RECORD_TYPES:
+            terminal_by_attempt.setdefault(attempt, []).append(record)
+        errors.extend(validate_runner_version(record.get("runner_version"), label))
+        policy = record.get("policy_pack")
+        if policy is not None:
+            errors.extend(validate_policy_pack_metadata(policy, label))
+        attestation = record.get("harness_attestation")
+        if attestation is not None:
+            errors.extend(validate_harness_attestation_metadata(attestation, label))
+        for artifact_key in ["result", "attempt_commit", "repair_packet", "repair_packet_summary"]:
+            if artifact_key in record:
+                errors.extend(
+                    validate_runtime_artifact_ref(
+                        root,
+                        task_path,
+                        record.get(artifact_key),
+                        f"{label}.{artifact_key}",
+                        expected_name=artifact_key,
+                    )
+                )
+        if isinstance(record.get("artifacts"), list):
+            for artifact_index, entry in enumerate(record["artifacts"]):
+                errors.extend(
+                    validate_runtime_artifact_ref(
+                        root,
+                        task_path,
+                        entry,
+                        f"{label}.artifacts[{artifact_index}]",
+                    )
+                )
+
+    for attempt, terminals in terminal_by_attempt.items():
+        if len(terminals) > 1:
+            errors.append(f"Attempt manifest phase {phase_number} attempt {attempt} has multiple terminal records.")
+        terminal = terminals[-1]
+        record_type = terminal.get("record_type")
+        if record_type in {"attempt_failed", "attempt_interrupted"}:
+            packet_ref = terminal.get("repair_packet") if isinstance(terminal.get("repair_packet"), dict) else {}
+            raw_packet_path = packet_ref.get("path")
+            if isinstance(raw_packet_path, str):
+                packet_path, path_errors = resolve_task_relative_path(
+                    root,
+                    task_path,
+                    raw_packet_path,
+                    f"Attempt manifest phase {phase_number} attempt {attempt}.repair_packet.path",
+                )
+                errors.extend(path_errors)
+                if packet_path is not None:
+                    _packet, packet_errors = validate_repair_packet_file(
+                        root,
+                        task_path,
+                        packet_path,
+                        phase_number,
+                        expected_attempt=attempt,
+                        expected_failure=terminal.get("failure"),
+                        expected_artifacts=terminal.get("artifacts"),
+                    )
+                    errors.extend(packet_errors)
+
+    expected_attempt = phase.get("attempts")
+    if phase.get("status") == "completed" and isinstance(expected_attempt, int) and expected_attempt > 0 and records:
+        committed = [
+            record
+            for record in terminal_by_attempt.get(expected_attempt, [])
+            if record.get("record_type") == "attempt_committed"
+        ]
+        if not committed:
+            errors.append(f"Completed phase {phase_number} attempt {expected_attempt} is missing attempt_committed manifest record.")
+        if phase_repair_packet_path(task_path, phase_number).exists():
+            errors.append(f"Completed phase {phase_number} must not retain active repair packet alias.")
+        if phase_repair_packet_summary_path(task_path, phase_number).exists():
+            errors.append(f"Completed phase {phase_number} must not retain active repair packet summary alias.")
+
+    active_packet = phase_repair_packet_path(task_path, phase_number)
+    if active_packet.exists() and phase.get("status") != "completed":
+        _packet, packet_errors = validate_repair_packet_file(root, task_path, active_packet, phase_number)
+        errors.extend(packet_errors)
+        if not phase_repair_packet_summary_path(task_path, phase_number).exists():
+            errors.append(f"Active repair packet summary is missing for phase {phase_number}.")
+    return errors
+
+
 def verify(
     root: Path,
     task_path: Path,
@@ -2107,6 +2353,8 @@ def verify(
                 errors.append(f"Missing AC commands for phase {phase_number}.")
             if not expected_outputs:
                 errors.append(f"Missing required outputs for phase {phase_number}.")
+
+        errors.extend(validate_phase_attempt_manifest(root, task_path, phase))
 
         if phase.get("status") == "completed":
             expected_attempt = phase.get("attempts") if isinstance(phase.get("attempts"), int) else None

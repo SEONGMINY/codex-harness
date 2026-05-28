@@ -1224,6 +1224,90 @@ classDiagram
             self.assertTrue(any("runner_version must match current" in error for error in errors), errors)
             self.assertTrue(any("policy_pack does not match current" in error for error in errors), errors)
 
+    def test_phase_attempt_manifest_rejects_tampered_repair_packet_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True)
+            prompt = runtime / "phase0-prompt-attempt1.md"
+            prompt.write_text("prompt\n", encoding="utf-8")
+            artifact = {
+                "name": "prompt",
+                "path": "context-pack/runtime/phase0-prompt-attempt1.md",
+                "exists": True,
+                "sha256": VERIFY_TASK.file_sha256(prompt),
+            }
+            failure = {
+                "type": "acceptance_commands",
+                "message": "AC command failed.",
+                "retryable": True,
+                "codex_exit_code": None,
+                "stderr_tail": "",
+            }
+            packet_path = runtime / "phase0-repair-packet-attempt1.json"
+            summary_path = runtime / "phase0-repair-packet-attempt1.md"
+            packet = {
+                "phase": 0,
+                "attempt": 1,
+                "status": "repair_required",
+                "failure": failure,
+                "failed_attempt_artifacts": [{**artifact, "sha256": "tampered"}],
+            }
+            packet_path.write_text(json.dumps(packet) + "\n", encoding="utf-8")
+            summary_path.write_text("repair summary\n", encoding="utf-8")
+            manifest_record = {
+                "schema_version": 1,
+                "artifact_kind": "phase_attempt_manifest_record",
+                "record_type": "attempt_failed",
+                "phase": 0,
+                "attempt": 1,
+                "runner_version": VERIFY_TASK.HARNESS_VERSION,
+                "failure": failure,
+                "retryable": True,
+                "repair_packet": {
+                    "name": "repair_packet",
+                    "path": "context-pack/runtime/phase0-repair-packet-attempt1.json",
+                    "exists": True,
+                    "sha256": VERIFY_TASK.file_sha256(packet_path),
+                },
+                "repair_packet_summary": {
+                    "name": "repair_packet_summary",
+                    "path": "context-pack/runtime/phase0-repair-packet-attempt1.md",
+                    "exists": True,
+                    "sha256": VERIFY_TASK.file_sha256(summary_path),
+                },
+                "artifacts": [artifact],
+            }
+            (runtime / "phase0-attempt-manifest.jsonl").write_text(
+                json.dumps(manifest_record) + "\n",
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.validate_phase_attempt_manifest(
+                root,
+                task_path,
+                {"phase": 0, "name": "demo", "status": "error", "attempts": 1},
+            )
+
+            self.assertTrue(any("failed_attempt_artifacts" in error for error in errors), errors)
+
+    def test_phase_attempt_manifest_rejects_invalid_json_line(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True)
+            (runtime / "phase0-attempt-manifest.jsonl").write_text("{not json}\n", encoding="utf-8")
+
+            errors = VERIFY_TASK.validate_phase_attempt_manifest(
+                root,
+                task_path,
+                {"phase": 0, "name": "demo", "status": "error", "attempts": 1},
+            )
+
+            self.assertTrue(any("Invalid attempt manifest JSON" in error for error in errors), errors)
+
     def test_extract_design_repo_paths_reads_files_to_change_section(self) -> None:
         text = """# Implementation Design Review
 

@@ -3156,6 +3156,66 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertIn("## Cleanup Required", markdown)
             self.assertIn("docs/product/dependency-policy.md", markdown)
 
+    def test_execute_phase_rejects_tampered_repair_packet_alias_before_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "docs": [],
+                        "common_docs": [],
+                        "phases": [{"phase": 0, "name": "demo", "status": "pending", "attempts": 1}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            phase = {"phase": 0, "name": "demo"}
+            packet = RUN_PHASES.build_repair_packet(
+                task_path,
+                0,
+                phase,
+                1,
+                "acceptance_commands",
+                "AC command failed.",
+                retryable=True,
+                required_outputs=[],
+                required_repo_outputs=[],
+            )
+            RUN_PHASES.write_repair_packet(task_path, 0, packet, attempt=1)
+            RUN_PHASES.phase_repair_packet_summary_path(task_path, 0).write_text(
+                "tampered summary\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=2,
+                ac_timeout=600,
+                codex_bin=str(Path(raw_tmp) / "unused-codex"),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+                subprocess_timeout=1800,
+                strict_current_harness=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "run_codex", side_effect=AssertionError("repair prompt should not start")),
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            self.assertTrue(args.failed)
+            last_error = (
+                task_path / "context-pack" / "runtime" / "phase0-last-error.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn("repair packet summary", last_error)
+
     def test_gate_fails_when_required_repo_output_missing(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
