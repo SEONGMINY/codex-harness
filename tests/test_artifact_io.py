@@ -110,6 +110,17 @@ class ArtifactIOTest(unittest.TestCase):
 
             self.assertEqual(path.read_text(encoding="utf-8"), "one\ntwo\n")
 
+    def test_open_append_text_flushes_and_fsyncs_before_close(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            path = Path(raw_tmp) / "runtime" / "progress.md"
+
+            with mock.patch.object(ARTIFACT_IO.os, "fsync") as fsync:
+                with ARTIFACT_IO.open_append_text(path) as handle:
+                    handle.write("one\n")
+
+            fsync.assert_called_once()
+            self.assertEqual(path.read_text(encoding="utf-8"), "one\n")
+
     def test_open_append_text_rejects_symlink_target(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp)

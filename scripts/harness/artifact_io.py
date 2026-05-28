@@ -108,4 +108,8 @@ def open_append_text(path: Path, boundary: Path | None = None) -> Iterator[TextI
             raise SymlinkPathError(f"runner-owned artifact path must not be a symlink: {path}") from exc
         raise
     with os.fdopen(fd, "a", encoding="utf-8") as handle:
-        yield handle
+        try:
+            yield handle
+        finally:
+            handle.flush()
+            os.fsync(handle.fileno())
