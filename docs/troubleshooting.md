@@ -170,6 +170,11 @@ python3 .codex/harness/scripts/run-phases.py <task-dir> --from <N> --full-auto
 
 하네스가 직접 실행하는 장기 subprocess는 timeout 시 새 process group 전체에 종료 신호를 보냅니다.
 일반적인 `pnpm install`, 확인 명령, verifier/evaluator, launcher subprocess는 이 경계 안에서 정리됩니다.
+Codex 실행은 두 제한을 같이 사용합니다. `--codex-idle-timeout`은 활동이 멈춘 실행을 막고,
+`--codex-max-runtime`은 stdout, stderr, 파일 변경이 계속 있어도 전체 실행 시간이 끝없이 늘어나는 것을 막습니다.
+launcher가 Generate를 실행할 때 `run-phases.py` 전체를 감싸는 `--runner-timeout`은 기본적으로 꺼져 있습니다.
+runner 내부의 phase/evaluation proof가 먼저 실패 이유를 기록하게 하기 위한 선택입니다.
+`--subprocess-timeout` 기본값은 `--codex-max-runtime`보다 길어서 evaluator 같은 wrapper가 inner Codex timeout proof보다 먼저 죽지 않게 합니다.
 
 한계:
 

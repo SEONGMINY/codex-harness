@@ -1572,6 +1572,96 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(returncode, RUN_PHASES.CODEX_IDLE_EXIT_CODE)
             self.assertIn("idle timeout", stderr_path.read_text(encoding="utf-8"))
 
+    def test_codex_max_runtime_bounds_continuous_stdout_process(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    sys.stdin.read()
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        print('still active', flush=True)
+                        time.sleep(0.1)
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+            output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+            stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+
+            started = time.monotonic()
+            returncode = RUN_PHASES.run_codex(
+                root,
+                task_path,
+                1,
+                "prompt",
+                output_path,
+                stderr_path,
+                str(fake),
+                False,
+                False,
+                1,
+                2,
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(returncode, RUN_PHASES.CODEX_MAX_RUNTIME_EXIT_CODE)
+            self.assertLess(elapsed, 4.0)
+            self.assertIn("still active", output_path.read_text(encoding="utf-8"))
+            stderr = stderr_path.read_text(encoding="utf-8")
+            self.assertIn("max runtime timeout", stderr)
+            self.assertNotIn("idle timeout", stderr)
+
+    def test_codex_max_runtime_bounds_continuous_watched_file_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            self.write_contract(root, task_path, ["src/**"])
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    sys.stdin.read()
+                    from pathlib import Path
+                    target = Path.cwd() / "src" / "out.txt"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        target.write_text(str(time.monotonic()) + "\\n", encoding="utf-8")
+                        time.sleep(0.2)
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+            output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+            stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+
+            started = time.monotonic()
+            returncode = RUN_PHASES.run_codex(
+                root,
+                task_path,
+                1,
+                "prompt",
+                output_path,
+                stderr_path,
+                str(fake),
+                False,
+                False,
+                1,
+                2,
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(returncode, RUN_PHASES.CODEX_MAX_RUNTIME_EXIT_CODE)
+            self.assertLess(elapsed, 4.0)
+            self.assertTrue((root / "src" / "out.txt").exists())
+            stderr = stderr_path.read_text(encoding="utf-8")
+            self.assertIn("max runtime timeout", stderr)
+            self.assertNotIn("idle timeout", stderr)
+
     @unittest.skipIf(sys.platform == "win32", "process group cleanup is POSIX-specific")
     def test_codex_idle_timeout_kills_sigterm_ignoring_child_process(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -2086,6 +2176,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 eval_command=["npm test"],
                 full_auto=True,
                 yolo=True,
+                codex_max_runtime=1800,
                 subprocess_timeout=1800,
             )
 
@@ -2114,6 +2205,8 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertIn("npm test", calls[3])
             self.assertIn("--full-auto", calls[3])
             self.assertIn("--yolo", calls[3])
+            self.assertIn("--codex-max-runtime", calls[3])
+            self.assertEqual(calls[3][calls[3].index("--codex-max-runtime") + 1], "1800")
             self.assertIn("--task-lock-held", calls[3])
             self.assertIn("--repo-lock-held", calls[3])
 
@@ -2162,7 +2255,13 @@ class RunCodexRuntimeTest(unittest.TestCase):
             installed_scripts = root / ".codex" / "harness" / "scripts"
             installed_scripts.mkdir(parents=True)
             original_script_dir = RUN_PHASES.SCRIPT_DIR
-            args = argparse.Namespace(eval_command=[], full_auto=False, yolo=False, subprocess_timeout=1)
+            args = argparse.Namespace(
+                eval_command=[],
+                full_auto=False,
+                yolo=False,
+                codex_max_runtime=1800,
+                subprocess_timeout=1,
+            )
 
             try:
                 RUN_PHASES.SCRIPT_DIR = installed_scripts

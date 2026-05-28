@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Iterable
 
 from artifact_io import atomic_write_json, atomic_write_text
-from codex_exec import add_output_schema, run_codex_exec
+from codex_exec import CODEX_MAX_RUNTIME_EXIT_CODE, add_output_schema, run_codex_exec
 from command_policy import run_command
 from file_lock import LockHandle, acquire_repo_execution_lock, acquire_task_runtime_lock, release_lock
 from harness_attestation import harness_attestation
@@ -56,6 +56,13 @@ def design_approval_scope_sha(task_path: Path) -> str | None:
 
 def now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return parsed
 
 
 def file_sha256(path: Path) -> str:
@@ -314,6 +321,7 @@ def run_codex(
     yolo: bool,
     idle_timeout: int,
     activity_paths: Iterable[Path],
+    max_runtime: int = 1800,
 ) -> int:
     command = [codex_bin, "exec", "--json"]
     if last_message_path is not None:
@@ -332,6 +340,7 @@ def run_codex(
         output_path=output_path,
         stderr_path=stderr_path,
         idle_timeout=idle_timeout,
+        max_runtime=max_runtime,
         activity_paths=activity_paths,
     )
 
@@ -347,9 +356,15 @@ def main() -> int:
     parser.add_argument("--full-auto", action="store_true", help="Pass --full-auto to codex exec.")
     parser.add_argument(
         "--codex-idle-timeout",
-        type=int,
+        type=non_negative_int,
         default=300,
         help="Fail codex exec after this many seconds with no activity. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--codex-max-runtime",
+        type=non_negative_int,
+        default=1800,
+        help="Fail codex exec after this many wall-clock seconds even if activity continues. Use 0 to disable.",
     )
     parser.add_argument(
         "--yolo",
@@ -428,6 +443,7 @@ def main() -> int:
             args.yolo,
             args.codex_idle_timeout,
             [runtime_dir],
+            max_runtime=args.codex_max_runtime,
         )
         if returncode != 0:
             print(f"codex exec failed. See {stderr_path}.", file=sys.stderr)

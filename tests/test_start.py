@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -756,6 +757,8 @@ class StartLauncherTest(unittest.TestCase):
                     "--full-auto",
                     "--codex-bin",
                     str(fake),
+                    "--codex-max-runtime",
+                    "7",
                 ],
                 text=True,
                 capture_output=True,
@@ -784,9 +787,51 @@ class StartLauncherTest(unittest.TestCase):
             self.assertIn("--full-auto", argv)
             self.assertIn("--evaluate", argv)
             self.assertIn("--strict-current-harness", argv)
+            self.assertIn("--codex-max-runtime", argv)
+            self.assertEqual(argv[argv.index("--codex-max-runtime") + 1], "7")
             self.assertIn("--subprocess-timeout", argv)
-            self.assertEqual(argv[argv.index("--subprocess-timeout") + 1], "1800")
+            self.assertEqual(argv[argv.index("--subprocess-timeout") + 1], "1920")
             self.assertNotIn("--yolo", argv)
+
+    def test_launcher_codex_max_runtime_bounds_active_process(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            run_dir = repo / ".codex" / "harness" / "sessions" / "active-timeout"
+            run_dir.mkdir(parents=True)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    import time
+                    sys.stdin.read()
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        print('{"event":"active"}', flush=True)
+                        time.sleep(0.1)
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+            args = argparse.Namespace(
+                codex_bin=str(fake),
+                model=None,
+                reasoning_effort="",
+                yolo=False,
+                full_auto=False,
+                docs_approved=False,
+                codex_idle_timeout=10,
+                codex_max_runtime=1,
+            )
+
+            started = time.monotonic()
+            returncode = harness_start.run_codex(repo, "prompt", run_dir, args)
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(returncode, 124)
+            self.assertLess(elapsed, 3.0)
+            self.assertIn('{"event":"active"}', (run_dir / "harness-output.jsonl").read_text(encoding="utf-8"))
+            self.assertIn("max runtime timeout", (run_dir / "harness-stderr.txt").read_text(encoding="utf-8"))
 
     def test_planned_with_design_approval_requires_verify_task_success(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

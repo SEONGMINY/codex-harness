@@ -73,6 +73,44 @@ class EvaluateTaskTest(unittest.TestCase):
             self.assertEqual(returncode, 0, stderr_path.read_text(encoding="utf-8"))
             self.assertIn('{"event":"done"}', output_path.read_text(encoding="utf-8"))
 
+    def test_evaluation_codex_max_runtime_bounds_active_process(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            fake = tmp / "fake-codex.py"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "from __future__ import annotations\n"
+                "import sys\n"
+                "import time\n"
+                "sys.stdin.read()\n"
+                "deadline = time.monotonic() + 5\n"
+                "while time.monotonic() < deadline:\n"
+                "    print('{\"event\":\"active\"}', flush=True)\n"
+                "    time.sleep(0.1)\n",
+                encoding="utf-8",
+            )
+            fake.chmod(fake.stat().st_mode | 0o111)
+            output_path = tmp / "evaluation-output.jsonl"
+            stderr_path = tmp / "evaluation-stderr.txt"
+
+            returncode = EVALUATE_TASK.run_codex(
+                tmp,
+                "prompt",
+                output_path,
+                stderr_path,
+                None,
+                str(fake),
+                False,
+                False,
+                10,
+                [tmp],
+                max_runtime=1,
+            )
+
+            self.assertEqual(returncode, EVALUATE_TASK.CODEX_MAX_RUNTIME_EXIT_CODE)
+            self.assertIn('{"event":"active"}', output_path.read_text(encoding="utf-8"))
+            self.assertIn("max runtime timeout", stderr_path.read_text(encoding="utf-8"))
+
     def test_dry_run_writes_metadata_object_without_prompting_on_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "repo"

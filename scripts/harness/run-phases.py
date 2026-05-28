@@ -26,7 +26,7 @@ if __name__ == "__main__":
         raise SystemExit(1) from exc
     validate_entrypoint_install_or_exit(sys.argv[1:], HARNESS_VERSION)
 
-from codex_exec import CODEX_IDLE_EXIT_CODE, add_output_schema, run_codex_exec
+from codex_exec import CODEX_IDLE_EXIT_CODE, CODEX_MAX_RUNTIME_EXIT_CODE, add_output_schema, run_codex_exec
 from artifact_io import atomic_write_json, atomic_write_text, open_append_text
 from decision_registry import (
     load_decision_registry,
@@ -1320,6 +1320,7 @@ def run_codex(
     full_auto: bool,
     yolo: bool,
     idle_timeout: int,
+    max_runtime: int = 1800,
 ) -> int:
     command = [codex_bin, "exec", "--json"]
     add_output_schema(command, SCHEMA_DIR / "phase-final.schema.json")
@@ -1351,6 +1352,7 @@ def run_codex(
         stderr_path=stderr_path,
         env=env,
         idle_timeout=idle_timeout,
+        max_runtime=max_runtime,
         activity_paths=phase_activity_paths(root, task_path, phase_number),
     )
 
@@ -2724,14 +2726,16 @@ def run_evaluation(root: Path, task_path: Path, args: argparse.Namespace) -> int
         command.append("--full-auto")
     if args.yolo:
         command.append("--yolo")
+    command.extend(["--codex-max-runtime", str(getattr(args, "codex_max_runtime", 1800))])
     command.append("--task-lock-held")
     command.append("--repo-lock-held")
+    subprocess_timeout = getattr(args, "subprocess_timeout", 1800)
     try:
         result = run_process(
             command,
             cwd=root,
             env=sanitized_env(overrides={"PWD": str(root)}, allow_harness_policy_controls=True),
-            timeout=getattr(args, "subprocess_timeout", 1800) or None,
+            timeout=subprocess_timeout or None,
         )
     except OSError as exc:
         print(f"Evaluation failed to start: {exc}", file=sys.stderr)
@@ -2741,7 +2745,7 @@ def run_evaluation(root: Path, task_path: Path, args: argparse.Namespace) -> int
         print(output, file=sys.stderr if result.returncode != 0 else sys.stdout)
     if result.timed_out:
         print(
-            f"Evaluation timed out after {getattr(args, 'subprocess_timeout', 1800)} seconds.",
+            f"Evaluation timed out after {subprocess_timeout} seconds.",
             file=sys.stderr,
         )
         if not result.cleanup_confirmed:
@@ -2895,6 +2899,7 @@ def run_evaluation_improvement(
         output_path=output_path,
         stderr_path=stderr_path,
         idle_timeout=getattr(args, "codex_idle_timeout", 300),
+        max_runtime=getattr(args, "codex_max_runtime", 1800),
         activity_paths=[root / path for path in allowed_paths] + [evaluation_repair_handoff_path(task_path, iteration)],
     )
     after = worktree_snapshot(root)
@@ -3294,6 +3299,7 @@ def execute_phase(
             args.full_auto,
             args.yolo,
             args.codex_idle_timeout,
+            getattr(args, "codex_max_runtime", 1800),
         )
         if returncode != 0:
             message = f"codex exec failed with exit code {returncode}. See {stderr_path}."
@@ -3706,6 +3712,12 @@ def main() -> int:
         default=300,
         help="Fail codex exec after this many seconds with no stdout/stderr/stdin or watched file activity. Use 0 to disable.",
     )
+    parser.add_argument(
+        "--codex-max-runtime",
+        type=non_negative_int,
+        default=1800,
+        help="Fail codex exec after this many wall-clock seconds even if activity continues. Use 0 to disable.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Only build the next prompt.")
     parser.add_argument("--one", action="store_true", help="Run only one pending phase.")
     parser.add_argument(
@@ -3732,7 +3744,7 @@ def main() -> int:
     parser.add_argument(
         "--subprocess-timeout",
         type=non_negative_int,
-        default=1800,
+        default=1920,
         help="Timeout for runner-owned verify/evaluate subprocesses. Use 0 to disable.",
     )
     parser.add_argument(

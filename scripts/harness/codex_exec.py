@@ -17,6 +17,7 @@ from redaction import redact_text
 
 
 CODEX_IDLE_EXIT_CODE = 124
+CODEX_MAX_RUNTIME_EXIT_CODE = 124
 SKIP_ACTIVITY_DIRS = {
     ".git",
     ".codex-harness",
@@ -131,13 +132,15 @@ def run_codex_exec(
     stderr_path: Path,
     env: dict[str, str] | None = None,
     idle_timeout: int = 300,
+    max_runtime: int = 1800,
     activity_paths: Iterable[Path] = (),
 ) -> int:
     atomic_write_text(output_path, "")
     atomic_write_text(stderr_path, "")
 
     activity_queue: queue.Queue[float] = queue.Queue()
-    last_activity = time.monotonic()
+    started_at = time.monotonic()
+    last_activity = started_at
     process_env = sanitized_env(
         env,
         allow_harness_policy_controls=True,
@@ -178,13 +181,17 @@ def run_codex_exec(
     for thread in threads:
         thread.start()
 
-    idle_timed_out = False
+    timeout_reason: str | None = None
     watched_paths = list(activity_paths)
     last_watched_marker = activity_marker(watched_paths)
     last_mtime_check = 0.0
     mtime_check_interval = min(2.0, max(0.1, idle_timeout / 2)) if idle_timeout > 0 else 2.0
     while process.poll() is None:
         now = time.monotonic()
+        if max_runtime > 0 and now - started_at > max_runtime:
+            timeout_reason = "max_runtime"
+            terminate_process_group(process)
+            break
         last_activity = drain_activity_queue(activity_queue, last_activity)
         if watched_paths and now - last_mtime_check >= mtime_check_interval:
             watched_marker = activity_marker(watched_paths)
@@ -193,15 +200,18 @@ def run_codex_exec(
                 last_activity = now
             last_mtime_check = now
         if idle_timeout > 0 and now - last_activity > idle_timeout:
-            idle_timed_out = True
+            timeout_reason = "idle"
             terminate_process_group(process)
             break
-        time.sleep(0.5)
+        sleep_seconds = 0.5
+        if max_runtime > 0:
+            sleep_seconds = min(sleep_seconds, max(0.0, max_runtime - (time.monotonic() - started_at)))
+        time.sleep(sleep_seconds)
 
     for thread in threads:
         thread.join(timeout=5)
 
-    if idle_timed_out:
+    if timeout_reason == "idle":
         with open_append_text(stderr_path) as handle:
             handle.write(
                 "\n"
@@ -209,5 +219,12 @@ def run_codex_exec(
                 "with no stdout/stderr/stdin or watched file activity.\n"
             )
         return CODEX_IDLE_EXIT_CODE
+    if timeout_reason == "max_runtime":
+        with open_append_text(stderr_path) as handle:
+            handle.write(
+                "\n"
+                f"[codex-harness] codex exec max runtime timeout after {max_runtime} seconds.\n"
+            )
+        return CODEX_MAX_RUNTIME_EXIT_CODE
 
     return process.returncode or 0

@@ -408,6 +408,7 @@ def run_codex(
         stderr_path=stderr_path,
         env=env,
         idle_timeout=args.codex_idle_timeout,
+        max_runtime=args.codex_max_runtime,
         activity_paths=activity_paths,
     )
 
@@ -543,6 +544,8 @@ def run_phases(root: Path, task_path: Path, run_dir: Path, args: argparse.Namesp
         args.codex_bin,
         "--codex-idle-timeout",
         str(args.codex_idle_timeout),
+        "--codex-max-runtime",
+        str(args.codex_max_runtime),
         "--subprocess-timeout",
         str(args.subprocess_timeout),
     ]
@@ -555,7 +558,7 @@ def run_phases(root: Path, task_path: Path, run_dir: Path, args: argparse.Namesp
     if getattr(args, "strict_current_harness", False):
         command.append("--strict-current-harness")
 
-    return run_subprocess_to_files(command, root, output_path, stderr_path, args.subprocess_timeout)
+    return run_subprocess_to_files(command, root, output_path, stderr_path, args.runner_timeout)
 
 
 def run_phases_dry_run(root: Path, task_path: Path, run_dir: Path, args: argparse.Namespace) -> int:
@@ -931,10 +934,22 @@ def main() -> int:
         help="Fail codex exec after this many seconds with no activity. Use 0 to disable.",
     )
     parser.add_argument(
-        "--subprocess-timeout",
+        "--codex-max-runtime",
         type=non_negative_int,
         default=1800,
-        help="Fail launcher-owned verify/review/runner subprocesses after this many seconds. Use 0 to disable.",
+        help="Fail codex exec after this many wall-clock seconds even if activity continues. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--subprocess-timeout",
+        type=non_negative_int,
+        default=1920,
+        help="Fail launcher-owned verify/review subprocesses after this many seconds. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--runner-timeout",
+        type=non_negative_int,
+        default=0,
+        help="Fail the launcher-owned run-phases subprocess after this many seconds. Defaults to 0 so runner-owned proof can record inner timeouts.",
     )
     parser.add_argument(
         "--yolo",
