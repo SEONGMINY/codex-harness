@@ -22,6 +22,17 @@ SHELL_COMMAND_SEPARATORS = {"&&", "||", ";", "|"}
 REDIRECT_TOKENS = {">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>", "<", "<<", "<<<"}
 SUPPORTED_WRITE_TOOLS = ["Bash", "apply_patch", "Edit", "Write", "MultiEdit", "NotebookEdit"]
 HOOK_WRITE_TOOL_MATCHER = "|".join(SUPPORTED_WRITE_TOOLS)
+OPAQUE_BASH_EVAL_FLAGS = {
+    "bash": {"-c", "-lc"},
+    "node": {"-e", "--eval"},
+    "perl": {"-e"},
+    "python": {"-c"},
+    "python3": {"-c"},
+    "ruby": {"-e"},
+    "sh": {"-c"},
+    "zsh": {"-c"},
+}
+OPAQUE_BASH_COMMANDS = {"tee"}
 RUNNER_OWNED_PATTERNS = [
     re.compile(r"^tasks/index\.json$"),
     re.compile(r"^tasks/[^/]+/index\.json$"),
@@ -273,6 +284,36 @@ def extract_bash_write_paths(command: str) -> list[str]:
     for simple_command in _split_simple_commands(tokens):
         paths.extend(_simple_command_write_paths(simple_command))
     return paths
+
+
+def bash_policy_violations(command: str) -> list[str]:
+    errors: list[str] = []
+    if "<<" in command:
+        errors.append("Bash here-doc input is opaque to codex-harness scope checks.")
+    try:
+        tokens = _shell_tokens(command)
+    except ValueError as exc:
+        return [f"Bash command must parse before phase execution: {exc}"]
+    for simple_command in _split_simple_commands(tokens):
+        effective_tokens = _without_redirections(simple_command)
+        if not effective_tokens:
+            continue
+        executable = Path(effective_tokens[0]).name
+        if executable in OPAQUE_BASH_COMMANDS:
+            errors.append(f"Bash command is opaque to codex-harness scope checks: {executable}")
+            continue
+        eval_flags = OPAQUE_BASH_EVAL_FLAGS.get(executable, set())
+        for token in effective_tokens[1:]:
+            for flag in eval_flags:
+                if token == flag or token.startswith(f"{flag}=") or (
+                    flag in {"-c", "-e"} and token.startswith(flag) and token != flag
+                ):
+                    errors.append(
+                        "Bash interpreter eval mode is opaque to codex-harness scope checks: "
+                        f"{executable} {token}"
+                    )
+                    break
+    return errors
 
 
 def _extract_path_fields(value: Any) -> list[str]:

@@ -22,6 +22,7 @@ from harness_common import (  # noqa: E402
     HarnessContext,
     HOOK_WRITE_TOOL_MATCHER,
     active_context,
+    bash_policy_violations,
     extract_tool_write_paths,
     runner_owned,
     scope_violations,
@@ -160,6 +161,40 @@ class HookContextTest(unittest.TestCase):
             output = json.loads(stdout.getvalue())
             self.assertEqual(output["decision"], "block")
             self.assertIn("outside.txt", output["reason"])
+
+    def test_pre_tool_hook_blocks_opaque_bash_commands(self) -> None:
+        commands = [
+            "python3 -c 'from pathlib import Path; Path(\"outside.txt\").write_text(\"x\")'",
+            "node -e 'require(\"fs\").writeFileSync(\"outside.txt\", \"x\")'",
+            "bash -c 'echo x > outside.txt'",
+            "python3 - <<'PY'\nprint('opaque')\nPY",
+            "echo x | tee outside.txt",
+        ]
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp).resolve()
+            task_path, contract_path = self.make_context_files(root)
+            for command in commands:
+                with self.subTest(command=command):
+                    event = {
+                        "cwd": str(root),
+                        "tool_name": "Bash",
+                        "tool_input": {"command": command},
+                    }
+
+                    with (
+                        mock.patch.dict(os.environ, self.harness_env(root, task_path, contract_path), clear=True),
+                        mock.patch("sys.stdin", StringIO(json.dumps(event))),
+                        mock.patch("sys.stdout", new_callable=StringIO) as stdout,
+                    ):
+                        self.assertEqual(harness_pre_tool_use.main(), 0)
+
+                    output = json.loads(stdout.getvalue())
+                    self.assertEqual(output["decision"], "block")
+                    self.assertIn("cannot be proven", output["reason"])
+
+    def test_bash_policy_allows_path_explicit_commands_for_scope_check(self) -> None:
+        self.assertEqual(bash_policy_violations("mkdir -p src/generated"), [])
+        self.assertEqual(bash_policy_violations("printf ok > src/generated/file.txt"), [])
 
     def test_post_tool_hook_blocks_write_outside_phase_scope(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
