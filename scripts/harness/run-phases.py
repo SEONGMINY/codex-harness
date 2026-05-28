@@ -63,6 +63,7 @@ from file_lock import (
     task_runtime_lock_path,
 )
 from harness_attestation import attestation_fingerprint, harness_attestation
+from install_preflight import install_validation_errors
 from obligation_ledger import build_phase_obligation_assertion_outcomes, design_obligations_by_id
 from policy_pack import policy_pack_metadata
 from policy_lineage import (
@@ -141,66 +142,7 @@ def append_progress(task_path: Path, message: str) -> None:
 
 
 def harness_install_errors(root: Path) -> list[str]:
-    manifest_path = root / "codex-harness.json"
-    install_manifest_path = root / ".codex" / "harness" / "install-manifest.json"
-    if not manifest_path.exists():
-        return ["Missing codex-harness.json. Reinstall codex-harness in this project."]
-    required_paths = [
-        root / ".codex" / "harness" / "scripts" / "artifact_io.py",
-        root / ".codex" / "harness" / "scripts" / "command_policy.py",
-        root / ".codex" / "harness" / "scripts" / "env_policy.py",
-        root / ".codex" / "harness" / "scripts" / "file_lock.py",
-        root / ".codex" / "harness" / "scripts" / "harness_attestation.py",
-        root / ".codex" / "harness" / "scripts" / "install_preflight.py",
-        root / ".codex" / "harness" / "scripts" / "obligation_ledger.py",
-        root / ".codex" / "harness" / "scripts" / "policy-packs" / "default-security.json",
-        root / ".codex" / "harness" / "scripts" / "policy_lineage.py",
-        root / ".codex" / "harness" / "scripts" / "policy_pack.py",
-        root / ".codex" / "harness" / "scripts" / "process_runner.py",
-        root / ".codex" / "harness" / "scripts" / "redaction.py",
-        root / ".codex" / "harness" / "scripts" / "run-phases.py",
-        root / ".codex" / "harness" / "scripts" / "verify-task.py",
-        root / ".codex" / "harness" / "scripts" / "run-quality-checks.py",
-        root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
-        root / ".codex" / "harness" / "scripts" / "runtime_protocol.py",
-        root / ".codex" / "harness" / "scripts" / "scope_policy.py",
-        root / ".codex" / "harness" / "scripts" / "task_paths.py",
-        install_manifest_path,
-    ]
-    missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
-    if missing_required:
-        return [
-            "codex-harness is not installed in this project. Missing: "
-            + ", ".join(missing_required)
-        ]
-    try:
-        manifest = read_json(manifest_path)
-    except (json.JSONDecodeError, OSError) as exc:
-        return [f"Invalid codex-harness.json: {exc}"]
-
-    version = manifest.get("version")
-    if version != HARNESS_VERSION:
-        return [
-            "codex-harness version mismatch: "
-            f"script={HARNESS_VERSION}, manifest={version or '(missing)'}. "
-            "Reinstall or update codex-harness in this project."
-        ]
-    try:
-        install_manifest = read_json(install_manifest_path)
-    except (json.JSONDecodeError, OSError) as exc:
-        return [f"Invalid codex-harness install manifest: {exc}"]
-    expected = attestation_fingerprint(
-        install_manifest.get("runtime_attestation") if isinstance(install_manifest, dict) else None
-    )
-    current = attestation_fingerprint(harness_attestation(root / ".codex" / "harness" / "scripts"))
-    if expected is None:
-        return ["codex-harness install manifest is missing a valid runtime_attestation."]
-    if current != expected:
-        return [
-            "codex-harness installed runtime drift detected. "
-            "Reinstall or update codex-harness in this project."
-        ]
-    return []
+    return install_validation_errors(root, HARNESS_VERSION)
 
 
 def non_negative_int(value: str) -> int:
@@ -2384,6 +2326,23 @@ def completed_phase_runtime_check(
     return check
 
 
+def runtime_projection_drift_checks(root: Path, task_path: Path) -> list[dict[str, object]]:
+    checks: list[dict[str, object]] = []
+    for change in reconcile_runtime_projection(root, task_path, dry_run=True):
+        to_status = change.get("to_status")
+        severity = "error" if to_status == "error" else "warning"
+        checks.append(
+            {
+                "id": "phase.runtime_projection.drift",
+                "severity": severity,
+                **change,
+                "message": "Task index phase projection differs from runtime proof.",
+                "operator_action": "Run the phase runner normally to reconcile projection before relying on task status.",
+            }
+        )
+    return checks
+
+
 def doctor_runtime_proof(root: Path, task_path: Path, *, apply_backfill: bool) -> dict[str, object]:
     task_index = read_json(task_path / "index.json")
     checks: list[dict[str, object]] = []
@@ -2393,6 +2352,7 @@ def doctor_runtime_proof(root: Path, task_path: Path, *, apply_backfill: bool) -
         check = completed_phase_runtime_check(task_path, phase, apply_backfill=apply_backfill)
         if check is not None:
             checks.append(check)
+    checks.extend(runtime_projection_drift_checks(root, task_path))
     blocking = [
         check
         for check in checks
@@ -3284,6 +3244,7 @@ def repair_context_integrity_errors(task_path: Path, phase_number: int) -> list[
         errors.append(f"Phase {phase_number} repair packet summary does not match packet JSON.")
     attempt = packet.get("attempt")
     if not isinstance(attempt, int) or attempt <= 0:
+        errors.append(f"Phase {phase_number} repair packet attempt must be a positive integer.")
         return errors
     attempt_packet_path = phase_attempt_repair_packet_path(task_path, phase_number, attempt)
     attempt_summary_path = phase_attempt_repair_packet_summary_path(task_path, phase_number, attempt)
@@ -3870,42 +3831,6 @@ def execute_phase(
 
     max_attempts, ac_timeout = contract_validation_budget(initial_contract, args)
 
-    install_errors = run_install_preflight(root, task_path, args)
-    if install_errors:
-        message = "\n".join(install_errors)
-        write_last_error(task_path, phase_number, message)
-        task_index = read_json(index_path)
-        set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
-        write_json(index_path, task_index)
-        update_top_index(root, task_path.name, "error")
-        try:
-            contract = initial_contract or runtime_phase_contract(task_path, phase_number)
-            required_outputs = contract_outputs(phase, contract)
-            required_repo_outputs = contract_repo_outputs(contract)
-        except (FileNotFoundError, ValueError):
-            contract = None
-            required_outputs = []
-            required_repo_outputs = []
-        write_repair_packet(
-            task_path,
-            phase_number,
-            build_repair_packet(
-                task_path,
-                phase_number,
-                phase,
-                attempts,
-                "install_preflight",
-                message,
-                retryable=install_preflight_failure_retryable(task_path),
-                contract=contract,
-                required_outputs=required_outputs,
-                required_repo_outputs=required_repo_outputs,
-            ),
-        )
-        print(message, file=sys.stderr)
-        args.failed = True
-        return False
-
     if attempts >= max_attempts:
         message = (
             "Phase attempt budget exhausted: "
@@ -3975,6 +3900,44 @@ def execute_phase(
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(prompt_path, prompt)
         atomic_write_text(task_path / "context-pack" / "runtime" / f"phase{phase_number}-prompt.md", prompt)
+
+        install_errors = run_install_preflight(root, task_path, args)
+        if install_errors:
+            message = "\n".join(install_errors)
+            write_last_error(task_path, phase_number, message)
+            task_index = read_json(index_path)
+            set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
+            write_json(index_path, task_index)
+            update_top_index(root, task_path.name, "error")
+            try:
+                contract = runtime_phase_contract(task_path, phase_number, attempt)
+                required_outputs = contract_outputs(phase, contract)
+                required_repo_outputs = contract_repo_outputs(contract)
+            except (FileNotFoundError, ValueError):
+                contract = initial_contract
+                required_outputs = contract_outputs(phase, contract) if contract else []
+                required_repo_outputs = contract_repo_outputs(contract) if contract else []
+            write_repair_packet(
+                task_path,
+                phase_number,
+                build_repair_packet(
+                    task_path,
+                    phase_number,
+                    phase,
+                    attempt,
+                    "install_preflight",
+                    message,
+                    retryable=attempt < max_attempts and install_preflight_failure_retryable(task_path),
+                    contract=contract,
+                    required_outputs=required_outputs,
+                    required_repo_outputs=required_repo_outputs,
+                ),
+                attempt=attempt,
+            )
+            print(message, file=sys.stderr)
+            args.failed = True
+            return False
+
         returncode = run_codex(
             root,
             task_path,

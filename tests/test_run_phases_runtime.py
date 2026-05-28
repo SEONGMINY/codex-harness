@@ -1321,6 +1321,26 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(report["checks"][0]["id"], "phase.attempt_manifest.missing_committed_record")
             self.assertFalse(RUN_PHASES.phase_attempt_manifest_path(task_path, 0).exists())
 
+    def test_runtime_doctor_reports_non_completed_projection_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_valid_attempt_commit(root, task_path, phase=0, attempt=1)
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "running", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=False)
+
+            self.assertEqual(report["status"], "fail")
+            self.assertEqual(report["checks"][0]["id"], "phase.runtime_projection.drift")
+            self.assertEqual(report["checks"][0]["from_status"], "running")
+            self.assertEqual(report["checks"][0]["to_status"], "completed")
+            self.assertEqual(report["checks"][0]["reason"], "valid_attempt_commit")
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(task_index["phases"][0]["status"], "running")
+            self.assertFalse(RUN_PHASES.phase_attempt_manifest_path(task_path, 0).exists())
+
     def test_runtime_doctor_backfills_completed_phase_manifest_from_valid_commit(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
@@ -2948,7 +2968,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             )
             args = argparse.Namespace(
                 dry_run=False,
-                max_attempts=1,
+                max_attempts=2,
                 ac_timeout=600,
                 codex_bin=str(tmp / "unused-codex"),
                 full_auto=False,
@@ -2987,7 +3007,14 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 )
             )
             self.assertEqual(repair_packet["failure"]["type"], "install_preflight")
+            self.assertEqual(repair_packet["attempt"], 1)
             self.assertTrue(repair_packet["failure"]["retryable"])
+            self.assertTrue(RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).exists())
+            self.assertTrue(RUN_PHASES.phase_attempt_repair_packet_summary_path(task_path, 0, 1).exists())
+            manifest = self.read_attempt_manifest(task_path, 0)
+            self.assertEqual([record["record_type"] for record in manifest], ["attempt_started", "attempt_failed"])
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(task_index["phases"][0]["attempts"], 1)
 
     def test_execute_phase_dry_run_does_not_mutate_runtime_proof_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -3758,6 +3785,28 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(packet["contaminating_changes"], ["docs/product/dependency-policy.md"])
             self.assertIn("## Cleanup Required", markdown)
             self.assertIn("docs/product/dependency-policy.md", markdown)
+
+    def test_repair_context_rejects_non_positive_attempt_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            _root, task_path = self.make_task(Path(raw_tmp))
+            packet = RUN_PHASES.build_repair_packet(
+                task_path,
+                0,
+                {"name": "demo"},
+                0,
+                "install_preflight",
+                "Install preflight failed.",
+                retryable=True,
+            )
+            RUN_PHASES.write_json(RUN_PHASES.phase_repair_packet_path(task_path, 0), packet)
+            RUN_PHASES.phase_repair_packet_summary_path(task_path, 0).write_text(
+                RUN_PHASES.repair_packet_markdown(packet),
+                encoding="utf-8",
+            )
+
+            errors = RUN_PHASES.repair_context_integrity_errors(task_path, 0)
+
+            self.assertTrue(any("attempt must be a positive integer" in error for error in errors), errors)
 
     def test_execute_phase_rejects_tampered_repair_packet_alias_before_retry(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
