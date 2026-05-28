@@ -39,7 +39,7 @@ RUNNER_OWNED_PATTERNS = [
         r"evidence(?:-attempt\d+)?|reconciliation(?:-attempt\d+)?|gate(?:-attempt\d+)?|"
         r"quality(?:-attempt\d+)?|handoff-attempt\d+|result(?:-attempt\d+)?|"
         r"last-error|repair-packet(?:-attempt\d+)?|reset-marker|baseline|"
-        r"attempt\d+-commit|obligation-closure-attempt\d+)"
+        r"attempt\d+-commit|attempt-manifest|obligation-closure-attempt\d+)"
         r"\.(?:md|json|jsonl|txt)$"
     ),
     re.compile(r"^tasks/[^/]+/context-pack/runtime/run-phases\.lock$"),

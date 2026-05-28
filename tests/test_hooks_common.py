@@ -208,6 +208,7 @@ class HookContextTest(unittest.TestCase):
     def test_runner_owned_patterns_cover_runtime_proof_artifacts(self) -> None:
         runner_paths = [
             "tasks/demo/context-pack/runtime/phase0-attempt1-commit.json",
+            "tasks/demo/context-pack/runtime/phase0-attempt-manifest.jsonl",
             "tasks/demo/context-pack/runtime/phase0-obligation-closure-attempt1.json",
             "tasks/demo/context-pack/runtime/phase0-result-attempt1.json",
             "tasks/demo/context-pack/runtime/phase0-handoff-attempt1.md",

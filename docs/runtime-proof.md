@@ -50,12 +50,14 @@ phase<N>-reconciliation.json
 phase<N>-reconciliation.md
 phase<N>-gate.json
 phase<N>-quality.json
+phase<N>-attempt-manifest.jsonl
 phase<N>-result.json
 ```
 
 무결성 기준은 attempt-scoped 파일입니다. `phase<N>-attempt<M>-commit.json`은
 해당 attempt의 prompt, contract, checklist, handoff, evidence, gate, quality, reconciliation, result와 실행 산출물 hash를 고정합니다.
 phase-scoped alias는 최신 attempt를 보기 위한 편의 파일이며 commit proof의 기준으로 쓰지 않습니다.
+`phase<N>-attempt-manifest.jsonl`은 attempt lifecycle ledger입니다. attempt start, failed terminal state, committed terminal state를 구조화해 남기지만, 완료 판정은 여전히 `phase<N>-result-attempt<M>.json`과 `phase<N>-attempt<M>-commit.json`의 hash 검증을 기준으로 합니다.
 
 실패하거나 다시 시도하면 다음 파일도 생깁니다.
 
@@ -77,6 +79,7 @@ progress.md
 ```
 
 이 파일은 현재 phase, attempt, gate 실패, 완료 같은 runner 이벤트를 사람이 확인하기 위한 로그입니다.
+기계가 재현 가능한 attempt lifecycle은 `phase<N>-attempt-manifest.jsonl`을 기준으로 봅니다.
 
 planned 또는 generated 상태에서는 task artifact 관계를 확인하는 파생 출력도 생성됩니다.
 

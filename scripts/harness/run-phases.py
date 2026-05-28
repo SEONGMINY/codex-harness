@@ -543,6 +543,10 @@ def phase_attempt_commit_path(task_path: Path, phase_number: int, attempt: int) 
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-attempt{attempt}-commit.json"
 
 
+def phase_attempt_manifest_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-attempt-manifest.jsonl"
+
+
 def phase_result_artifacts_exist(task_path: Path, phase_number: int) -> bool:
     runtime_dir = task_path / "context-pack" / "runtime"
     return phase_result_path(task_path, phase_number).exists() or any(
@@ -874,14 +878,33 @@ def materialize_phase_contract_bundle(
     return contract_data
 
 
-def runtime_phase_contract(task_path: Path, phase_number: int) -> dict:
-    path = phase_contract_path(task_path, phase_number)
+def runtime_phase_contract(task_path: Path, phase_number: int, attempt: int | None = None) -> dict:
+    path = (
+        phase_attempt_contract_path(task_path, phase_number, attempt)
+        if isinstance(attempt, int) and attempt > 0
+        else phase_contract_path(task_path, phase_number)
+    )
     if not path.exists():
         raise FileNotFoundError(f"Missing runtime phase contract: {path}")
     data = read_json(path)
     if not isinstance(data, dict):
         raise ValueError(f"Runtime phase contract must be a JSON object: {path}")
     return data
+
+
+def verify_runtime_contract_unchanged(
+    task_path: Path,
+    phase_number: int,
+    attempt: int,
+    original_contract: dict,
+) -> list[str]:
+    try:
+        attempt_contract = runtime_phase_contract(task_path, phase_number, attempt)
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+        return [f"Runtime attempt contract missing or invalid after Codex execution: {exc}"]
+    if phase_contract_hash(attempt_contract) != phase_contract_hash(original_contract):
+        return ["Runtime attempt contract changed during Codex execution."]
+    return []
 
 
 def verify_phase_contract_unchanged(task_path: Path, phase_number: int, original_contract: dict) -> list[str]:
@@ -1677,14 +1700,11 @@ def write_phase_result(
             "gate": task_relative(gate_artifact_path, task_path),
         },
     }
-    handoff_path = phase_handoff_path(task_path, phase_number)
-    attempt_handoff_path = phase_attempt_handoff_path(task_path, phase_number, attempt)
-    if handoff_path.exists():
-        attempt_handoff_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(attempt_handoff_path, handoff_path.read_text(encoding="utf-8"))
+    attempt_handoff_path = snapshot_attempt_handoff(task_path, phase_number, attempt)
+    if attempt_handoff_path is not None:
         result["artifacts"]["handoff"] = task_relative(attempt_handoff_path, task_path)
     else:
-        result["artifacts"]["handoff"] = task_relative(handoff_path, task_path)
+        result["artifacts"]["handoff"] = task_relative(phase_handoff_path(task_path, phase_number), task_path)
     approval_path = task_path / "context-pack" / "static" / "design-approval.json"
     if approval_path.exists():
         try:
@@ -1773,6 +1793,52 @@ def _artifact_entry(name: str, task_path: Path, raw_path: object) -> dict[str, o
     if path.exists() and path.is_file():
         entry["sha256"] = file_sha256(path)
     return entry
+
+
+def artifact_ref(task_path: Path, name: str, path: Path) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "name": name,
+        "path": task_relative(path, task_path),
+        "exists": path.exists(),
+    }
+    if path.exists() and path.is_file():
+        entry["sha256"] = file_sha256(path)
+    return entry
+
+
+def append_attempt_manifest_record(
+    task_path: Path,
+    phase_number: int,
+    attempt: int,
+    record_type: str,
+    **fields: object,
+) -> None:
+    reset_generation, reset_at = phase_reset_state(task_path, phase_number)
+    record = {
+        "schema_version": 1,
+        "artifact_kind": "phase_attempt_manifest_record",
+        "record_type": record_type,
+        "phase": phase_number,
+        "attempt": attempt,
+        "reset_generation": reset_generation,
+        "reset_at": reset_at,
+        "recorded_at": now(),
+        "runner_version": HARNESS_VERSION,
+        "policy_pack": policy_pack_fingerprint(runtime_policy_pack()),
+        "harness_attestation": attestation_fingerprint(RUNTIME_HARNESS_ATTESTATION),
+        **fields,
+    }
+    with open_append_text(phase_attempt_manifest_path(task_path, phase_number)) as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def snapshot_attempt_handoff(task_path: Path, phase_number: int, attempt: int) -> Path | None:
+    handoff_path = phase_handoff_path(task_path, phase_number)
+    if not handoff_path.exists():
+        return None
+    attempt_handoff_path = phase_attempt_handoff_path(task_path, phase_number, attempt)
+    atomic_write_text(attempt_handoff_path, handoff_path.read_text(encoding="utf-8"))
+    return attempt_handoff_path
 
 
 def write_phase_attempt_commit(task_path: Path, phase_number: int, attempt: int, result_path: Path) -> Path:
@@ -2582,6 +2648,7 @@ def write_repair_packet(
     attempt: int | None = None,
 ) -> None:
     if attempt is not None:
+        snapshot_attempt_handoff(task_path, phase_number, attempt)
         artifact_paths = [
             ("prompt", phase_attempt_prompt_path(task_path, phase_number, attempt)),
             ("contract", phase_attempt_contract_path(task_path, phase_number, attempt)),
@@ -2594,17 +2661,9 @@ def write_repair_packet(
             ("gate", phase_attempt_gate_path(task_path, phase_number, attempt)),
             ("reconciliation", phase_attempt_reconciliation_path(task_path, phase_number, attempt)),
             ("reconciliation_summary", phase_attempt_reconciliation_summary_path(task_path, phase_number, attempt)),
+            ("handoff", phase_attempt_handoff_path(task_path, phase_number, attempt)),
         ]
-        failed_attempt_artifacts = []
-        for name, path in artifact_paths:
-            entry: dict[str, object] = {
-                "name": name,
-                "path": task_relative(path, task_path),
-                "exists": path.exists(),
-            }
-            if path.exists() and path.is_file():
-                entry["sha256"] = file_sha256(path)
-            failed_attempt_artifacts.append(entry)
+        failed_attempt_artifacts = [artifact_ref(task_path, name, path) for name, path in artifact_paths]
         packet = {**packet, "failed_attempt_artifacts": failed_attempt_artifacts}
     markdown = repair_packet_markdown(packet)
     if attempt is not None:
@@ -2612,6 +2671,24 @@ def write_repair_packet(
         atomic_write_text(phase_attempt_repair_packet_summary_path(task_path, phase_number, attempt), markdown)
     write_json(phase_repair_packet_path(task_path, phase_number), packet)
     atomic_write_text(phase_repair_packet_summary_path(task_path, phase_number), markdown)
+    if attempt is not None:
+        failure = packet.get("failure") if isinstance(packet.get("failure"), dict) else {}
+        append_attempt_manifest_record(
+            task_path,
+            phase_number,
+            attempt,
+            "attempt_failed",
+            status="failed",
+            failure=failure,
+            retryable=failure.get("retryable"),
+            repair_packet=artifact_ref(task_path, "repair_packet", phase_attempt_repair_packet_path(task_path, phase_number, attempt)),
+            repair_packet_summary=artifact_ref(
+                task_path,
+                "repair_packet_summary",
+                phase_attempt_repair_packet_summary_path(task_path, phase_number, attempt),
+            ),
+            artifacts=failed_attempt_artifacts,
+        )
 
 
 def clear_attempt_artifacts(task_path: Path, phase_number: int) -> None:
@@ -3134,6 +3211,25 @@ def execute_phase(
 
     for attempt in range(attempts + 1, max_attempts + 1):
         append_progress(task_path, f"phase {phase_number}: attempt {attempt} started")
+        prompt_path = phase_attempt_prompt_path(task_path, phase_number, attempt)
+        contract_path = phase_attempt_contract_path(task_path, phase_number, attempt)
+        checklist_path = phase_attempt_checklist_path(task_path, phase_number, attempt)
+        output_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-output-attempt{attempt}.jsonl"
+        stderr_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-stderr-attempt{attempt}.txt"
+        append_attempt_manifest_record(
+            task_path,
+            phase_number,
+            attempt,
+            "attempt_started",
+            status="running",
+            artifacts=[
+                artifact_ref(task_path, "prompt", prompt_path),
+                artifact_ref(task_path, "contract", contract_path),
+                artifact_ref(task_path, "checklist", checklist_path),
+                artifact_ref(task_path, "stdout", output_path),
+                artifact_ref(task_path, "stderr", stderr_path),
+            ],
+        )
         task_index = read_json(index_path)
         set_phase_status(
             task_index,
@@ -3152,11 +3248,6 @@ def execute_phase(
         phase_start_snapshot = baseline_snapshot(phase_baseline)
         phase_start_repo_outputs = baseline_required_repo_outputs(phase_baseline)
 
-        prompt_path = phase_attempt_prompt_path(task_path, phase_number, attempt)
-        contract_path = phase_attempt_contract_path(task_path, phase_number, attempt)
-        checklist_path = phase_attempt_checklist_path(task_path, phase_number, attempt)
-        output_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-output-attempt{attempt}.jsonl"
-        stderr_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-stderr-attempt{attempt}.txt"
         clear_attempt_artifacts(task_path, phase_number)
         prompt = build_prompt(
             root,
@@ -3189,7 +3280,7 @@ def execute_phase(
             message = f"codex exec failed with exit code {returncode}. See {stderr_path}."
             append_progress(task_path, f"phase {phase_number}: attempt {attempt} codex failed")
             try:
-                contract = runtime_phase_contract(task_path, phase_number)
+                contract = runtime_phase_contract(task_path, phase_number, attempt)
                 required_outputs = contract_outputs(phase, contract)
                 required_repo_outputs = contract_repo_outputs(contract)
             except (FileNotFoundError, ValueError):
@@ -3211,7 +3302,11 @@ def execute_phase(
                     + ", ".join(contaminating_changes)
                 )
             if contract is not None:
-                contract_tamper_errors = verify_phase_contract_unchanged(task_path, phase_number, contract)
+                original_contract = initial_contract or contract
+                contract_tamper_errors = [
+                    *verify_phase_contract_unchanged(task_path, phase_number, original_contract),
+                    *verify_runtime_contract_unchanged(task_path, phase_number, attempt, original_contract),
+                ]
                 if contract_tamper_errors:
                     message = "; ".join(contract_tamper_errors)
                     write_last_error(task_path, phase_number, message)
@@ -3255,7 +3350,7 @@ def execute_phase(
             return False
 
         try:
-            contract = runtime_phase_contract(task_path, phase_number)
+            contract = runtime_phase_contract(task_path, phase_number, attempt)
         except (FileNotFoundError, ValueError) as exc:
             message = str(exc)
             write_last_error(task_path, phase_number, message)
@@ -3266,7 +3361,11 @@ def execute_phase(
             print(message, file=sys.stderr)
             args.failed = True
             return False
-        contract_tamper_errors = verify_phase_contract_unchanged(task_path, phase_number, contract)
+        original_contract = initial_contract or contract
+        contract_tamper_errors = [
+            *verify_phase_contract_unchanged(task_path, phase_number, original_contract),
+            *verify_runtime_contract_unchanged(task_path, phase_number, attempt, original_contract),
+        ]
         if contract_tamper_errors:
             message = "; ".join(contract_tamper_errors)
             write_last_error(task_path, phase_number, message)
@@ -3546,7 +3645,16 @@ def execute_phase(
                 reconciliation_summary_path=phase_attempt_reconciliation_summary_path(task_path, phase_number, attempt),
                 gate_path=phase_attempt_gate_path(task_path, phase_number, attempt),
             )
-            write_phase_attempt_commit(task_path, phase_number, attempt, result_path)
+            commit_path = write_phase_attempt_commit(task_path, phase_number, attempt, result_path)
+            append_attempt_manifest_record(
+                task_path,
+                phase_number,
+                attempt,
+                "attempt_committed",
+                status="committed",
+                result=artifact_ref(task_path, "result", result_path),
+                attempt_commit=artifact_ref(task_path, "attempt_commit", commit_path),
+            )
             append_progress(task_path, f"phase {phase_number}: attempt {attempt} completed")
 
             task_index = read_json(index_path)

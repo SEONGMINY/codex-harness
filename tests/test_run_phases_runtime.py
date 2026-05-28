@@ -1306,6 +1306,15 @@ class RunCodexRuntimeTest(unittest.TestCase):
         (task_path / "context-pack" / "runtime").mkdir(parents=True)
         return root, task_path
 
+    def read_attempt_manifest(self, task_path: Path, phase: int) -> list[dict[str, object]]:
+        return [
+            json.loads(line)
+            for line in RUN_PHASES.phase_attempt_manifest_path(task_path, phase).read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        ]
+
     def write_contract(self, root: Path, task_path: Path, allowed_paths: list[str]) -> None:
         contract_path = task_path / "context-pack" / "runtime" / "phase1-contract.json"
         contract_path.write_text(
@@ -2934,8 +2943,130 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 by_name["prompt"]["sha256"],
                 RUN_PHASES.file_sha256(task_path / result["artifacts"]["prompt"]),
             )
+            manifest = self.read_attempt_manifest(task_path, 0)
+            self.assertEqual([item["record_type"] for item in manifest], ["attempt_started", "attempt_committed"])
+            self.assertEqual(manifest[0]["status"], "running")
+            self.assertEqual(manifest[1]["status"], "committed")
+            self.assertEqual(manifest[1]["result"]["path"], "context-pack/runtime/phase0-result-attempt1.json")
+            self.assertEqual(manifest[1]["attempt_commit"]["path"], "context-pack/runtime/phase0-attempt1-commit.json")
+            self.assertEqual(manifest[1]["attempt_commit"]["sha256"], RUN_PHASES.file_sha256(commit_path))
             self.assertIn("src/app.py", result["changed_files"])
             self.assertEqual(baseline["required_repo_outputs"][0]["path"], "src/app.py")
+
+    def test_execute_phase_ignores_tampered_contract_alias_after_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (task_path / "phases").mkdir(parents=True)
+            (task_path / "context-pack" / "handoffs").mkdir(parents=True)
+            subprocess.run(["git", "init"], cwd=root, text=True, capture_output=True, check=False)
+            contract = {
+                "phase": 0,
+                "name": "demo",
+                "read_first": {"docs": [], "previous_outputs": []},
+                "scope": {"layer": "app", "allowed_paths": ["src/**"]},
+                "interfaces": [],
+                "decision_refs": [],
+                "architecture_refs": [],
+                "dependency_policy": {
+                    "new_dependencies": "forbidden",
+                    "approved_new_dependencies": [],
+                    "approved_dependency_manifest_changes": [],
+                },
+                "instructions": [
+                    {
+                        "id": "P0-001",
+                        "task": "Create app output.",
+                        "expected_evidence": ["src/app.py"],
+                    }
+                ],
+                "success_criteria": ["The app output exists."],
+                "stop_rules": ["Stop if required context is missing."],
+                "fallback_behavior": {
+                    "if_blocked": "Write the blocker to the handoff.",
+                    "if_tests_fail": "Fix failures inside allowed_paths.",
+                },
+                "validation_budget": {
+                    "max_attempts": 1,
+                    "command_timeout_seconds": 600,
+                },
+                "missing_evidence_behavior": "Treat missing evidence as unresolved.",
+                "acceptance_commands": ["false"],
+                "required_outputs": ["context-pack/handoffs/phase0.md"],
+                "required_repo_outputs": ["src/app.py"],
+                "forbidden": [
+                    {
+                        "rule": "Do not update task status.",
+                        "reason": "The runner owns status.",
+                    }
+                ],
+            }
+            (task_path / "phases" / "phase0.md").write_text(
+                "# Phase 0: demo\n\n## Contract\n\n```json\n"
+                + json.dumps(contract, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "docs": [],
+                        "common_docs": [],
+                        "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    sys.stdin.read()
+                    import json
+                    from pathlib import Path
+                    Path.cwd().joinpath("src/app.py").parent.mkdir(parents=True, exist_ok=True)
+                    Path.cwd().joinpath("src/app.py").write_text("ok\\n", encoding="utf-8")
+                    Path.cwd().joinpath("tasks/demo/context-pack/handoffs/phase0.md").write_text(
+                        "# Handoff\\n\\n## Change Trace\\n\\n- `src/app.py`: `P0-001`\\n",
+                        encoding="utf-8",
+                    )
+                    alias = Path.cwd().joinpath("tasks/demo/context-pack/runtime/phase0-contract.json")
+                    data = json.loads(alias.read_text(encoding="utf-8"))
+                    data["acceptance_commands"] = ["true"]
+                    data["required_repo_outputs"] = []
+                    alias.write_text(json.dumps(data) + "\\n", encoding="utf-8")
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=3,
+                ac_timeout=600,
+                codex_bin=str(fake),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertFalse(RUN_PHASES.phase_result_path(task_path, 0).exists())
+            last_error = (task_path / "context-pack" / "runtime" / "phase0-last-error.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("AC command failed: false", last_error)
 
     def test_execute_phase_retry_keeps_attempt_prompt_artifacts_immutable(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -3185,10 +3316,20 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertTrue(repair_artifacts["quality"]["exists"])
             self.assertTrue(repair_artifacts["evidence"]["exists"])
             self.assertTrue(repair_artifacts["gate"]["exists"])
+            self.assertTrue(repair_artifacts["handoff"]["exists"])
+            self.assertTrue(RUN_PHASES.phase_attempt_handoff_path(task_path, 0, 1).exists())
             self.assertTrue(RUN_PHASES.phase_attempt_evidence_path(task_path, 0, 1).exists())
             self.assertTrue(RUN_PHASES.phase_attempt_reconciliation_path(task_path, 0, 1).exists())
             self.assertTrue(RUN_PHASES.phase_attempt_reconciliation_summary_path(task_path, 0, 1).exists())
             self.assertTrue(RUN_PHASES.phase_attempt_quality_path(task_path, 0, 1).exists())
+            manifest = self.read_attempt_manifest(task_path, 0)
+            self.assertEqual(
+                [item["record_type"] for item in manifest],
+                ["attempt_started", "attempt_failed", "attempt_started", "attempt_committed"],
+            )
+            self.assertEqual(manifest[1]["failure"]["type"], "gate")
+            self.assertTrue(manifest[1]["retryable"])
+            self.assertEqual(manifest[3]["attempt"], 2)
             by_name = {item["name"]: item for item in commit["artifacts"]}
             self.assertEqual(
                 by_name["gate"]["sha256"],
@@ -3329,6 +3470,16 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertFalse(repair_packet["failure"]["retryable"])
             self.assertEqual(repair_packet["contaminating_changes"], ["outside.txt"])
             self.assertIn("outside.txt", repair_packet["failure"]["message"])
+            repair_artifacts = {item["name"]: item for item in repair_packet["failed_attempt_artifacts"]}
+            self.assertTrue(repair_artifacts["handoff"]["exists"])
+            self.assertTrue(RUN_PHASES.phase_attempt_handoff_path(task_path, 0, 1).exists())
+            RUN_PHASES.clear_attempt_artifacts(task_path, 0)
+            self.assertFalse(RUN_PHASES.phase_handoff_path(task_path, 0).exists())
+            self.assertTrue(RUN_PHASES.phase_attempt_handoff_path(task_path, 0, 1).exists())
+            manifest = self.read_attempt_manifest(task_path, 0)
+            self.assertEqual([item["record_type"] for item in manifest], ["attempt_started", "attempt_failed"])
+            self.assertEqual(manifest[1]["failure"]["type"], "gate")
+            self.assertFalse(manifest[1]["retryable"])
 
     def test_execute_phase_marks_error_when_attempt_budget_already_exhausted(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
