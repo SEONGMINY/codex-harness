@@ -34,6 +34,12 @@ PROJECT_HOOK_GITIGNORE_ENTRIES = [
     ".codex/hooks.json",
     ".codex/hooks.optional.json",
 ]
+MANAGED_HOOK_SCRIPT_NAMES = {
+    "harness_post_tool_use.py",
+    "harness_pre_tool_use.py",
+    "harness_stop.py",
+    "harness_user_prompt_submit.py",
+}
 
 
 def repo_root() -> Path:
@@ -176,6 +182,23 @@ def install_project_hooks(source_root: Path, target_root: Path, force: bool, opt
         print("skipped existing .codex/hooks.optional.json")
 
 
+def project_install_source_paths(source_root: Path, with_hooks: bool) -> list[Path]:
+    paths = [source_root / source_rel for source_rel, _ in INSTALL_PATHS]
+    paths.extend(source_root / source_rel for source_rel, _ in INSTALL_FILES)
+    paths.append(source_root / USER_SKILL_SOURCE)
+    if with_hooks:
+        paths.append(source_root / PROJECT_HOOKS_SOURCE)
+        paths.append(source_root / Path(".codex") / "hooks.optional.json")
+    return paths
+
+
+def ensure_project_install_sources(source_root: Path, with_hooks: bool) -> None:
+    missing = [path for path in project_install_source_paths(source_root, with_hooks) if not path.exists()]
+    if missing:
+        rendered = ", ".join(str(path) for path in missing)
+        raise FileNotFoundError(f"Missing install source path(s): {rendered}")
+
+
 def install_project(
     source_root: Path,
     target_root: Path,
@@ -185,10 +208,12 @@ def install_project(
 ) -> None:
     if not target_root.exists() or not target_root.is_dir():
         raise FileNotFoundError(f"Target directory does not exist: {target_root}")
+    ensure_project_install_sources(source_root, with_hooks)
 
     legacy_scripts = target_root / LEGACY_PROJECT_SCRIPT_TARGET
     source_legacy_scripts = source_root / LEGACY_PROJECT_SCRIPT_TARGET
-    target_is_harness_source = (
+    target_is_source_root = target_root.resolve() == source_root.resolve()
+    target_is_harness_source = target_is_source_root or (
         (target_root / "scripts" / "install-codex-harness.py").exists()
         and (target_root / PROJECT_LOCAL_SKILL_TARGET / "SKILL.md").exists()
     )
@@ -207,7 +232,11 @@ def install_project(
 
     local_skill = target_root / PROJECT_LOCAL_SKILL_TARGET
     source_skill = source_root / PROJECT_LOCAL_SKILL_TARGET
-    if local_skill.exists() and local_skill.resolve() != source_skill.resolve():
+    if (
+        local_skill.exists()
+        and local_skill.resolve() != source_skill.resolve()
+        and not target_is_harness_source
+    ):
         shutil.rmtree(local_skill)
         print(f"removed stale project-local skill {PROJECT_LOCAL_SKILL_TARGET}")
 
@@ -317,6 +346,56 @@ def group_commands(group: dict[str, object]) -> set[str]:
     return commands
 
 
+def managed_hook_script_name(command: str) -> str | None:
+    for script_name in MANAGED_HOOK_SCRIPT_NAMES:
+        if script_name in command:
+            return script_name
+    return None
+
+
+def prune_superseded_hook_groups(
+    event_groups: list[object],
+    replacement_commands: set[str],
+) -> list[object]:
+    replacement_scripts = {
+        script_name
+        for command in replacement_commands
+        if (script_name := managed_hook_script_name(command)) is not None
+    }
+    if not replacement_scripts:
+        return event_groups
+
+    pruned_groups: list[object] = []
+    for group in event_groups:
+        if not isinstance(group, dict):
+            pruned_groups.append(group)
+            continue
+        hooks = group.get("hooks")
+        if not isinstance(hooks, list):
+            pruned_groups.append(group)
+            continue
+        filtered_hooks = []
+        for hook in hooks:
+            if not isinstance(hook, dict):
+                filtered_hooks.append(hook)
+                continue
+            command = hook.get("command")
+            if not isinstance(command, str):
+                filtered_hooks.append(hook)
+                continue
+            script_name = managed_hook_script_name(command)
+            if script_name in replacement_scripts and command not in replacement_commands:
+                continue
+            filtered_hooks.append(hook)
+        if not filtered_hooks:
+            continue
+        if len(filtered_hooks) != len(hooks):
+            group = dict(group)
+            group["hooks"] = filtered_hooks
+        pruned_groups.append(group)
+    return pruned_groups
+
+
 def merge_hooks_json(path: Path, groups_by_event: dict[str, list[dict[str, object]]]) -> None:
     if path.exists():
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -333,6 +412,10 @@ def merge_hooks_json(path: Path, groups_by_event: dict[str, list[dict[str, objec
         event_groups = hooks.setdefault(event, [])
         if not isinstance(event_groups, list):
             raise ValueError(f"Invalid hook event section: {event}")
+        replacement_commands: set[str] = set()
+        for group in new_groups:
+            replacement_commands.update(group_commands(group))
+        event_groups[:] = prune_superseded_hook_groups(event_groups, replacement_commands)
         existing_commands = set()
         for group in event_groups:
             if isinstance(group, dict):

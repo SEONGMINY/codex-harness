@@ -112,7 +112,7 @@ EOF
 
 이 단계는 구현 설계 리뷰를 만들고 `design_approval_needed`에서 멈춥니다.
 구현 설계가 승인된 뒤에는 `--design-approved`를 함께 넘깁니다.
-이때 하네스는 `tasks/<task-dir>/context-pack/static/design-approval.json`을 만들고, 승인된 설계 리뷰 문서의 SHA-256 해시를 기록해야 합니다.
+이때 하네스는 `tasks/<task-dir>/context-pack/static/design-approval.json`을 만들고, 승인된 설계 리뷰 문서, 정적 evidence bundle, 승인된 policy pack lineage, approval scope의 SHA-256 해시를 기록해야 합니다.
 
 ```bash
 python3 .codex/harness/scripts/start.py --request-file - --docs-approved --design-approved --full-auto <<'EOF'
@@ -148,6 +148,9 @@ python3 .codex/harness/scripts/review-phase-plan.py <task-dir>
 ```bash
 python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto
 ```
+
+CI나 fresh-run처럼 현재 설치된 하네스와 runtime proof가 정확히 일치해야 하는 실행에서는 `--strict-current-harness`를 추가합니다.
+이 옵션은 phase preflight와 완료 후 검증 모두에 적용됩니다.
 
 모든 phase가 끝난 뒤 평가까지 실행하려면:
 

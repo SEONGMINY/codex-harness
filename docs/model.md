@@ -67,7 +67,7 @@ codex-harness는 에이전트 사이의 대화를 넘기지 않습니다.
 이 상태에서는 `tasks/<task-dir>/docs/implementation-design-review.md`를 만들고 레이어 구조, 객체/모듈 의존 방향, 공개 인터페이스, API 계약, DB/스토리지 스키마, 상태와 라이프사이클, 트랜잭션 경계를 승인받습니다.
 작고 구현 설계가 필요 없는 비구현 작업만 `tasks/<task-dir>/docs/design-review-waiver.md`로 대체할 수 있습니다.
 
-구현 설계가 승인되면 `tasks/<task-dir>/context-pack/static/design-approval.json`에 승인 대상 문서와 SHA-256 해시를 남깁니다.
+구현 설계가 승인되면 `tasks/<task-dir>/context-pack/static/design-approval.json`에 승인 대상 문서, 정적 evidence bundle, 각 SHA-256 해시를 남깁니다.
 승인 뒤 설계 리뷰 문서가 바뀌면 해시가 달라지므로 Plan은 다시 승인받기 전까지 통과하지 않습니다.
 
 ## context-pack

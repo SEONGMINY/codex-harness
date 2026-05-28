@@ -61,6 +61,25 @@ def main() -> int:
         print("[ERROR] git is required.", file=sys.stderr)
         return 1
 
+    # source_checkout guard: when invoked from this repository, install from
+    # the local source tree instead of cloning a possibly stale remote release.
+    local_installer = target / "scripts" / "install-codex-harness.py"
+    local_skill = target / ".agents" / "skills" / "codex-harness" / "SKILL.md"
+    if local_installer.exists() and local_skill.exists():
+        command = [sys.executable, str(local_installer), str(target), "--scope", args.scope]
+        if args.all:
+            command.append("--all")
+        if args.force:
+            command.append("--force")
+        if args.with_hooks:
+            command.append("--with-hooks")
+        if args.user_hooks:
+            command.append("--user-hooks")
+        if args.optional_hooks:
+            command.append("--optional-hooks")
+        run(command)
+        return 0
+
     with tempfile.TemporaryDirectory(prefix="codex-harness-") as tmp:
         source = Path(tmp) / "codex-harness"
         run(["git", "clone", "--depth", "1", args.repo, str(source)])

@@ -75,8 +75,9 @@ codex-harness는 구현 요청을 다음 구조로 바꿉니다.
 
 - 요구사항과 범위를 정리한 task 문서
 - 레이어, 객체 의존성, 공개 인터페이스, API/DB/상태 흐름을 담은 구현 설계 리뷰
-- 승인된 설계 리뷰 문서와 SHA-256 해시를 기록한 design approval
+- 승인된 설계 리뷰 문서, 정적 evidence bundle, policy pack lineage를 봉인한 design approval
 - 승인된 기술 결정과 미결정 항목을 담은 decision registry
+- 설계 항목, 리뷰 taxonomy, 리뷰 findings, traceability matrix를 담은 구조화된 design contract
 - phase마다 필요한 컨텍스트 묶음
 - 수정 범위와 확인 명령이 들어간 phase contract
 - bugfix/validation phase의 재현 증거 또는 대체 검증 사유
@@ -148,6 +149,8 @@ phase를 실행합니다.
 ```bash
 python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto
 ```
+
+현재 설치된 하네스와 runtime proof가 정확히 일치해야 하는 CI/fresh-run 검증에서는 `--strict-current-harness`를 붙입니다.
 
 평가까지 반복하려면 `--evaluate`를 붙입니다.
 평가가 `rejected`이면 runner가 평가의 blocker와 follow-up만 대상으로 개선 세션을 실행하고 다시 평가합니다.
@@ -221,6 +224,17 @@ runner가 검증하는 것:
 
 - blocking open decision이 남아 있지 않은가
 - phase contract가 승인된 decision과 architecture를 참조하는가
+- phase contract의 `design_refs`가 `design-contract.json` 항목을 참조하고 `traceability-matrix.json`에 연결되는가
+- `design-contract.json.obligations`가 phase `closes_obligations`로 닫히는가
+- implementation phase의 `risk_ledger.required_evidence`가 같은 phase의 acceptance command나 `command_expectations` id로 닫히는가
+- acceptance/evaluation command가 shell 제어 토큰 없이 argv로 파싱되고 기본 command policy를 통과하는가
+- command output, Codex stdout/stderr, evaluation prompt에 민감 값이 저장되기 전에 redaction 되는가
+- acceptance runtime artifact에 적용된 policy pack id/schema/sha256이 남는가
+- runner/evaluator/launcher의 주요 runtime artifact가 atomic write로 기록되어 중간 JSON을 읽지 않도록 하는가
+- child Codex와 acceptance/evaluation command에 민감 env가 기본 전달되지 않는가
+- 리뷰 taxonomy의 필수 관점을 `review-findings.json`이 모두 pass 또는 na 근거로 다뤘는가
+- 승인 필요, 트랜잭션, lifecycle/retry claim이 구조화된 design contract와 모순되지 않는가
+- persistent artifact가 gitignore로 빠지지 않는가
 - 새 dependency가 승인된 정책을 따르는가
 - phase가 독립 실행됐는가
 - 상태를 runner만 바꿨는가
@@ -285,7 +299,7 @@ hooks 세부 내용은 [docs/hooks.md](./docs/hooks.md)에 있습니다.
 
 ## 상태
 
-현재 버전은 `0.1.2`입니다.
+현재 버전은 `0.1.5`입니다.
 
 이 프로젝트는 Codex 작업을 더 신뢰성 있게 만들기 위한 하네스입니다.
 프로젝트 관리 도구도, 여러 에이전트를 조율하는 프레임워크도 아닙니다.

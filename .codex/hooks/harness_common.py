@@ -73,12 +73,31 @@ def repo_root(cwd: Path) -> Path:
     return cwd.resolve()
 
 
+def is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def safe_relative_path(raw_value: str | None) -> Path | None:
+    if not raw_value:
+        return None
+    path = Path(raw_value)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    return path
+
+
 def active_context(event: dict[str, Any]) -> HarnessContext | None:
     if os.environ.get("CODEX_HARNESS_ACTIVE") != "1":
         return None
 
     cwd = Path(str(event.get("cwd") or os.getcwd())).resolve()
     root = Path(os.environ.get("CODEX_HARNESS_ROOT") or repo_root(cwd)).resolve()
+    if root != repo_root(cwd):
+        return None
     task_rel = os.environ.get("CODEX_HARNESS_TASK_PATH")
     task_name = os.environ.get("CODEX_HARNESS_TASK")
     phase_raw = os.environ.get("CODEX_HARNESS_PHASE")
@@ -90,15 +109,30 @@ def active_context(event: dict[str, Any]) -> HarnessContext | None:
         phase = int(phase_raw)
     except ValueError:
         return None
+    if phase < 0:
+        return None
 
     if task_rel:
-        task_path = (root / task_rel).resolve()
+        safe_task_rel = safe_relative_path(task_rel)
+        if safe_task_rel is None:
+            return None
+        task_path = (root / safe_task_rel).resolve()
     elif task_name:
+        safe_task_name = safe_relative_path(task_name)
+        if safe_task_name is None or len(safe_task_name.parts) != 1:
+            return None
         task_path = (root / "tasks" / task_name).resolve()
     else:
         return None
+    if not is_relative_to(task_path, root / "tasks"):
+        return None
 
-    contract_path = (root / contract_rel).resolve()
+    safe_contract_rel = safe_relative_path(contract_rel)
+    if safe_contract_rel is None:
+        return None
+    contract_path = (root / safe_contract_rel).resolve()
+    if not is_relative_to(contract_path, task_path / "context-pack" / "runtime"):
+        return None
     if not contract_path.exists():
         return None
     try:
@@ -106,6 +140,9 @@ def active_context(event: dict[str, Any]) -> HarnessContext | None:
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(contract, dict):
+        return None
+    contract_phase = contract.get("phase")
+    if isinstance(contract_phase, int) and contract_phase != phase:
         return None
     return HarnessContext(root, task_path, phase, contract_path, contract)
 

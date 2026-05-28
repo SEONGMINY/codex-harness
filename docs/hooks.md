@@ -98,6 +98,10 @@ CODEX_HARNESS_PHASE
 CODEX_HARNESS_CONTRACT_PATH
 ```
 
+하네스 child process env는 `CODEX_HARNESS_*` prefix 전체를 신뢰하지 않습니다.
+문서화된 하네스 컨텍스트 키만 전달하고, 임의 같은-prefix 변수는 버립니다.
+정책 pack override 키는 runner가 명시적으로 허용한 경우에만 전달됩니다.
+
 ## hooks가 하지 않는 것
 
 hooks는 모든 문제를 막지 않습니다.
