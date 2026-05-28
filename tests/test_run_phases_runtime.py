@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import argparse
+import io
 import json
 import os
 import subprocess
@@ -1134,6 +1135,118 @@ class RunCodexRuntimeTest(unittest.TestCase):
             )
             self.assertEqual(repair_packet["failure"]["type"], "install_preflight")
             self.assertTrue(repair_packet["failure"]["retryable"])
+
+    def test_execute_phase_dry_run_does_not_mutate_runtime_proof_files(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (task_path / "phases").mkdir(parents=True)
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "docs": [],
+                        "common_docs": [],
+                        "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            contract = {
+                "phase": 0,
+                "name": "demo",
+                "read_first": {"docs": [], "previous_outputs": []},
+                "scope": {"layer": "docs", "allowed_paths": ["docs/**"]},
+                "interfaces": [],
+                "decision_refs": ["D-001"],
+                "architecture_refs": ["A-001"],
+                "dependency_policy": {"new_dependencies": "forbidden"},
+                "instructions": [{"id": "P0-001", "task": "Preview prompt."}],
+                "success_criteria": ["Prompt can be built."],
+                "stop_rules": ["Stop if context is missing."],
+                "fallback_behavior": {"if_blocked": "Report blocker."},
+                "missing_evidence_behavior": "Treat missing evidence as unresolved.",
+                "acceptance_commands": ["true"],
+                "required_outputs": [],
+            }
+            (task_path / "phases" / "phase0.md").write_text(
+                "# Phase 0: demo\n\n## Contract\n\n```json\n"
+                + json.dumps(contract, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            runtime_files = {
+                task_path / "context-pack" / "runtime" / "phase0-prompt.md": "active prompt\n",
+                RUN_PHASES.phase_contract_path(task_path, 0): '{"active":true}\n',
+                RUN_PHASES.phase_checklist_path(task_path, 0): "active checklist\n",
+            }
+            for path, content in runtime_files.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            args = argparse.Namespace(
+                dry_run=True,
+                max_attempts=1,
+                ac_timeout=600,
+                codex_bin=str(tmp / "unused-codex"),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            self.assertIn("# Harness Phase Execution Contract", stdout.getvalue())
+            for path, content in runtime_files.items():
+                self.assertEqual(path.read_text(encoding="utf-8"), content)
+
+    def test_execute_phase_dry_run_preflight_failure_does_not_write_last_error(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "docs": [],
+                        "common_docs": [],
+                        "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                dry_run=True,
+                max_attempts=1,
+                ac_timeout=600,
+                codex_bin=str(tmp / "unused-codex"),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=1),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            self.assertTrue(args.failed)
+            self.assertFalse(
+                (task_path / "context-pack" / "runtime" / "phase0-last-error.md").exists()
+            )
 
     def test_gate_fails_when_handoff_change_trace_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

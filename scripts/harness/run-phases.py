@@ -594,11 +594,15 @@ def build_prompt(
     task_index: dict,
     phase: dict,
     include_repair_packet: bool = True,
+    materialize_runtime_artifacts: bool = True,
 ) -> str:
     phase_number = int(phase["phase"])
     phase_path = phase_file(task_path, phase_number)
     phase_markdown = phase_path.read_text(encoding="utf-8")
-    contract_data = materialize_phase_contract(task_path, phase_number, phase_markdown)
+    if materialize_runtime_artifacts:
+        contract_data = materialize_phase_contract(task_path, phase_number, phase_markdown)
+    else:
+        contract_data = phase_contract_from_markdown(phase_markdown)
 
     common_docs_context = collect_files(root, common_doc_files(root, task_index), 60_000)
     docs_context = collect_files(root, task_doc_files(root, task_index), 80_000)
@@ -613,7 +617,7 @@ def build_prompt(
         ),
         60_000,
     )
-    checklist_context = phase_checklist_path(task_path, phase_number).read_text(encoding="utf-8")
+    checklist_context = checklist_markdown(contract_data)
     repair_summary = phase_repair_packet_summary_path(task_path, phase_number)
     repair_mode = ""
     if include_repair_packet and repair_summary.exists():
@@ -710,15 +714,20 @@ The runner will generate `tasks/{task_path.name}/context-pack/runtime/phase{phas
     return "\n\n".join(parts).rstrip() + "\n"
 
 
-def materialize_phase_contract(task_path: Path, phase_number: int, phase_markdown: str) -> dict:
+def phase_contract_from_markdown(phase_markdown: str) -> dict:
     contract_data, contract_errors = parse_phase_contract(phase_markdown)
     if contract_errors or contract_data is None:
         raise ValueError("; ".join(contract_errors))
+    return contract_data
+
+
+def materialize_phase_contract(task_path: Path, phase_number: int, phase_markdown: str) -> dict:
+    contract_data = phase_contract_from_markdown(phase_markdown)
     phase_contract_path(task_path, phase_number).parent.mkdir(parents=True, exist_ok=True)
     write_json(phase_contract_path(task_path, phase_number), contract_data)
-    phase_checklist_path(task_path, phase_number).write_text(
+    atomic_write_text(
+        phase_checklist_path(task_path, phase_number),
         checklist_markdown(contract_data),
-        encoding="utf-8",
     )
     return contract_data
 
@@ -2722,8 +2731,8 @@ def execute_phase(
     preflight_errors.extend(preflight_phase(root, task_path, task_index, phase))
     if preflight_errors:
         message = "Preflight failed:\n" + "\n".join(f"- {error}" for error in preflight_errors)
-        write_last_error(task_path, phase_number, message)
         if not args.dry_run:
+            write_last_error(task_path, phase_number, message)
             append_progress(task_path, f"phase {phase_number}: preflight failed")
         print(message, file=sys.stderr)
         args.failed = True
@@ -2735,19 +2744,20 @@ def execute_phase(
         task_index,
         phase,
         include_repair_packet=attempts > 0 or phase_repair_packet_summary_path(task_path, phase_number).exists(),
+        materialize_runtime_artifacts=not args.dry_run,
     )
+    if args.dry_run:
+        print(prompt)
+        return False
+
     prompt_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-prompt.md"
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
-    prompt_path.write_text(prompt, encoding="utf-8")
+    atomic_write_text(prompt_path, prompt)
     try:
         initial_contract = runtime_phase_contract(task_path, phase_number)
     except (FileNotFoundError, ValueError):
         initial_contract = None
     max_attempts, ac_timeout = contract_validation_budget(initial_contract, args)
-
-    if args.dry_run:
-        print(prompt_path)
-        return False
 
     install_errors = run_install_preflight(root, task_path, args)
     if install_errors:
