@@ -7,6 +7,7 @@ import argparse
 import subprocess
 from pathlib import Path
 
+from artifact_io import atomic_write_text
 
 def resolve_task_path(root: Path, task_arg: str) -> Path:
     candidate = Path(task_arg)
@@ -30,7 +31,6 @@ def main() -> int:
     root = Path(args.root).resolve()
     task_path = resolve_task_path(root, args.task)
     output_path = task_path / "context-pack" / "runtime" / "docs-diff.md"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     result = subprocess.run(
         ["git", "diff", args.baseline, "--", "docs/", str((task_path / "docs").relative_to(root))],
@@ -43,13 +43,13 @@ def main() -> int:
     if not diff:
         diff = "(no docs diff)"
 
-    output_path.write_text(
+    atomic_write_text(
+        output_path,
         f"# docs-diff: {task_path.name}\n\n"
         f"Baseline: `{args.baseline}`\n\n"
         "```diff\n"
         f"{diff}\n"
         "```\n",
-        encoding="utf-8",
     )
     print(output_path)
     return result.returncode

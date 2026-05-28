@@ -27,7 +27,7 @@ if __name__ == "__main__":
     validate_entrypoint_install_or_exit(sys.argv[1:], HARNESS_VERSION)
 
 from codex_exec import CODEX_IDLE_EXIT_CODE, add_output_schema, run_codex_exec
-from artifact_io import atomic_write_json, atomic_write_text
+from artifact_io import atomic_write_json, atomic_write_text, open_append_text
 from decision_registry import (
     load_decision_registry,
     validate_decision_files,
@@ -115,8 +115,7 @@ def write_json(path: Path, data: dict) -> None:
 
 def append_progress(task_path: Path, message: str) -> None:
     path = task_path / "context-pack" / "runtime" / "progress.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
+    with open_append_text(path) as handle:
         handle.write(f"- `{now()}` {message}\n")
 
 
@@ -1239,7 +1238,6 @@ def update_top_index(root: Path, task_dir: str, status: str) -> None:
 
 def write_last_error(task_path: Path, phase_number: int, message: str) -> None:
     runtime_dir = task_path / "context-pack" / "runtime"
-    runtime_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_text(
         runtime_dir / f"phase{phase_number}-last-error.md",
         f"# Phase {phase_number} Last Error\n\n{message.rstrip()}\n",
@@ -2639,7 +2637,6 @@ def clear_repair_packet(task_path: Path, phase_number: int) -> None:
 
 def generate_docs_diff(root: Path, task_path: Path, baseline: str | None) -> None:
     output_path = task_path / "context-pack" / "runtime" / "docs-diff.md"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     if not baseline:
         diff = "(no baseline recorded)"
     else:
@@ -2652,13 +2649,13 @@ def generate_docs_diff(root: Path, task_path: Path, baseline: str | None) -> Non
         )
         diff = result.stdout.strip() or "(no docs diff)"
 
-    output_path.write_text(
+    atomic_write_text(
+        output_path,
         f"# docs-diff: {task_path.name}\n\n"
         f"Baseline: `{baseline or 'none'}`\n\n"
         "```diff\n"
         f"{diff}\n"
         "```\n",
-        encoding="utf-8",
     )
 
 
@@ -2830,13 +2827,12 @@ def run_evaluation_improvement(
         return 1
 
     runtime_dir = task_path / "context-pack" / "runtime"
-    runtime_dir.mkdir(parents=True, exist_ok=True)
     prompt = build_evaluation_improvement_prompt(root, task_path, iteration, evaluation_final, allowed_paths)
     prompt_path = runtime_dir / f"evaluation-repair{iteration}-prompt.md"
     output_path = runtime_dir / f"evaluation-repair{iteration}-output.jsonl"
     stderr_path = runtime_dir / f"evaluation-repair{iteration}-stderr.txt"
     last_message_path = runtime_dir / f"evaluation-repair{iteration}-last-message.json"
-    prompt_path.write_text(prompt, encoding="utf-8")
+    atomic_write_text(prompt_path, prompt)
 
     before = worktree_snapshot(root)
     command = [args.codex_bin, "exec", "--json", "--output-last-message", str(last_message_path)]

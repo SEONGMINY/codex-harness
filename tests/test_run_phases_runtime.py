@@ -1317,6 +1317,33 @@ class RunCodexRuntimeTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def test_codex_output_symlink_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            outside = tmp / "outside-output.jsonl"
+            outside.write_text("outside\n", encoding="utf-8")
+            output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+            output_path.symlink_to(outside)
+            stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+            fake = self.make_fake_codex(tmp, "raise SystemExit(0)\n")
+
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                RUN_PHASES.run_codex(
+                    root,
+                    task_path,
+                    1,
+                    "prompt",
+                    output_path,
+                    stderr_path,
+                    str(fake),
+                    False,
+                    False,
+                    10,
+                )
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+
     def test_codex_output_streams_before_process_exits(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)

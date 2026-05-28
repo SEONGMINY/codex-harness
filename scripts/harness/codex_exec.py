@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Iterable
 
+from artifact_io import atomic_write_text, open_append_text
 from env_policy import sanitized_env
 from redaction import redact_text
 
@@ -39,7 +40,7 @@ def add_output_schema(command: list[str], schema_path: Path) -> None:
 
 def stream_pipe_to_file(pipe, output_path: Path, activity_queue: queue.Queue[float]) -> None:
     try:
-        with output_path.open("a", encoding="utf-8") as handle:
+        with open_append_text(output_path) as handle:
             while True:
                 chunk = pipe.readline()
                 if chunk == "":
@@ -155,9 +156,8 @@ def run_codex_exec(
     idle_timeout: int = 300,
     activity_paths: Iterable[Path] = (),
 ) -> int:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("", encoding="utf-8")
-    stderr_path.write_text("", encoding="utf-8")
+    atomic_write_text(output_path, "")
+    atomic_write_text(stderr_path, "")
 
     activity_queue: queue.Queue[float] = queue.Queue()
     last_activity = time.monotonic()
@@ -225,7 +225,7 @@ def run_codex_exec(
         thread.join(timeout=5)
 
     if idle_timed_out:
-        with stderr_path.open("a", encoding="utf-8") as handle:
+        with open_append_text(stderr_path) as handle:
             handle.write(
                 "\n"
                 f"[codex-harness] codex exec idle timeout after {idle_timeout} seconds "

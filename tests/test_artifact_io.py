@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for atomic artifact writes."""
+"""Regression tests for runner-owned artifact writes."""
 
 from __future__ import annotations
 
@@ -47,6 +47,61 @@ class ArtifactIOTest(unittest.TestCase):
 
             self.assertEqual(path.read_text(encoding="utf-8"), "old\n")
             self.assertEqual(list(path.parent.glob(".*.tmp")), [])
+
+    def test_atomic_write_text_rejects_symlink_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            outside = root / "outside"
+            outside.mkdir()
+            runtime = root / "runtime"
+            runtime.symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaises(ARTIFACT_IO.SymlinkPathError):
+                ARTIFACT_IO.atomic_write_text(runtime / "phase0-result.json", "{}\n")
+
+            self.assertFalse((outside / "phase0-result.json").exists())
+
+    def test_atomic_write_text_rejects_symlink_target(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            outside = root / "outside.txt"
+            outside.write_text("outside\n", encoding="utf-8")
+            runtime = root / "runtime"
+            runtime.mkdir()
+            target = runtime / "phase0-result.json"
+            target.symlink_to(outside)
+
+            with self.assertRaises(ARTIFACT_IO.SymlinkPathError):
+                ARTIFACT_IO.atomic_write_text(target, "{}\n")
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+
+    def test_open_append_text_appends_regular_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            path = Path(raw_tmp) / "runtime" / "progress.md"
+
+            with ARTIFACT_IO.open_append_text(path) as handle:
+                handle.write("one\n")
+            with ARTIFACT_IO.open_append_text(path) as handle:
+                handle.write("two\n")
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "one\ntwo\n")
+
+    def test_open_append_text_rejects_symlink_target(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            outside = root / "outside.log"
+            outside.write_text("outside\n", encoding="utf-8")
+            runtime = root / "runtime"
+            runtime.mkdir()
+            progress = runtime / "progress.md"
+            progress.symlink_to(outside)
+
+            with self.assertRaises(ARTIFACT_IO.SymlinkPathError):
+                with ARTIFACT_IO.open_append_text(progress) as handle:
+                    handle.write("runner\n")
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
 
 
 if __name__ == "__main__":

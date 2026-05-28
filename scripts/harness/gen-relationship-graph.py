@@ -7,6 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
+from artifact_io import atomic_write_text
 from relationship_graph import graph_from_task, to_mermaid
 
 
@@ -50,8 +51,7 @@ def main() -> int:
         output_path = Path(args.output)
         if not output_path.is_absolute():
             output_path = root / output_path
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(output, encoding="utf-8")
+        atomic_write_text(output_path, output)
     else:
         print(output, end="")
     return 0

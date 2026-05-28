@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from artifact_io import atomic_write_json, atomic_write_text
 from codex_exec import add_output_schema, run_codex_exec
 from command_policy import run_command
 from harness_attestation import harness_attestation
@@ -272,7 +273,6 @@ def main() -> int:
     root = Path(args.root).resolve()
     task_path = resolve_task_path(root, args.task)
     runtime_dir = task_path / "context-pack" / "runtime"
-    runtime_dir.mkdir(parents=True, exist_ok=True)
 
     task_index = read_json(task_path / "index.json")
     commands = list(args.command or task_index.get("evaluation_commands") or [])
@@ -286,14 +286,11 @@ def main() -> int:
         "design_approval_scope_sha256": design_approval_scope_sha(task_path),
         "commands": command_results,
     }
-    results_path.write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(results_path, metadata)
 
     prompt = build_prompt(root, task_path, command_results)
     prompt_path = runtime_dir / "evaluation-prompt.md"
-    prompt_path.write_text(prompt, encoding="utf-8")
+    atomic_write_text(prompt_path, prompt)
 
     failed_commands = [item for item in command_results if item["returncode"] != 0]
     if args.dry_run:
