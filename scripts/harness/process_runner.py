@@ -10,6 +10,8 @@ from typing import NamedTuple
 
 
 PROCESS_TIMEOUT_EXIT_CODE = 124
+PROCESS_TERMINATION_GRACE_SECONDS = 5
+PROCESS_OUTPUT_DRAIN_TIMEOUT_SECONDS = 1
 
 
 class ProcessResult(NamedTuple):
@@ -17,6 +19,7 @@ class ProcessResult(NamedTuple):
     stdout: str
     stderr: str
     timed_out: bool
+    cleanup_confirmed: bool = True
 
 
 def output_text(value: str | bytes | None) -> str:
@@ -27,30 +30,68 @@ def output_text(value: str | bytes | None) -> str:
     return value
 
 
-def terminate_process_group(process: subprocess.Popen[str]) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
+def signal_process_group(process: subprocess.Popen[str], signal_number: int) -> None:
+    if hasattr(os, "killpg"):
+        try:
+            os.killpg(process.pid, signal_number)
+            return
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+    if process.poll() is not None:
         return
-    except OSError:
+    if signal_number == signal.SIGTERM:
         process.terminate()
-
-    try:
-        process.wait(timeout=5)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
-    except OSError:
+    else:
         process.kill()
+
+
+def wait_process(process: subprocess.Popen[str], timeout: int) -> bool:
     try:
-        process.wait(timeout=5)
+        process.wait(timeout=timeout)
+        return True
     except subprocess.TimeoutExpired:
-        return
+        return False
+
+
+def process_group_exists(process: subprocess.Popen[str]) -> bool:
+    if not hasattr(os, "killpg"):
+        return process.poll() is None
+    try:
+        os.killpg(process.pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return process.poll() is None
+
+
+def terminate_process_group(
+    process: subprocess.Popen[str],
+    *,
+    grace_seconds: int = PROCESS_TERMINATION_GRACE_SECONDS,
+) -> bool:
+    signal_process_group(process, signal.SIGTERM)
+    wait_process(process, grace_seconds)
+    signal_process_group(process, signal.SIGKILL)
+    wait_process(process, grace_seconds)
+    return not process_group_exists(process)
+
+
+def drain_process_output(process: subprocess.Popen[str]) -> tuple[str, str]:
+    try:
+        stdout, stderr = process.communicate(timeout=PROCESS_OUTPUT_DRAIN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        stdout, stderr = "", ""
+        for pipe in (process.stdout, process.stderr):
+            if pipe is None:
+                continue
+            try:
+                pipe.close()
+            except OSError:
+                pass
+    return output_text(stdout), output_text(stderr)
 
 
 def run_process(
@@ -71,11 +112,17 @@ def run_process(
     )
     try:
         stdout, stderr = process.communicate(timeout=timeout)
-        return ProcessResult(process.returncode or 0, output_text(stdout), output_text(stderr), False)
+        return ProcessResult(process.returncode or 0, output_text(stdout), output_text(stderr), False, True)
     except subprocess.TimeoutExpired:
-        terminate_process_group(process)
-        stdout, stderr = process.communicate()
-        return ProcessResult(PROCESS_TIMEOUT_EXIT_CODE, output_text(stdout), output_text(stderr), True)
+        cleanup_confirmed = terminate_process_group(process)
+        stdout, stderr = drain_process_output(process)
+        return ProcessResult(
+            PROCESS_TIMEOUT_EXIT_CODE,
+            output_text(stdout),
+            output_text(stderr),
+            True,
+            cleanup_confirmed,
+        )
 
 
 def run_process_to_files(
@@ -101,8 +148,10 @@ def run_process_to_files(
         )
         try:
             returncode = process.wait(timeout=timeout)
-            return ProcessResult(returncode or 0, "", "", False)
+            return ProcessResult(returncode or 0, "", "", False, True)
         except subprocess.TimeoutExpired:
-            terminate_process_group(process)
+            cleanup_confirmed = terminate_process_group(process)
             stderr.write(f"\nTimed out after {timeout or 0} seconds.\n")
-            return ProcessResult(PROCESS_TIMEOUT_EXIT_CODE, "", "", True)
+            if not cleanup_confirmed:
+                stderr.write("Process cleanup after timeout could not be confirmed.\n")
+            return ProcessResult(PROCESS_TIMEOUT_EXIT_CODE, "", "", True, cleanup_confirmed)

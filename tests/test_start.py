@@ -422,6 +422,30 @@ class StartLauncherTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("installed runtime drift detected", result.stderr)
 
+    def test_rejects_negative_subprocess_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "invalid timeout",
+                    "--subprocess-timeout",
+                    "-1",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("value must be non-negative", result.stderr)
+
     def test_launcher_task_path_resolution_rejects_non_task_directory(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp) / "repo"
@@ -760,6 +784,8 @@ class StartLauncherTest(unittest.TestCase):
             self.assertIn("--full-auto", argv)
             self.assertIn("--evaluate", argv)
             self.assertIn("--strict-current-harness", argv)
+            self.assertIn("--subprocess-timeout", argv)
+            self.assertEqual(argv[argv.index("--subprocess-timeout") + 1], "1800")
             self.assertNotIn("--yolo", argv)
 
     def test_planned_with_design_approval_requires_verify_task_success(self) -> None:
@@ -828,12 +854,15 @@ class StartLauncherTest(unittest.TestCase):
             child.write_text(
                 textwrap.dedent(
                     """
+                    import signal
                     import sys
                     import time
                     from pathlib import Path
 
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
                     marker = Path(sys.argv[1])
-                    while True:
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
                         with marker.open("a", encoding="utf-8") as handle:
                             handle.write("tick\\n")
                             handle.flush()

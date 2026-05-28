@@ -128,6 +128,13 @@ def codex_config_value(key: str, value: str) -> str:
     return f'{key}="{escaped}"'
 
 
+def non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return parsed
+
+
 def file_fingerprint(path: Path) -> str:
     if path.is_symlink():
         return f"symlink:{os.readlink(path)}"
@@ -536,6 +543,8 @@ def run_phases(root: Path, task_path: Path, run_dir: Path, args: argparse.Namesp
         args.codex_bin,
         "--codex-idle-timeout",
         str(args.codex_idle_timeout),
+        "--subprocess-timeout",
+        str(args.subprocess_timeout),
     ]
     if args.full_auto:
         command.append("--full-auto")
@@ -917,13 +926,13 @@ def main() -> int:
     parser.add_argument("--full-auto", action="store_true", help="Pass --full-auto to codex exec.")
     parser.add_argument(
         "--codex-idle-timeout",
-        type=int,
+        type=non_negative_int,
         default=300,
         help="Fail codex exec after this many seconds with no activity. Use 0 to disable.",
     )
     parser.add_argument(
         "--subprocess-timeout",
-        type=int,
+        type=non_negative_int,
         default=1800,
         help="Fail launcher-owned verify/review/runner subprocesses after this many seconds. Use 0 to disable.",
     )

@@ -51,7 +51,7 @@ from phase_contract import (
 from phase_semantics import analyze_phase
 from command_policy import run_command
 from env_policy import sanitized_env
-from process_runner import run_process
+from process_runner import PROCESS_TIMEOUT_EXIT_CODE, ProcessResult, run_process
 from file_lock import (
     LockHandle,
     acquire_lock,
@@ -294,6 +294,16 @@ def run_install_preflight(root: Path, task_path: Path, args: argparse.Namespace)
         output = redact_text(result.stdout + result.stderr).strip()
         if result.timed_out:
             output = (output + f"\nTimed out after {getattr(args, 'install_timeout', 600)} seconds.").strip()
+            if not result.cleanup_confirmed:
+                output = (output + "\nProcess cleanup after timeout could not be confirmed.").strip()
+        completed_at = now()
+        lock_error = None
+    except OSError as exc:
+        exit_code = 127
+        output = redact_text(
+            f"Failed to start install preflight command {' '.join(command)}: {exc}. "
+            "Ensure the package manager is installed and available on PATH."
+        )
         completed_at = now()
         lock_error = None
     except RuntimeError as exc:
@@ -2716,7 +2726,28 @@ def run_evaluation(root: Path, task_path: Path, args: argparse.Namespace) -> int
         command.append("--yolo")
     command.append("--task-lock-held")
     command.append("--repo-lock-held")
-    return subprocess.run(command, cwd=root, check=False).returncode
+    try:
+        result = run_process(
+            command,
+            cwd=root,
+            env=sanitized_env(overrides={"PWD": str(root)}, allow_harness_policy_controls=True),
+            timeout=getattr(args, "subprocess_timeout", 1800) or None,
+        )
+    except OSError as exc:
+        print(f"Evaluation failed to start: {exc}", file=sys.stderr)
+        return 127
+    output = redact_text(result.stdout + result.stderr).strip()
+    if output:
+        print(output, file=sys.stderr if result.returncode != 0 else sys.stdout)
+    if result.timed_out:
+        print(
+            f"Evaluation timed out after {getattr(args, 'subprocess_timeout', 1800)} seconds.",
+            file=sys.stderr,
+        )
+        if not result.cleanup_confirmed:
+            print("Evaluation process cleanup after timeout could not be confirmed.", file=sys.stderr)
+        return PROCESS_TIMEOUT_EXIT_CODE
+    return result.returncode
 
 
 def evaluation_improvement_allowed_paths(task_path: Path) -> list[str]:
@@ -2955,7 +2986,9 @@ def verify_task(
     require_evaluation: bool = False,
     require_design_approval: bool = True,
     strict_current_harness: bool = False,
+    timeout: int = 1800,
 ) -> int:
+    effective_timeout = timeout or None
     command = [
         sys.executable,
         str(SCRIPT_DIR / "verify-task.py"),
@@ -2969,12 +3002,30 @@ def verify_task(
         command.append("--require-evaluation")
     if strict_current_harness:
         command.append("--strict-current-harness")
-    return subprocess.run(command, cwd=root, check=False).returncode
+    try:
+        result = run_process(
+            command,
+            cwd=root,
+            env=sanitized_env(overrides={"PWD": str(root)}, allow_harness_policy_controls=True),
+            timeout=effective_timeout,
+        )
+    except OSError as exc:
+        print(f"Task verification failed to start: {exc}", file=sys.stderr)
+        return 127
+    output = redact_text(result.stdout + result.stderr).strip()
+    if output:
+        print(output, file=sys.stderr if result.returncode != 0 else sys.stdout)
+    if result.timed_out:
+        print(f"Task verification timed out after {timeout} seconds.", file=sys.stderr)
+        if not result.cleanup_confirmed:
+            print("Task verification process cleanup after timeout could not be confirmed.", file=sys.stderr)
+        return PROCESS_TIMEOUT_EXIT_CODE
+    return result.returncode
 
 
 def finalize_completed_task(root: Path, task_path: Path, args: argparse.Namespace) -> int:
     generate_relationship_graph(root, task_path)
-    if verify_task(root, task_path) != 0:
+    if verify_task(root, task_path, timeout=getattr(args, "subprocess_timeout", 1800)) != 0:
         update_top_index(root, task_path.name, "error")
         args.failed = True
         return 1
@@ -2984,7 +3035,12 @@ def finalize_completed_task(root: Path, task_path: Path, args: argparse.Namespac
             update_top_index(root, task_path.name, "error")
             args.failed = True
             return 1
-        if verify_task(root, task_path, require_evaluation=True) != 0:
+        if verify_task(
+            root,
+            task_path,
+            require_evaluation=True,
+            timeout=getattr(args, "subprocess_timeout", 1800),
+        ) != 0:
             update_top_index(root, task_path.name, "error")
             args.failed = True
             return 1
@@ -3070,7 +3126,7 @@ def execute_phase(
     phase = pending_phase(task_index)
     if not phase:
         if not args.dry_run:
-            if verify_task(root, task_path) != 0:
+            if verify_task(root, task_path, timeout=getattr(args, "subprocess_timeout", 1800)) != 0:
                 args.failed = True
                 update_top_index(root, task_path.name, "error")
                 return False
@@ -3086,7 +3142,12 @@ def execute_phase(
         clear_repair_packet(task_path, phase_number)
 
     preflight_errors = []
-    if verify_task(root, task_path, strict_current_harness=False) != 0:
+    if verify_task(
+        root,
+        task_path,
+        strict_current_harness=False,
+        timeout=getattr(args, "subprocess_timeout", 1800),
+    ) != 0:
         preflight_errors.append("Task verification failed before phase execution.")
     preflight_errors.extend(nested_codex_preflight_errors(args))
     preflight_errors.extend(preflight_phase(root, task_path, task_index, phase))
@@ -3668,6 +3729,12 @@ def main() -> int:
     )
     parser.add_argument("--skip-install", action="store_true", help="Skip package-manager install preflight.")
     parser.add_argument("--install-timeout", type=non_negative_int, default=600)
+    parser.add_argument(
+        "--subprocess-timeout",
+        type=non_negative_int,
+        default=1800,
+        help="Timeout for runner-owned verify/evaluate subprocesses. Use 0 to disable.",
+    )
     parser.add_argument(
         "--repo-lock-timeout",
         type=non_negative_int,

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import queue
-import signal
 import subprocess
 import threading
 import time
@@ -13,6 +12,7 @@ from typing import Iterable
 
 from artifact_io import atomic_write_text, open_append_text
 from env_policy import sanitized_env
+from process_runner import terminate_process_group
 from redaction import redact_text
 
 
@@ -65,29 +65,6 @@ def write_prompt_to_stdin(pipe, prompt: str, activity_queue: queue.Queue[float])
             pipe.close()
         except OSError:
             pass
-
-
-def terminate_process_group(process: subprocess.Popen[str]) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except OSError:
-        process.terminate()
-
-    try:
-        process.wait(timeout=5)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
-    except OSError:
-        process.kill()
-    process.wait(timeout=5)
 
 
 def nearest_existing_path(path: Path) -> Path | None:

@@ -55,12 +55,15 @@ class CommandPolicyTest(unittest.TestCase):
             child.write_text(
                 textwrap.dedent(
                     """
+                    import signal
                     import sys
                     import time
                     from pathlib import Path
 
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
                     marker = Path(sys.argv[1])
-                    while True:
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
                         with marker.open("a", encoding="utf-8") as handle:
                             handle.write("tick\\n")
                             handle.flush()
@@ -96,9 +99,12 @@ class CommandPolicyTest(unittest.TestCase):
                 f"{shlex.quote(str(child))}"
             )
 
+            started = time.monotonic()
             code, output, timed_out, _argv = run_command(command, tmp, timeout=1)
+            elapsed = time.monotonic() - started
 
             self.assertEqual(code, PROCESS_TIMEOUT_EXIT_CODE, output)
+            self.assertLess(elapsed, 3.0)
             self.assertTrue(timed_out)
             self.assertIn("[timeout]", output)
             self.assertTrue(marker.exists())

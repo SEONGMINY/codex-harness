@@ -166,6 +166,32 @@ python3 .codex/harness/scripts/run-phases.py <task-dir> --from <N> --full-auto
 
 필요하면 `validation_budget.max_attempts`를 조정합니다.
 
+## timeout 이후에도 프로세스가 의심됩니다
+
+하네스가 직접 실행하는 장기 subprocess는 timeout 시 새 process group 전체에 종료 신호를 보냅니다.
+일반적인 `pnpm install`, 확인 명령, verifier/evaluator, launcher subprocess는 이 경계 안에서 정리됩니다.
+
+한계:
+
+- 이 cleanup은 POSIX process group 기준입니다.
+- 자식이 의도적으로 `setsid`나 double-fork로 group을 탈출하면 완전한 process-tree containment가 아닙니다.
+- timeout 로그에 `process cleanup ... could not be confirmed`가 있으면 lock은 풀렸더라도 작업트리 변경이 계속될 수 있으니 실행 중인 프로세스를 확인해야 합니다.
+
+확인:
+
+```bash
+ps -ef | grep codex
+ps -ef | grep pnpm
+ps -ef | grep npm
+```
+
+해결:
+
+1. 살아남은 프로세스가 해당 task의 하위 실행인지 확인합니다.
+2. 필요하면 프로세스를 수동 종료합니다.
+3. 작업트리 변경과 `tasks/<task-dir>/context-pack/runtime/*`를 확인합니다.
+4. 오염된 변경이 있으면 정리한 뒤 `--resume-repair` 또는 `--from <N>`으로 재개합니다.
+
 ## 필수 산출물이 없습니다
 
 대표적인 필수 산출물은 phase 전달 메모입니다.

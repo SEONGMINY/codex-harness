@@ -82,5 +82,11 @@ def run_command(command: str, cwd: Path, timeout: int) -> tuple[int, str, bool, 
     if result.timed_out:
         output = (result.stdout + result.stderr).strip()
         timeout_message = f"[timeout] command exceeded {timeout} seconds"
-        return PROCESS_TIMEOUT_EXIT_CODE, redact_text("\n".join(item for item in [output, timeout_message] if item).strip()), True, argv
+        cleanup_message = "" if result.cleanup_confirmed else "[timeout] process cleanup could not be confirmed"
+        return (
+            PROCESS_TIMEOUT_EXIT_CODE,
+            redact_text("\n".join(item for item in [output, timeout_message, cleanup_message] if item).strip()),
+            True,
+            argv,
+        )
     return result.returncode, redact_text((result.stdout + result.stderr).strip()), False, argv

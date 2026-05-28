@@ -1572,6 +1572,75 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(returncode, RUN_PHASES.CODEX_IDLE_EXIT_CODE)
             self.assertIn("idle timeout", stderr_path.read_text(encoding="utf-8"))
 
+    @unittest.skipIf(sys.platform == "win32", "process group cleanup is POSIX-specific")
+    def test_codex_idle_timeout_kills_sigterm_ignoring_child_process(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            marker = tmp / "codex-child-heartbeat.txt"
+            child = tmp / "codex_child.py"
+            child.write_text(
+                textwrap.dedent(
+                    """
+                    import signal
+                    import sys
+                    import time
+                    from pathlib import Path
+
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    marker = Path(sys.argv[1])
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        with marker.open("a", encoding="utf-8") as handle:
+                            handle.write("tick\\n")
+                            handle.flush()
+                        time.sleep(0.1)
+                    """
+                ).lstrip(),
+                encoding="utf-8",
+            )
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    f"""
+                    import subprocess
+                    from pathlib import Path
+                    subprocess.Popen([sys.executable, {str(child)!r}, {str(marker)!r}])
+                    deadline = time.monotonic() + 5
+                    while not Path({str(marker)!r}).exists() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    sys.stdin.read()
+                    time.sleep(5)
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+            output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+            stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+
+            started = time.monotonic()
+            returncode = RUN_PHASES.run_codex(
+                root,
+                task_path,
+                1,
+                "prompt",
+                output_path,
+                stderr_path,
+                str(fake),
+                False,
+                False,
+                1,
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(returncode, RUN_PHASES.CODEX_IDLE_EXIT_CODE)
+            self.assertLess(elapsed, 4.0)
+            self.assertIn("idle timeout", stderr_path.read_text(encoding="utf-8"))
+            self.assertTrue(marker.exists())
+            before = marker.read_text(encoding="utf-8")
+            time.sleep(0.5)
+            self.assertEqual(marker.read_text(encoding="utf-8"), before)
+
     def test_inherited_yolo_env_enables_phase_codex_yolo(self) -> None:
         args = argparse.Namespace(yolo=False)
         old_value = os.environ.get("CODEX_HARNESS_CHILD_CODEX_YOLO")
@@ -1767,6 +1836,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 yolo=False,
                 codex_idle_timeout=10,
                 failed=False,
+                subprocess_timeout=1800,
             )
 
             with (
@@ -1776,7 +1846,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             ):
                 self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
 
-            verify_task.assert_called_once_with(root, task_path, strict_current_harness=False)
+            verify_task.assert_called_once_with(root, task_path, strict_current_harness=False, timeout=1800)
             self.assertTrue(args.failed)
             last_error = (
                 task_path / "context-pack" / "runtime" / "phase0-last-error.md"
@@ -2008,22 +2078,20 @@ class RunCodexRuntimeTest(unittest.TestCase):
             original_script_dir = RUN_PHASES.SCRIPT_DIR
             calls: list[list[str]] = []
 
-            class FakeResult:
-                returncode = 0
-
-            def fake_run(command, **kwargs):
+            def fake_run_process(command, **kwargs):
                 calls.append([str(item) for item in command])
-                return FakeResult()
+                return RUN_PHASES.ProcessResult(0, "", "", False)
 
             args = argparse.Namespace(
                 eval_command=["npm test"],
                 full_auto=True,
                 yolo=True,
+                subprocess_timeout=1800,
             )
 
             try:
                 RUN_PHASES.SCRIPT_DIR = installed_scripts
-                with mock.patch.object(RUN_PHASES.subprocess, "run", side_effect=fake_run):
+                with mock.patch.object(RUN_PHASES, "run_process", side_effect=fake_run_process):
                     self.assertEqual(RUN_PHASES.verify_task(root, task_path), 0)
                     self.assertEqual(RUN_PHASES.verify_task(root, task_path, require_evaluation=True), 0)
                     self.assertEqual(
@@ -2048,6 +2116,68 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertIn("--yolo", calls[3])
             self.assertIn("--task-lock-held", calls[3])
             self.assertIn("--repo-lock-held", calls[3])
+
+    def test_install_preflight_spawn_failure_writes_structured_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (root / "package.json").write_text('{"packageManager":"pnpm@9.0.0"}\n', encoding="utf-8")
+            (root / "pnpm-workspace.yaml").write_text("packages: []\n", encoding="utf-8")
+            args = argparse.Namespace(skip_install=False, install_preflight_done=False, install_timeout=10)
+
+            with mock.patch.object(RUN_PHASES, "run_process", side_effect=FileNotFoundError("pnpm")):
+                errors = RUN_PHASES.run_install_preflight(root, task_path, args)
+
+            self.assertTrue(any("exited 127" in error for error in errors), errors)
+            payload = json.loads(RUN_PHASES.install_preflight_path(task_path).read_text(encoding="utf-8"))
+            self.assertEqual(payload["exit_code"], 127)
+            self.assertIn("Failed to start install preflight command", payload["output_tail"])
+            self.assertFalse(RUN_PHASES.install_preflight_lock_path(root).exists())
+
+    def test_runner_verify_task_timeout_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            task_path.mkdir(parents=True)
+            installed_scripts = root / ".codex" / "harness" / "scripts"
+            installed_scripts.mkdir(parents=True)
+            original_script_dir = RUN_PHASES.SCRIPT_DIR
+
+            try:
+                RUN_PHASES.SCRIPT_DIR = installed_scripts
+                with mock.patch.object(
+                    RUN_PHASES,
+                    "run_process",
+                    return_value=RUN_PHASES.ProcessResult(124, "", "", True),
+                ):
+                    self.assertEqual(RUN_PHASES.verify_task(root, task_path, timeout=1), 124)
+            finally:
+                RUN_PHASES.SCRIPT_DIR = original_script_dir
+
+    def test_runner_evaluation_timeout_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            task_path.mkdir(parents=True)
+            installed_scripts = root / ".codex" / "harness" / "scripts"
+            installed_scripts.mkdir(parents=True)
+            original_script_dir = RUN_PHASES.SCRIPT_DIR
+            args = argparse.Namespace(eval_command=[], full_auto=False, yolo=False, subprocess_timeout=1)
+
+            try:
+                RUN_PHASES.SCRIPT_DIR = installed_scripts
+                with mock.patch.object(
+                    RUN_PHASES,
+                    "run_process",
+                    return_value=RUN_PHASES.ProcessResult(124, "", "", True),
+                ):
+                    self.assertEqual(RUN_PHASES.run_evaluation(root, task_path, args), 124)
+            finally:
+                RUN_PHASES.SCRIPT_DIR = original_script_dir
+
+    def test_runner_rejects_negative_subprocess_timeout(self) -> None:
+        with self.assertRaises(argparse.ArgumentTypeError):
+            RUN_PHASES.non_negative_int("-1")
 
     def test_current_policy_lineage_errors_rejects_unapproved_current_policy(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -2246,7 +2376,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 self.assertEqual(RUN_PHASES.finalize_completed_task(root, task_path, args), 1)
 
             self.assertEqual(verify.call_count, 2)
-            self.assertEqual(verify.call_args_list[1].kwargs, {"require_evaluation": True})
+            self.assertEqual(verify.call_args_list[1].kwargs, {"require_evaluation": True, "timeout": 1800})
             top_index = json.loads((root / "tasks" / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(top_index["tasks"][0]["status"], "error")
             self.assertIn("failed_at", top_index["tasks"][0])
@@ -2270,7 +2400,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 self.assertEqual(RUN_PHASES.finalize_completed_task(root, task_path, args), 0)
 
             self.assertEqual(verify.call_count, 2)
-            self.assertEqual(verify.call_args_list[1].kwargs, {"require_evaluation": True})
+            self.assertEqual(verify.call_args_list[1].kwargs, {"require_evaluation": True, "timeout": 1800})
             top_index = json.loads((root / "tasks" / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(top_index["tasks"][0]["status"], "completed")
             self.assertIn("completed_at", top_index["tasks"][0])
@@ -2918,12 +3048,15 @@ class RunCodexRuntimeTest(unittest.TestCase):
             child.write_text(
                 textwrap.dedent(
                     """
+                    import signal
                     import sys
                     import time
                     from pathlib import Path
 
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
                     marker = Path(sys.argv[1])
-                    while True:
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
                         with marker.open("a", encoding="utf-8") as handle:
                             handle.write("tick\\n")
                             handle.flush()
@@ -2958,11 +3091,14 @@ class RunCodexRuntimeTest(unittest.TestCase):
             os.environ["PATH"] = f"{fake_bin}:{old_path}"
             try:
                 args = argparse.Namespace(skip_install=False, install_preflight_done=False, install_timeout=1)
+                started = time.monotonic()
                 errors = RUN_PHASES.run_install_preflight(root, task_path, args)
+                elapsed = time.monotonic() - started
             finally:
                 os.environ["PATH"] = old_path
 
             self.assertTrue(any("exited 124" in error for error in errors), errors)
+            self.assertLess(elapsed, 3.0)
             payload = json.loads(RUN_PHASES.install_preflight_path(task_path).read_text(encoding="utf-8"))
             self.assertEqual(payload["exit_code"], 124)
             self.assertIn("[REDACTED]", payload["output_tail"])
