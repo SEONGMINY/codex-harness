@@ -15,6 +15,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+HARNESS_VERSION = "0.1.5"
+
+if __name__ == "__main__":
+    try:
+        from install_preflight import validate_entrypoint_install_or_exit
+    except Exception as exc:  # noqa: BLE001 - entrypoint preflight must fail closed before runtime imports.
+        print(f"[ERROR] codex-harness install preflight is unavailable: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    validate_entrypoint_install_or_exit(sys.argv[1:], HARNESS_VERSION)
+
 from codex_exec import CODEX_IDLE_EXIT_CODE, add_output_schema, run_codex_exec
 from artifact_io import atomic_write_json, atomic_write_text
 from decision_registry import (
@@ -54,7 +64,6 @@ from scope_policy import required_output_repo_paths, traceable_changed_files
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
 RUNNABLE_PHASE_STATUSES = {"pending", "running"}
-HARNESS_VERSION = "0.1.5"
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUNTIME_HARNESS_ATTESTATION = harness_attestation()
@@ -113,6 +122,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "command_policy.py",
         root / ".codex" / "harness" / "scripts" / "env_policy.py",
         root / ".codex" / "harness" / "scripts" / "harness_attestation.py",
+        root / ".codex" / "harness" / "scripts" / "install_preflight.py",
         root / ".codex" / "harness" / "scripts" / "obligation_ledger.py",
         root / ".codex" / "harness" / "scripts" / "policy-packs" / "default-security.json",
         root / ".codex" / "harness" / "scripts" / "policy_lineage.py",

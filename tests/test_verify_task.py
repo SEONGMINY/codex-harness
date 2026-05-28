@@ -20,6 +20,11 @@ assert SPEC is not None
 VERIFY_TASK = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(VERIFY_TASK)
+START_SPEC = importlib.util.spec_from_file_location("harness_start", HARNESS_DIR / "start.py")
+assert START_SPEC is not None
+HARNESS_START = importlib.util.module_from_spec(START_SPEC)
+assert START_SPEC.loader is not None
+START_SPEC.loader.exec_module(HARNESS_START)
 from design_contract import DEFAULT_REVIEW_TAXONOMY_IDS, validate_review_coverage, validate_review_findings  # noqa: E402
 
 
@@ -466,6 +471,22 @@ classDiagram
             errors = VERIFY_TASK.validate_design_approval(root, task_path)
 
             self.assertTrue(any("approved static evidence bundle" in error for error in errors), errors)
+
+    def test_launcher_design_approval_matches_verifier_bundle_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+
+            HARNESS_START.write_design_approval(root, task_path)
+
+            approval_path = task_path / "context-pack" / "static" / "design-approval.json"
+            approval = json.loads(approval_path.read_text(encoding="utf-8"))
+            bundle_paths = {entry["path"] for entry in approval["approved_bundle"]}
+            self.assertIn("tasks/demo/context-pack/static/review-findings.json", bundle_paths)
+            self.assertIn("tasks/demo/context-pack/static/review-coverage.json", bundle_paths)
+            self.assertNotIn("tasks/demo/context-pack/static/risk-ledger.json", bundle_paths)
+            self.assertEqual(VERIFY_TASK.validate_design_approval(root, task_path), [])
 
     def test_design_approval_rejects_unsafe_bundle_path(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

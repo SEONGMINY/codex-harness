@@ -36,6 +36,7 @@ from phase_contract import (
     validate_phase_contract,
 )
 from phase_semantics import analyze_phase
+from design_approval import design_approval_bundle_entries, design_approval_bundle_sha256
 from design_contract import (
     DEFAULT_REVIEW_TAXONOMY_IDS,
     validate_design_contract,
@@ -280,37 +281,6 @@ def validate_harness_attestation_metadata(
     if strict_current and fingerprint != attestation_fingerprint(harness_attestation()):
         return [f"{label} harness_attestation does not match current harness script fingerprint."]
     return []
-
-
-def _bundle_entry(root: Path, path: Path) -> dict[str, str]:
-    return {"path": rel(root, path), "sha256": file_sha256(path)}
-
-
-def design_approval_bundle_entries(root: Path, task_path: Path, design_rel_path: str) -> tuple[list[dict[str, str]], list[str]]:
-    errors: list[str] = []
-    paths = [root / design_rel_path]
-    static_dir = task_path / "context-pack" / "static"
-    for name in ["design-contract.json", "traceability-matrix.json", "risk-ledger.json"]:
-        candidate = static_dir / name
-        if candidate.exists():
-            paths.append(candidate)
-    entries: list[dict[str, str]] = []
-    for path in paths:
-        try:
-            resolved = path.resolve()
-            resolved.relative_to(root.resolve())
-        except ValueError:
-            errors.append(f"Design approval bundle path must be repo-relative: {path}")
-            continue
-        if not path.exists() or not path.is_file():
-            errors.append(f"Missing design approval bundle file: {rel(root, path)}")
-            continue
-        entries.append(_bundle_entry(root, path))
-    return sorted(entries, key=lambda item: item["path"]), errors
-
-
-def design_approval_bundle_sha256(entries: list[dict[str, str]]) -> str:
-    return stable_json_sha256(sorted(entries, key=lambda item: item.get("path", "")))
 
 
 def approved_policy_pack_lineage(root: Path, task_path: Path) -> tuple[list[dict[str, str]], list[str]]:

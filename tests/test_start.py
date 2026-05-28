@@ -83,6 +83,10 @@ class StartLauncherTest(unittest.TestCase):
             "# harness attestation helper\n",
             encoding="utf-8",
         )
+        (repo / ".codex" / "harness" / "scripts" / "install_preflight.py").write_text(
+            "# install preflight helper\n",
+            encoding="utf-8",
+        )
         (repo / ".codex" / "harness" / "scripts" / "phase_contract.py").write_text(
             "# phase contract helper\n",
             encoding="utf-8",

@@ -48,6 +48,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 "env_policy.py",
                 "evidence_obligations.py",
                 "evaluate-task.py",
+                "install_preflight.py",
                 "obligation_ledger.py",
                 "phase_contract.py",
                 "phase_semantics.py",

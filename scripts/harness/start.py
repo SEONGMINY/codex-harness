@@ -13,11 +13,22 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+HARNESS_VERSION = "0.1.5"
+
+if __name__ == "__main__":
+    try:
+        from install_preflight import validate_entrypoint_install_or_exit
+    except Exception as exc:  # noqa: BLE001 - entrypoint preflight must fail closed before runtime imports.
+        print(f"[ERROR] codex-harness install preflight is unavailable: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    validate_entrypoint_install_or_exit(sys.argv[1:], HARNESS_VERSION)
+
 from codex_exec import add_output_schema, run_codex_exec
 from artifact_io import atomic_write_json
+from design_approval import design_approval_bundle_entries, design_approval_bundle_sha256
 from harness_attestation import attestation_fingerprint, harness_attestation
 from policy_pack import policy_pack_metadata
-from policy_lineage import design_approval_scope_sha256, policy_pack_lineage_sha256, stable_json_sha256
+from policy_lineage import design_approval_scope_sha256, policy_pack_lineage_sha256
 
 
 SKIP_SNAPSHOT_DIRS = {
@@ -37,7 +48,6 @@ SKIP_SNAPSHOT_PATHS = {
     ".codex-harness",
     ".codex/harness/sessions",
 }
-HARNESS_VERSION = "0.1.5"
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MANDATORY_COMMON_DOCS = [
     "docs/harness/runner-contract.md",
@@ -434,24 +444,14 @@ def design_doc_info(root: Path, task_path: Path) -> tuple[Path, str] | None:
     return None
 
 
-def design_approval_bundle(root: Path, task_path: Path, design_rel_path: str) -> list[dict[str, str]]:
-    paths = [root / design_rel_path]
-    for filename in ["design-contract.json", "traceability-matrix.json", "review-findings.json", "review-coverage.json"]:
-        path = task_path / "context-pack" / "static" / filename
-        if path.exists():
-            paths.append(path)
-    return sorted(
-        [{"path": rel(path, root), "sha256": file_sha256(path)} for path in paths if path.exists() and path.is_file()],
-        key=lambda item: item["path"],
-    )
-
-
 def write_design_approval(root: Path, task_path: Path) -> None:
     info = design_doc_info(root, task_path)
     if info is None:
         return
     design_path, design_rel_path = info
-    bundle = design_approval_bundle(root, task_path, design_rel_path)
+    bundle, bundle_errors = design_approval_bundle_entries(root, task_path, design_rel_path)
+    if bundle_errors:
+        return
     active_policy = {
         key: value
         for key, value in policy_pack_metadata().items()
@@ -465,7 +465,7 @@ def write_design_approval(root: Path, task_path: Path) -> None:
         "approved_doc": design_rel_path,
         "approved_doc_sha256": file_sha256(design_path),
         "approved_bundle": bundle,
-        "approved_bundle_sha256": stable_json_sha256(bundle),
+        "approved_bundle_sha256": design_approval_bundle_sha256(bundle),
         "active_policy_pack": active_policy,
         "approved_policy_packs": approved_policies,
         "approved_policy_packs_sha256": policy_pack_lineage_sha256(approved_policies),
@@ -650,6 +650,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "env_policy.py",
         root / ".codex" / "harness" / "scripts" / "evidence_obligations.py",
         root / ".codex" / "harness" / "scripts" / "harness_attestation.py",
+        root / ".codex" / "harness" / "scripts" / "install_preflight.py",
         root / ".codex" / "harness" / "scripts" / "obligation_ledger.py",
         root / ".codex" / "harness" / "scripts" / "policy_lineage.py",
         root / ".codex" / "harness" / "scripts" / "policy_pack.py",

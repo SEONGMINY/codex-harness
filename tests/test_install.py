@@ -227,6 +227,87 @@ class InstallCodexHarnessTest(unittest.TestCase):
                 "project-local-drift-detection",
             )
 
+    def test_installed_start_preflight_reports_missing_helper_before_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            target = tmp / "target"
+            target.mkdir()
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(INSTALLER),
+                    str(target),
+                    "--scope",
+                    "project",
+                    "--force",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            (target / ".codex" / "harness" / "scripts" / "codex_exec.py").unlink()
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(target / ".codex" / "harness" / "scripts" / "start.py"),
+                    "--root",
+                    str(target),
+                    "--request",
+                    "invalid install",
+                    "--codex-bin",
+                    str(tmp / "unused-codex"),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(".codex/harness/scripts/codex_exec.py", result.stderr)
+            self.assertNotIn("ModuleNotFoundError", result.stderr)
+
+    def test_installed_runner_preflight_reports_missing_helper_before_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            target = tmp / "target"
+            target.mkdir()
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(INSTALLER),
+                    str(target),
+                    "--scope",
+                    "project",
+                    "--force",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            (target / ".codex" / "harness" / "scripts" / "decision_registry.py").unlink()
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(target / ".codex" / "harness" / "scripts" / "run-phases.py"),
+                    "demo",
+                    "--root",
+                    str(target),
+                    "--codex-bin",
+                    str(tmp / "unused-codex"),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(".codex/harness/scripts/decision_registry.py", result.stderr)
+            self.assertNotIn("ModuleNotFoundError", result.stderr)
+
     def test_project_hook_install_ignores_local_hook_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
