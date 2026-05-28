@@ -174,6 +174,27 @@ def rel(root: Path, path: Path) -> str:
         return str(path)
 
 
+def path_is_relative_to(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+    except ValueError:
+        return False
+    return True
+
+
+def safe_task_text(root: Path, path: Path, label: str) -> tuple[str | None, list[str]]:
+    if not path.exists() and not path.is_symlink():
+        return None, [f"Missing {label}: {rel(root, path)}"]
+    if path.is_symlink():
+        return None, [f"Unsafe {label} symlink: {rel(root, path)}"]
+    resolved = path.resolve()
+    if not path_is_relative_to(resolved, root.resolve()):
+        return None, [f"Unsafe {label} outside repository: {rel(root, path)}"]
+    if not path.is_file():
+        return None, [f"Not a file: {rel(root, path)}"]
+    return path.read_text(encoding="utf-8", errors="replace"), []
+
+
 def require_file(
     root: Path,
     path: Path,
@@ -181,17 +202,21 @@ def require_file(
     check_placeholder: bool = True,
     allow_empty: bool = False,
 ) -> list[str]:
-    if not path.exists():
-        return [f"Missing {label}: {rel(root, path)}"]
-    if not path.is_file():
-        return [f"Not a file: {rel(root, path)}"]
-    text = path.read_text(encoding="utf-8", errors="replace").strip()
+    text, errors = safe_task_text(root, path, label)
+    if errors:
+        return errors
+    assert text is not None
+    text = text.strip()
     errors = []
     if not text and not allow_empty:
         errors.append(f"Empty {label}: {rel(root, path)}")
     if check_placeholder and has_placeholder(text):
         errors.append(f"Placeholder remains in {label}: {rel(root, path)}")
     return errors
+
+
+def has_unsafe_path_errors(errors: list[str]) -> bool:
+    return any(error.startswith("Unsafe ") for error in errors)
 
 
 def validate_mermaid_blocks(text: str) -> list[str]:
@@ -1675,6 +1700,8 @@ def verify(
         errors.append(f"Task index common_docs must include {IMPLEMENTATION_QUALITY_DOC}")
     for path in common_docs:
         errors.extend(require_file(root, path, "common doc"))
+    if has_unsafe_path_errors(errors):
+        return errors
 
     task_docs = [root / raw for raw in task_index.get("docs") or []]
     expected_task_doc_dir = task_path / "docs"
@@ -1689,11 +1716,15 @@ def verify(
         if not str(path).startswith(str(expected_task_doc_dir)):
             errors.append(f"Task-specific doc must live under {rel(root, expected_task_doc_dir)}: {rel(root, path)}")
         errors.extend(require_file(root, path, "task doc"))
+    if has_unsafe_path_errors(errors):
+        return errors
     errors.extend(validate_design_review(root, task_path, task_docs))
 
     static_dir = task_path / "context-pack" / "static"
     for filename in MANDATORY_STATIC_FILES:
         errors.extend(require_file(root, static_dir / filename, "static context"))
+    if has_unsafe_path_errors(errors):
+        return errors
     if require_design_approval:
         errors.extend(validate_design_approval(root, task_path, strict_current_harness=strict_current_harness))
     design_info = design_doc_info(root, task_path)
@@ -1701,7 +1732,10 @@ def verify(
     approved_design_paths: list[str] = []
     design_ref_ids: set[str] = set()
     if design_info and design_kind == "review":
-        design_text = design_info[0].read_text(encoding="utf-8", errors="replace")
+        design_text, design_text_errors = safe_task_text(root, design_info[0], "design review")
+        errors.extend(design_text_errors)
+        if design_text is None:
+            return errors
         approved_design_paths = extract_design_repo_paths(design_text)
         design_contract_path = static_dir / "design-contract.json"
         design_ref_ids, obligation_ids, design_contract_errors = validate_design_contract(
@@ -1771,8 +1805,10 @@ def verify(
         expected_commands = list(phase.get("ac_commands") or [])
         expected_outputs = list(phase.get("required_outputs") or [])
         expected_repo_outputs: list[str] = []
-        if phase_path.exists():
-            markdown = phase_path.read_text(encoding="utf-8", errors="replace")
+        markdown, markdown_errors = safe_task_text(root, phase_path, "phase file")
+        if markdown_errors:
+            errors.extend(markdown_errors)
+        if markdown is not None:
             contract, contract_errors = validate_phase_contract(
                 root,
                 task_path,
@@ -1823,9 +1859,11 @@ def verify(
             expected_attempt = phase.get("attempts") if isinstance(phase.get("attempts"), int) else None
             handoff_path = handoff_dir / f"phase{phase_number}.md"
             errors.extend(require_file(root, handoff_path, "handoff"))
-            if handoff_path.exists():
+            handoff_text, handoff_text_errors = safe_task_text(root, handoff_path, "handoff")
+            errors.extend(handoff_text_errors)
+            if handoff_text is not None:
                 handoff_reasons = handoff_block_reasons(
-                    handoff_path.read_text(encoding="utf-8", errors="replace")
+                    handoff_text
                 )
                 if handoff_reasons:
                     errors.append(

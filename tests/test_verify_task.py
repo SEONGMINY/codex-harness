@@ -451,6 +451,23 @@ classDiagram
 
             self.assertEqual(errors, [])
 
+    def test_verify_rejects_symlink_static_context(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+            outside = tmp / "secret.md"
+            outside.write_text("SECRET\n", encoding="utf-8")
+            context = task_path / "context-pack" / "static" / "original-prompt.md"
+            context.unlink()
+            context.symlink_to(outside)
+
+            errors = VERIFY_TASK.verify(root, task_path, False, False)
+
+            self.assertTrue(any("Unsafe static context symlink" in error for error in errors), errors)
+            self.assertFalse(any("SECRET" in error for error in errors), errors)
+
     def test_evaluation_command_results_rejects_policy_outside_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "repo"

@@ -1511,6 +1511,22 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(task_index["phases"][0]["status"], "error")
             self.assertIn("runtime projection reconciled before execution", progress)
 
+    def test_collect_files_rejects_symlink_context_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "repo"
+            root.mkdir()
+            outside = tmp / "secret.md"
+            outside.write_text("SECRET\n", encoding="utf-8")
+            context = root / "tasks" / "demo" / "context-pack" / "static" / "original-prompt.md"
+            context.parent.mkdir(parents=True)
+            context.symlink_to(outside)
+
+            with self.assertRaisesRegex(RuntimeError, "Unsafe context file symlink") as raised:
+                RUN_PHASES.collect_files(root, [context], 10_000)
+
+            self.assertNotIn("SECRET", str(raised.exception))
+
     def test_main_fails_closed_after_interrupted_running_reconciliation(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))

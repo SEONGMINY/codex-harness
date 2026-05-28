@@ -355,15 +355,48 @@ def pending_phase(task_index: dict) -> dict | None:
     return None
 
 
+def path_is_relative_to(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+    except ValueError:
+        return False
+    return True
+
+
+def display_repo_path(root: Path, path: Path) -> str:
+    root = root.resolve()
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def safe_prompt_input_text(root: Path, path: Path, label: str) -> str:
+    root = root.resolve()
+    display_path = display_repo_path(root, path)
+    if path.is_symlink():
+        raise RuntimeError(f"Unsafe {label} symlink: {display_path}")
+    resolved = path.resolve()
+    if not path_is_relative_to(resolved, root):
+        raise RuntimeError(f"Unsafe {label} outside repository: {display_path}")
+    if not path.exists() or not path.is_file():
+        raise RuntimeError(f"Missing {label}: {display_path}")
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
 def collect_files(root: Path, paths: Iterable[Path], max_bytes: int) -> str:
     chunks: list[str] = []
     for path in paths:
-        if not path.exists() or not path.is_file():
+        if not path.exists() and not path.is_symlink():
+            continue
+        if path.is_symlink():
+            safe_prompt_input_text(root, path, "context file")
+        if not path.is_file():
             continue
         if path.suffix not in TEXT_EXTENSIONS:
             continue
-        rel = path.relative_to(root)
-        data = path.read_text(encoding="utf-8", errors="replace")
+        data = safe_prompt_input_text(root, path, "context file")
+        rel = path.resolve().relative_to(root.resolve())
         if len(data.encode("utf-8")) > max_bytes:
             data = data[:max_bytes] + "\n\n[truncated]\n"
         chunks.append(f"## `{rel}`\n\n{data.rstrip()}\n")
@@ -691,7 +724,11 @@ def build_prompt(
 ) -> str:
     phase_number = int(phase["phase"])
     phase_path = phase_file(task_path, phase_number)
-    phase_markdown = phase_path.read_text(encoding="utf-8")
+    try:
+        phase_markdown = safe_prompt_input_text(root, phase_path, "phase file")
+    except RuntimeError as exc:
+        errors.append(str(exc))
+        return errors
     if materialize_runtime_artifacts:
         contract_data = materialize_phase_contract_bundle(
             task_path,
@@ -953,16 +990,20 @@ def has_placeholder(text: str) -> bool:
 
 def require_real_file(root: Path, path: Path, label: str) -> list[str]:
     if not path.exists():
-        return [f"Missing {label}: {path.relative_to(root)}"]
+        return [f"Missing {label}: {display_repo_path(root, path)}"]
+    if path.is_symlink():
+        return [f"Unsafe {label} symlink: {display_repo_path(root, path)}"]
+    if not path_is_relative_to(path.resolve(), root.resolve()):
+        return [f"Unsafe {label} outside repository: {display_repo_path(root, path)}"]
     if not path.is_file():
-        return [f"Not a file: {path.relative_to(root)}"]
+        return [f"Not a file: {display_repo_path(root, path)}"]
 
     errors = []
-    text = path.read_text(encoding="utf-8", errors="replace").strip()
+    text = safe_prompt_input_text(root, path, label).strip()
     if not text:
-        errors.append(f"Empty {label}: {path.relative_to(root)}")
+        errors.append(f"Empty {label}: {display_repo_path(root, path)}")
     if has_placeholder(text):
-        errors.append(f"Placeholder remains in {label}: {path.relative_to(root)}")
+        errors.append(f"Placeholder remains in {label}: {display_repo_path(root, path)}")
     return errors
 
 
@@ -975,7 +1016,7 @@ def preflight_phase(root: Path, task_path: Path, task_index: dict, phase: dict) 
         errors.extend(validate_decision_files(decision_registry))
         errors.extend(validate_open_decisions(decision_registry))
     phase_path = phase_file(task_path, phase_number)
-    phase_markdown = phase_path.read_text(encoding="utf-8")
+    phase_markdown = safe_prompt_input_text(root, phase_path, "phase file")
     contract, contract_errors = validate_phase_contract(
         root,
         task_path,
@@ -1035,6 +1076,8 @@ def preflight_phase(root: Path, task_path: Path, task_index: dict, phase: dict) 
         handoff = task_path / "context-pack" / "handoffs" / f"phase{prior_phase}.md"
         if not handoff.exists():
             errors.append(f"Missing previous handoff: {handoff.relative_to(root)}")
+        else:
+            errors.extend(require_real_file(root, handoff, "previous handoff"))
 
     return errors
 
