@@ -65,11 +65,97 @@ class RunCodexRuntimeTest(unittest.TestCase):
             ]:
                 (scripts / raw_path).parent.mkdir(parents=True, exist_ok=True)
                 (scripts / raw_path).write_text("{}\n", encoding="utf-8")
+            (root / ".codex" / "harness" / "install-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "harness_version": RUN_PHASES.HARNESS_VERSION,
+                        "runtime_attestation": RUN_PHASES.harness_attestation(scripts),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             (scripts / "artifact_io.py").unlink()
 
             errors = RUN_PHASES.harness_install_errors(root)
 
         self.assertTrue(any("artifact_io.py" in error for error in errors), errors)
+
+    def test_runner_install_check_rejects_runtime_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            scripts = root / ".codex" / "harness" / "scripts"
+            root.mkdir()
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "install-codex-harness.py"),
+                    str(root),
+                    "--scope",
+                    "project",
+                    "--force",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            (scripts / "scope_policy.py").write_text("# stale\n", encoding="utf-8")
+
+            errors = RUN_PHASES.harness_install_errors(root)
+
+        self.assertTrue(any("runtime drift" in error for error in errors), errors)
+
+    def test_runner_install_check_rejects_decision_registry_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            scripts = root / ".codex" / "harness" / "scripts"
+            root.mkdir()
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "install-codex-harness.py"),
+                    str(root),
+                    "--scope",
+                    "project",
+                    "--force",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            (scripts / "decision_registry.py").write_text("# stale\n", encoding="utf-8")
+
+            errors = RUN_PHASES.harness_install_errors(root)
+
+        self.assertTrue(any("runtime drift" in error for error in errors), errors)
+
+    def test_runner_install_check_rejects_schema_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            scripts = root / ".codex" / "harness" / "scripts"
+            root.mkdir()
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "install-codex-harness.py"),
+                    str(root),
+                    "--scope",
+                    "project",
+                    "--force",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            (scripts / "schemas" / "phase-final.schema.json").write_text('{"stale":true}\n', encoding="utf-8")
+
+            errors = RUN_PHASES.harness_install_errors(root)
+
+        self.assertTrue(any("runtime drift" in error for error in errors), errors)
 
     def test_write_json_uses_atomic_replace(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

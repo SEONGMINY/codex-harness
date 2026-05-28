@@ -20,6 +20,7 @@ HARNESS_VERSION = "0.1.5"
 sys.path.insert(0, str(HARNESS_DIR))
 
 import policy_lineage  # noqa: E402
+import harness_attestation  # noqa: E402
 
 
 class StartLauncherTest(unittest.TestCase):
@@ -143,7 +144,35 @@ class StartLauncherTest(unittest.TestCase):
             "evaluation-final.schema.json",
         ]:
             (schemas / name).write_text("{}\n", encoding="utf-8")
+        (repo / ".codex" / "harness" / "install-manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "harness_version": HARNESS_VERSION,
+                    "runtime_attestation": harness_attestation.harness_attestation(
+                        repo / ".codex" / "harness" / "scripts"
+                    ),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         return repo
+
+    def refresh_install_manifest(self, repo: Path) -> None:
+        (repo / ".codex" / "harness" / "install-manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "harness_version": HARNESS_VERSION,
+                    "runtime_attestation": harness_attestation.harness_attestation(
+                        repo / ".codex" / "harness" / "scripts"
+                    ),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     def make_fake_codex(self, tmp: Path, body: str) -> Path:
         path = tmp / "fake-codex.py"
@@ -318,6 +347,62 @@ class StartLauncherTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertIn(".codex/harness/scripts/relationship_graph.py", result.stderr)
+
+    def test_installed_runtime_drift_fails_install_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            (repo / ".codex" / "harness" / "scripts" / "scope_policy.py").write_text(
+                "# stale installed runtime\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "invalid install",
+                    "--codex-bin",
+                    str(tmp / "unused-codex"),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("installed runtime drift detected", result.stderr)
+
+    def test_installed_schema_drift_fails_install_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            (repo / ".codex" / "harness" / "scripts" / "schemas" / "launcher-final.schema.json").write_text(
+                '{"stale":true}\n',
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "invalid install",
+                    "--codex-bin",
+                    str(tmp / "unused-codex"),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("installed runtime drift detected", result.stderr)
 
     def test_questions_artifact_in_final_output_sets_questions_needed_status(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -576,6 +661,7 @@ class StartLauncherTest(unittest.TestCase):
                 ).lstrip(),
                 encoding="utf-8",
             )
+            self.refresh_install_manifest(repo)
             fake = self.make_fake_codex(
                 tmp,
                 textwrap.dedent(
@@ -654,6 +740,7 @@ class StartLauncherTest(unittest.TestCase):
                 "import sys\nprint('verify failed')\nraise SystemExit(9)\n",
                 encoding="utf-8",
             )
+            self.refresh_install_manifest(repo)
             fake = self.make_fake_codex(
                 tmp,
                 textwrap.dedent(
@@ -710,6 +797,7 @@ class StartLauncherTest(unittest.TestCase):
                 "import sys\nprint('phase plan failed')\nraise SystemExit(8)\n",
                 encoding="utf-8",
             )
+            self.refresh_install_manifest(repo)
             fake = self.make_fake_codex(
                 tmp,
                 textwrap.dedent(
@@ -767,6 +855,7 @@ class StartLauncherTest(unittest.TestCase):
                 "import sys\nprint('dry-run failed')\nraise SystemExit(6)\n",
                 encoding="utf-8",
             )
+            self.refresh_install_manifest(repo)
             fake = self.make_fake_codex(
                 tmp,
                 textwrap.dedent(
@@ -961,6 +1050,7 @@ class StartLauncherTest(unittest.TestCase):
                 "raise SystemExit(7)\n",
                 encoding="utf-8",
             )
+            self.refresh_install_manifest(repo)
             fake = self.make_fake_codex(
                 tmp,
                 textwrap.dedent(

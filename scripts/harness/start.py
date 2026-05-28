@@ -15,6 +15,7 @@ from pathlib import Path
 
 from codex_exec import add_output_schema, run_codex_exec
 from artifact_io import atomic_write_json
+from harness_attestation import attestation_fingerprint, harness_attestation
 from policy_pack import policy_pack_metadata
 from policy_lineage import design_approval_scope_sha256, policy_pack_lineage_sha256, stable_json_sha256
 
@@ -639,6 +640,7 @@ def harness_skill_path(root: Path) -> Path | None:
 
 
 def harness_install_errors(root: Path) -> list[str]:
+    install_manifest_path = root / ".codex" / "harness" / "install-manifest.json"
     required_paths = [
         root / "codex-harness.json",
         root / ".codex" / "harness" / "scripts" / "artifact_io.py",
@@ -660,6 +662,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
         root / ".codex" / "harness" / "scripts" / "gen-relationship-graph.py",
         root / ".codex" / "harness" / "scripts" / "scope_policy.py",
+        install_manifest_path,
     ]
     missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
     if missing_required:
@@ -692,6 +695,22 @@ def harness_install_errors(root: Path) -> list[str]:
             "codex-harness skill version mismatch: "
             f"launcher={HARNESS_VERSION}, skill={declared_skill_version or '(missing)'}."
         )
+    try:
+        install_manifest = json.loads(install_manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        errors.append(f"Invalid codex-harness install manifest: {exc}")
+    else:
+        expected = attestation_fingerprint(
+            install_manifest.get("runtime_attestation") if isinstance(install_manifest, dict) else None
+        )
+        current = attestation_fingerprint(harness_attestation(root / ".codex" / "harness" / "scripts"))
+        if expected is None:
+            errors.append("codex-harness install manifest is missing a valid runtime_attestation.")
+        elif current != expected:
+            errors.append(
+                "codex-harness installed runtime drift detected. "
+                "Reinstall or update codex-harness in this project."
+            )
     return errors
 
 

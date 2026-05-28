@@ -39,7 +39,7 @@ from phase_contract import (
 )
 from phase_semantics import analyze_phase
 from command_policy import run_command
-from harness_attestation import harness_attestation
+from harness_attestation import attestation_fingerprint, harness_attestation
 from obligation_ledger import build_phase_obligation_assertion_outcomes, design_obligations_by_id
 from policy_pack import policy_pack_metadata
 from policy_lineage import (
@@ -105,6 +105,7 @@ def append_progress(task_path: Path, message: str) -> None:
 
 def harness_install_errors(root: Path) -> list[str]:
     manifest_path = root / "codex-harness.json"
+    install_manifest_path = root / ".codex" / "harness" / "install-manifest.json"
     if not manifest_path.exists():
         return ["Missing codex-harness.json. Reinstall codex-harness in this project."]
     required_paths = [
@@ -122,6 +123,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "run-quality-checks.py",
         root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
         root / ".codex" / "harness" / "scripts" / "scope_policy.py",
+        install_manifest_path,
     ]
     missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
     if missing_required:
@@ -139,6 +141,21 @@ def harness_install_errors(root: Path) -> list[str]:
         return [
             "codex-harness version mismatch: "
             f"script={HARNESS_VERSION}, manifest={version or '(missing)'}. "
+            "Reinstall or update codex-harness in this project."
+        ]
+    try:
+        install_manifest = read_json(install_manifest_path)
+    except (json.JSONDecodeError, OSError) as exc:
+        return [f"Invalid codex-harness install manifest: {exc}"]
+    expected = attestation_fingerprint(
+        install_manifest.get("runtime_attestation") if isinstance(install_manifest, dict) else None
+    )
+    current = attestation_fingerprint(harness_attestation(root / ".codex" / "harness" / "scripts"))
+    if expected is None:
+        return ["codex-harness install manifest is missing a valid runtime_attestation."]
+    if current != expected:
+        return [
+            "codex-harness installed runtime drift detected. "
             "Reinstall or update codex-harness in this project."
         ]
     return []

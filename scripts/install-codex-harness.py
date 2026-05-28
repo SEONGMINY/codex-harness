@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -19,6 +20,7 @@ INSTALL_PATHS = [
 INSTALL_FILES = [
     (Path("codex-harness.json"), Path("codex-harness.json")),
 ]
+PROJECT_INSTALL_MANIFEST_TARGET = Path(".codex") / "harness" / "install-manifest.json"
 LEGACY_PROJECT_SCRIPT_TARGET = Path("scripts") / "harness"
 PROJECT_LOCAL_SKILL_TARGET = Path(".agents") / "skills" / "codex-harness"
 PROJECT_RUNTIME_SKILL_TARGET = Path(".codex") / "harness" / "scripts" / "skill"
@@ -103,6 +105,28 @@ def ensure_gitignore_entries(target_root: Path, entries: list[str]) -> None:
     if changed:
         path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         print("updated .gitignore")
+
+
+def load_harness_attestation(source_root: Path) -> dict[str, object]:
+    path = source_root / "scripts" / "harness" / "harness_attestation.py"
+    spec = importlib.util.spec_from_file_location("source_harness_attestation", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load harness attestation module: {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.harness_attestation()
+
+
+def write_project_install_manifest(source_root: Path, target_root: Path) -> None:
+    manifest = {
+        "schema_version": 1,
+        "harness_version": json.loads((source_root / "codex-harness.json").read_text(encoding="utf-8")).get("version"),
+        "runtime_attestation_trust": "project-local-drift-detection",
+        "runtime_attestation": load_harness_attestation(source_root),
+    }
+    target = target_root / PROJECT_INSTALL_MANIFEST_TARGET
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def project_hook_command(script_name: str) -> str:
@@ -246,6 +270,9 @@ def install_project(
     for source_rel, target_rel in INSTALL_FILES:
         copy_file(source_root / source_rel, target_root / target_rel, True)
         print(f"installed {target_rel}")
+
+    write_project_install_manifest(source_root, target_root)
+    print(f"installed {PROJECT_INSTALL_MANIFEST_TARGET}")
 
     gitignore_entries = list(PROJECT_HARNESS_GITIGNORE_ENTRIES)
     if with_hooks:

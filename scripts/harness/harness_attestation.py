@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 import hashlib
 import json
 from pathlib import Path
@@ -9,28 +10,14 @@ from typing import Any
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-ATTESTED_FILES = [
-    "artifact_io.py",
-    "codex_exec.py",
-    "command_policy.py",
-    "design_contract.py",
-    "env_policy.py",
-    "evaluate-task.py",
-    "evidence_obligations.py",
-    "harness_attestation.py",
-    "obligation_ledger.py",
-    "phase_contract.py",
-    "phase_semantics.py",
-    "policy-packs/default-security.json",
-    "policy_lineage.py",
-    "policy_pack.py",
-    "redaction.py",
-    "reference_resolver.py",
-    "review-phase-plan.py",
-    "run-phases.py",
-    "run-quality-checks.py",
-    "verify-task.py",
-]
+RUNTIME_ATTESTATION_SUFFIXES = {".json", ".py"}
+RUNTIME_ATTESTATION_EXCLUDED_DIRS = {
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "skill",
+}
 
 
 def stable_json_sha256(value: object) -> str:
@@ -46,12 +33,25 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def harness_attestation() -> dict[str, Any]:
-    entries = []
-    for rel_path in ATTESTED_FILES:
-        path = SCRIPT_DIR / rel_path
-        if not path.exists():
+def iter_runtime_attestation_files(script_dir: Path) -> Iterator[str]:
+    if not script_dir.exists():
+        return
+    for path in script_dir.rglob("*"):
+        if not path.is_file():
             continue
+        relative = path.relative_to(script_dir)
+        if any(part in RUNTIME_ATTESTATION_EXCLUDED_DIRS for part in relative.parts):
+            continue
+        if path.suffix not in RUNTIME_ATTESTATION_SUFFIXES:
+            continue
+        yield relative.as_posix()
+
+
+def harness_attestation(script_dir: Path | None = None) -> dict[str, Any]:
+    base_dir = script_dir or SCRIPT_DIR
+    entries = []
+    for rel_path in sorted(iter_runtime_attestation_files(base_dir)):
+        path = base_dir / rel_path
         entries.append({"path": f"harness:{rel_path}", "sha256": file_sha256(path)})
     entries = sorted(entries, key=lambda item: item["path"])
     return {

@@ -39,6 +39,7 @@ from pathlib import Path
 root = Path(".")
 required = [
     root / "codex-harness.json",
+    root / ".codex" / "harness" / "install-manifest.json",
     root / ".codex" / "harness" / "scripts" / "skill" / "SKILL.md",
     root / ".codex" / "harness" / "scripts" / "start.py",
     root / ".codex" / "harness" / "scripts" / "run-phases.py",

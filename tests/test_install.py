@@ -211,9 +211,20 @@ class InstallCodexHarnessTest(unittest.TestCase):
             installed = load_attestation_module(
                 target / ".codex" / "harness" / "scripts" / "harness_attestation.py"
             )
+            install_manifest = json.loads(
+                (target / ".codex" / "harness" / "install-manifest.json").read_text(encoding="utf-8")
+            )
             self.assertEqual(
                 installed.harness_attestation()["digest"],
                 SOURCE_HARNESS_ATTESTATION.harness_attestation()["digest"],
+            )
+            self.assertEqual(
+                install_manifest["runtime_attestation"]["digest"],
+                SOURCE_HARNESS_ATTESTATION.harness_attestation()["digest"],
+            )
+            self.assertEqual(
+                install_manifest["runtime_attestation_trust"],
+                "project-local-drift-detection",
             )
 
     def test_project_hook_install_ignores_local_hook_files(self) -> None:

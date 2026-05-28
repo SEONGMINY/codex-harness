@@ -31,7 +31,23 @@ class HarnessAttestationTest(unittest.TestCase):
         self.assertIn("harness:run-phases.py", paths)
         self.assertIn("harness:verify-task.py", paths)
         self.assertIn("harness:policy-packs/default-security.json", paths)
-        self.assertNotIn("harness:start.py", paths)
+        self.assertIn("harness:start.py", paths)
+        self.assertIn("harness:scope_policy.py", paths)
+        self.assertIn("harness:decision_registry.py", paths)
+        self.assertIn("harness:init-task.py", paths)
+        self.assertIn("harness:gen-docs-diff.py", paths)
+        self.assertIn("harness:schemas/phase-final.schema.json", paths)
+        self.assertIn("harness:schemas/evaluation-final.schema.json", paths)
+        self.assertIn("harness:schemas/launcher-final.schema.json", paths)
+
+    def test_current_attestation_covers_runtime_python_and_json_files(self) -> None:
+        attested_paths = {
+            item["path"].removeprefix("harness:")
+            for item in harness_attestation.harness_attestation()["entries"]
+        }
+        expected_paths = set(harness_attestation.iter_runtime_attestation_files(HARNESS_DIR))
+
+        self.assertEqual(attested_paths, expected_paths)
 
     def test_fingerprint_rejects_entry_tamper(self) -> None:
         attestation = dict(harness_attestation.harness_attestation())
