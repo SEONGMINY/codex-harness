@@ -1,7 +1,7 @@
 ---
 name: codex-harness
 description: Run a Codex implementation harness for scoped product or internal tooling work. Use when the user invokes `$codex-harness`, asks to clarify requirements before implementation, wants a strict Clarify to Review to Context Gathering to Plan to Generate to Evaluate workflow, or wants phase-based Codex execution controlled by scripts instead of subagents or long chained sessions.
-version: 0.1.2
+version: 0.1.4
 ---
 
 # Codex Harness
@@ -52,7 +52,7 @@ if missing:
     raise SystemExit("missing: " + ", ".join(missing))
 manifest_version = json.loads((root / "codex-harness.json").read_text(encoding="utf-8")).get("version")
 skill_text = (root / ".codex" / "harness" / "scripts" / "skill" / "SKILL.md").read_text(encoding="utf-8")
-if manifest_version != "0.1.2" or "version: 0.1.2" not in skill_text:
+if manifest_version != "0.1.4" or "version: 0.1.4" not in skill_text:
     raise SystemExit(f"version mismatch: manifest={manifest_version}")
 PY
 ```

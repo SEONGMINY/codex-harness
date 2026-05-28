@@ -33,7 +33,7 @@ SKIP_SNAPSHOT_PATHS = {
     ".codex-harness",
     ".codex/harness/sessions",
 }
-HARNESS_VERSION = "0.1.2"
+HARNESS_VERSION = "0.1.4"
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MANDATORY_COMMON_DOCS = [
     "docs/harness/runner-contract.md",

@@ -41,7 +41,7 @@ from phase_semantics import analyze_phase
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
 RUNNABLE_PHASE_STATUSES = {"pending", "running"}
-HARNESS_VERSION = "0.1.2"
+HARNESS_VERSION = "0.1.4"
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 SCRIPT_DIR = Path(__file__).resolve().parent
 MANDATORY_STATIC_FILES = [
