@@ -130,6 +130,68 @@ class PhaseContractValidationTest(unittest.TestCase):
             )
             self.assertEqual(errors, [])
 
+    def test_expected_evidence_allows_typed_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["required_repo_outputs"] = ["docs/runner.md"]
+            contract["command_expectations"] = [
+                {
+                    "id": "phase-contract-pycompile",
+                    "command": "python3 -m py_compile scripts/harness/phase_contract.py",
+                    "role": "acceptance",
+                }
+            ]
+            contract["instructions"] = [
+                {
+                    "id": "P0-001",
+                    "task": "Update the runner doc.",
+                    "expected_evidence": [
+                        {"type": "required_repo_output", "ref": "docs/runner.md"},
+                        {"type": "command", "ref": "phase-contract-pycompile"},
+                    ],
+                }
+            ]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertEqual(errors, [])
+
+    def test_expected_evidence_rejects_malformed_typed_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["instructions"] = [
+                {
+                    "id": "P0-001",
+                    "task": "Update the runner doc.",
+                    "expected_evidence": [
+                        {"type": "unknown", "ref": "docs/runner.md", "extra": "not allowed"},
+                        {"type": "command"},
+                    ],
+                }
+            ]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any(".type" in error for error in errors), errors)
+            self.assertTrue(any(".ref" in error for error in errors), errors)
+            self.assertTrue(any("unsupported keys" in error for error in errors), errors)
+
     def test_glob_allowed_paths_match_nested_files(self) -> None:
         self.assertTrue(
             PHASE_CONTRACT.path_allowed(
@@ -235,6 +297,63 @@ class PhaseContractValidationTest(unittest.TestCase):
             )
 
             self.assertEqual(errors, [])
+
+    def test_explicit_validation_kind_cannot_include_product_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["phase_kind"] = "validation"
+            contract["scope"] = {
+                "layer": "qa",
+                "allowed_paths": ["src/app.py"],
+            }
+            contract["required_repo_outputs"] = ["src/app.py"]
+            contract["verification_evidence"] = {
+                "reproduction": ["python3 -m unittest tests.test_regression"],
+            }
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any("phase_kind" in error and "product implementation paths" in error for error in errors), errors)
+
+    def test_command_expectations_reject_duplicate_ids_and_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["verification_evidence"] = {
+                "reproduction": ["python3 tests/validate_regression.py"],
+            }
+            contract["command_expectations"] = [
+                {
+                    "id": "duplicate-command",
+                    "command": "python3 tests/validate_regression.py",
+                    "role": "reproduction",
+                },
+                {
+                    "id": "duplicate-command",
+                    "command": "python3 tests/validate_regression.py",
+                    "role": "reproduction",
+                },
+            ]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any("Duplicate command_expectations id" in error for error in errors), errors)
+            self.assertTrue(any("Duplicate command_expectations command" in error for error in errors), errors)
 
     def test_bugfix_phase_accepts_reproduction_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -352,15 +471,27 @@ class PhaseContractValidationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_context(Path(raw_tmp))
             contract = self.valid_contract()
-            contract["name"] = "docs"
+            contract["name"] = "validation"
+            contract["scope"] = {
+                "layer": "tests",
+                "allowed_paths": ["tests/validate_demo.py"],
+            }
+            contract["verification_evidence"] = {
+                "reproduction": ["python3 tests/validate_demo.py --repo-scan"],
+            }
+            contract["acceptance_commands"] = [
+                "python3 tests/validate_demo.py --fixture tests/fixtures/demo"
+            ]
             contract["command_expectations"] = [
                 {
+                    "id": "demo-reproduction",
                     "command": "python3 tests/validate_demo.py --repo-scan",
                     "role": "reproduction",
                     "target": "tests/validate_demo.py",
                     "repo_scan": True,
                 },
                 {
+                    "id": "demo-fixture",
                     "command": "python3 tests/validate_demo.py --fixture tests/fixtures/demo",
                     "role": "fixture",
                     "target": "tests/fixtures/demo",
@@ -372,7 +503,7 @@ class PhaseContractValidationTest(unittest.TestCase):
                 root,
                 task_path,
                 0,
-                "docs",
+                "validation",
                 self.markdown(contract),
                 require_previous_outputs=False,
             )
@@ -381,7 +512,51 @@ class PhaseContractValidationTest(unittest.TestCase):
 
             checklist = PHASE_CONTRACT.checklist_markdown(contract)
             self.assertIn("## Command Expectations", checklist)
+            self.assertIn("demo-reproduction reproduction:", checklist)
             self.assertIn("reproduction:", checklist)
+
+    def test_command_expectations_require_ids_and_matching_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["command_expectations"] = [
+                {
+                    "command": "python3 tests/validate_demo.py",
+                    "role": "acceptance",
+                    "target": "tests/validate_demo.py",
+                }
+            ]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any("command_expectations[0].id" in error for error in errors), errors)
+            self.assertTrue(any("acceptance_commands" in error for error in errors), errors)
+
+    def test_acceptance_commands_reject_shell_control_and_sensitive_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["acceptance_commands"] = ["echo ok && cat .env"]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any("violates command policy" in error for error in errors), errors)
+            self.assertTrue(any("Shell control token" in error for error in errors), errors)
+            self.assertTrue(any("sensitive path" in error for error in errors), errors)
 
     def test_app_package_test_scope_is_not_treated_as_product_implementation(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -466,6 +641,14 @@ class PhaseContractValidationTest(unittest.TestCase):
                 }
             ]
             contract["required_repo_outputs"] = ["docs/runner.md"]
+            contract["risk_ledger"] = [
+                {
+                    "id": "R0-001",
+                    "class": "acceptance_validity",
+                    "action": "verifies",
+                    "required_evidence": ["python3 -m unittest discover -s tests"],
+                }
+            ]
 
             _, errors = PHASE_CONTRACT.validate_phase_contract(
                 root,
@@ -502,6 +685,14 @@ class PhaseContractValidationTest(unittest.TestCase):
                 }
             ]
             contract["required_repo_outputs"] = ["docs/runner.md"]
+            contract["risk_ledger"] = [
+                {
+                    "id": "R0-001",
+                    "class": "acceptance_validity",
+                    "action": "verifies",
+                    "required_evidence": ["python3 -m unittest discover -s tests"],
+                }
+            ]
 
             _, errors = PHASE_CONTRACT.validate_phase_contract(
                 root,
@@ -539,6 +730,14 @@ class PhaseContractValidationTest(unittest.TestCase):
                 }
             ]
             contract["required_repo_outputs"] = ["docs/runner.md"]
+            contract["risk_ledger"] = [
+                {
+                    "id": "R0-001",
+                    "class": "acceptance_validity",
+                    "action": "verifies",
+                    "required_evidence": ["python3 -m unittest discover -s tests"],
+                }
+            ]
 
             _, errors = PHASE_CONTRACT.validate_phase_contract(
                 root,
@@ -550,6 +749,94 @@ class PhaseContractValidationTest(unittest.TestCase):
             )
 
             self.assertEqual(errors, [])
+
+    def test_interface_visibility_metadata_is_validated_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["interfaces"] = [
+                {
+                    "path": "docs/runner.md",
+                    "symbol": "RunnerDoc",
+                    "signature": "Markdown document",
+                    "visibility": "external",
+                    "kind": "guide",
+                    "exposes": [" "],
+                    "business_rules": ["Interface metadata must be machine-readable."],
+                }
+            ]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any("visibility" in error for error in errors), errors)
+            self.assertTrue(any("kind" in error for error in errors), errors)
+            self.assertTrue(any("exposes" in error for error in errors), errors)
+
+    def test_public_interface_requires_explicit_exposes_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["interfaces"] = [
+                {
+                    "path": "docs/runner.md",
+                    "symbol": "RunnerDoc",
+                    "signature": "Markdown document",
+                    "visibility": "public",
+                    "kind": "doc",
+                    "business_rules": ["Public interfaces must make exposure edges explicit."],
+                }
+            ]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any("exposes" in error for error in errors), errors)
+
+    def test_structured_interface_metadata_must_not_be_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["interfaces"] = [
+                {
+                    "path": "docs/runner.md",
+                    "symbol": "RunnerDoc",
+                    "signature": "Markdown document",
+                    "visibility": "internal",
+                    "kind": "doc",
+                    "business_rules": ["Structured metadata starts a whole-contract mode."],
+                },
+                {
+                    "path": "docs/runner.md",
+                    "symbol": "RunnerHelper",
+                    "signature": "Markdown helper",
+                    "business_rules": ["Hybrid metadata must not disable legacy fallback silently."],
+                },
+            ]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "demo",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any("interfaces[1].visibility" in error for error in errors), errors)
+            self.assertTrue(any("interfaces[1].kind" in error for error in errors), errors)
 
     def test_implementation_phase_rejects_root_design_review_doc(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

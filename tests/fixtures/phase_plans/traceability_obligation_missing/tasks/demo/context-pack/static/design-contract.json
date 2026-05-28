@@ -1,0 +1,17 @@
+{
+  "schema_version": "1",
+  "obligations": [
+    {
+      "id": "obl.boundary",
+      "class": "secret_sdk_boundary",
+      "trigger": "Bridge boundary changes.",
+      "closure_condition": "Boundary validator passes.",
+      "required_command_roles": [
+        "acceptance"
+      ],
+      "closure_command_refs": [
+        "ios-boundary-validator"
+      ]
+    }
+  ]
+}

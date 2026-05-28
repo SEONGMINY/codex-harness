@@ -76,6 +76,17 @@ class PhaseSemantics:
     needs_verification_evidence: bool
 
 
+@dataclass(frozen=True)
+class PhaseIR:
+    semantics: PhaseSemantics
+    acceptance_evidence_refs: frozenset[str]
+    command_metadata_by_command: dict[str, dict[str, Any]]
+
+    @property
+    def phase_kind(self) -> str:
+        return self.semantics.phase_kind
+
+
 def string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -136,6 +147,8 @@ def is_implementation_layer(contract: dict[str, Any]) -> bool:
 
 
 def contract_needs_verification_evidence(contract: dict[str, Any], phase_name: str | None = None) -> bool:
+    if contract.get("phase_kind") in {"bugfix", "validation", "qa"}:
+        return True
     parts: list[str] = [phase_name or "", str(contract.get("name") or ""), scope_layer(contract)]
     for instruction in contract.get("instructions") or []:
         if isinstance(instruction, dict):
@@ -208,10 +221,16 @@ def analyze_phase(contract: dict[str, Any], phase_name: str | None = None) -> Ph
     test_or_validator_paths = tuple(path for path in paths if is_test_or_validator_path(path))
     validator_paths = tuple(path for path in paths if is_validator_path(path))
     layer = scope_layer(contract)
+    configured_kind = contract.get("phase_kind") if isinstance(contract.get("phase_kind"), str) else None
     validation_or_qa = is_validation_or_qa_phase(contract, phase_name)
-    writes_product = bool(product_paths) or (is_implementation_layer(contract) and not test_or_validator_paths)
+    writes_product = bool(product_paths) or (
+        configured_kind == "implementation"
+        or (is_implementation_layer(contract) and not test_or_validator_paths)
+    )
     writes_validator = bool(validator_paths or test_or_validator_paths)
-    if validation_or_qa and not writes_product:
+    if configured_kind in {"implementation", "validation", "bugfix", "docs", "qa", "other"}:
+        phase_kind = configured_kind
+    elif validation_or_qa and not writes_product:
         phase_kind = "validation"
     elif writes_product:
         phase_kind = "implementation"
@@ -232,4 +251,32 @@ def analyze_phase(contract: dict[str, Any], phase_name: str | None = None) -> Ph
         writes_validator=writes_validator,
         validation_only=phase_kind == "validation" and not writes_product,
         needs_verification_evidence=contract_needs_verification_evidence(contract, phase_name),
+    )
+
+
+def compile_phase_contract(contract: dict[str, Any], phase_name: str | None = None) -> PhaseIR:
+    semantics = analyze_phase(contract, phase_name)
+    acceptance_refs = set(acceptance_commands(contract))
+    command_metadata_by_command: dict[str, dict[str, Any]] = {}
+    for item in contract.get("command_expectations") or []:
+        if not isinstance(item, dict):
+            continue
+        command = item.get("command")
+        if not isinstance(command, str) or not command.strip():
+            continue
+        metadata = {
+            "id": item.get("id"),
+            "role": item.get("role"),
+            "target": item.get("target"),
+            "repo_scan": item.get("repo_scan"),
+        }
+        command_metadata_by_command[command] = metadata
+        if item.get("role") in {"acceptance", "build", "fixture", "meta"}:
+            item_id = item.get("id")
+            if isinstance(item_id, str) and item_id.strip():
+                acceptance_refs.add(item_id.strip())
+    return PhaseIR(
+        semantics=semantics,
+        acceptance_evidence_refs=frozenset(acceptance_refs),
+        command_metadata_by_command=command_metadata_by_command,
     )

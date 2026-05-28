@@ -1,0 +1,14 @@
+{
+  "entries": [
+    {
+      "phase": 0,
+      "design_ref": "obl.boundary",
+      "files": [
+        "SupApp/Sources/SupApp/Bridge.swift"
+      ],
+      "evidence": [
+        "obligation:obl.boundary"
+      ]
+    }
+  ]
+}

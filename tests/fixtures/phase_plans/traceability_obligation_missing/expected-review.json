@@ -1,0 +1,6 @@
+{
+  "status": "failed",
+  "errors_contain": [
+    "traceability-matrix assigns obligation"
+  ]
+}

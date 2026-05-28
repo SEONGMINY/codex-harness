@@ -41,6 +41,14 @@ class PhasePlanReviewTest(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
+        (task_path / "context-pack" / "static" / "design-contract.json").write_text(
+            json.dumps({"schema_version": "1", "obligations": []}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        (task_path / "context-pack" / "static" / "traceability-matrix.json").write_text(
+            json.dumps({"entries": []}, indent=2) + "\n",
+            encoding="utf-8",
+        )
         return root, task_path
 
     def write_phase(self, task_path: Path, number: int, contract: dict[str, object], body: str = "") -> None:
@@ -49,6 +57,18 @@ class PhasePlanReviewTest(unittest.TestCase):
             + json.dumps(contract, indent=2)
             + "\n```\n\n"
             + body,
+            encoding="utf-8",
+        )
+
+    def write_design_contract(self, task_path: Path, obligations: list[dict[str, object]]) -> None:
+        (task_path / "context-pack" / "static" / "design-contract.json").write_text(
+            json.dumps({"schema_version": "1", "obligations": obligations}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def write_traceability_matrix(self, task_path: Path, entries: list[dict[str, object]]) -> None:
+        (task_path / "context-pack" / "static" / "traceability-matrix.json").write_text(
+            json.dumps({"entries": entries}, indent=2) + "\n",
             encoding="utf-8",
         )
 
@@ -85,6 +105,31 @@ class PhasePlanReviewTest(unittest.TestCase):
 
             errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
             self.assertTrue(any("xcodebuild acceptance command" in error for error in errors), errors)
+
+    def test_missing_static_design_contract_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (task_path / "context-pack" / "static" / "design-contract.json").unlink()
+            contract = self.base_contract()
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("Missing design-contract.json" in error for error in errors), errors)
+
+    def test_invalid_static_traceability_matrix_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (task_path / "context-pack" / "static" / "traceability-matrix.json").write_text(
+                "{not-json",
+                encoding="utf-8",
+            )
+            contract = self.base_contract()
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("Invalid traceability-matrix.json JSON" in error for error in errors), errors)
 
     def test_final_qa_xcodebuild_requires_previous_implementation_xcodebuild_phase(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -171,12 +216,14 @@ class PhasePlanReviewTest(unittest.TestCase):
             ]
             contract["command_expectations"] = [
                 {
+                    "id": "home-loader-reproduction",
                     "command": "python3 tests/validate_home_live_loader.py",
                     "role": "reproduction",
                     "target": "tests/validate_home_live_loader.py",
                     "repo_scan": True,
                 },
                 {
+                    "id": "home-loader-fixture",
                     "command": "python3 tests/validate_home_live_loader.py --fixture tests/fixtures/home_live_loader",
                     "role": "fixture",
                     "target": "tests/fixtures/home_live_loader",
@@ -201,12 +248,14 @@ class PhasePlanReviewTest(unittest.TestCase):
             contract["acceptance_commands"] = ["python3 tests/validate_home_live_loader.py"]
             contract["command_expectations"] = [
                 {
+                    "id": "home-loader-reproduction",
                     "command": "python3 tests/validate_home_live_loader.py",
                     "role": "reproduction",
                     "target": "tests/validate_home_live_loader.py",
                     "repo_scan": True,
                 },
                 {
+                    "id": "home-loader-fixture",
                     "command": "python3 tests/validate_home_live_loader.py",
                     "role": "fixture",
                     "target": "tests/fixtures/home_live_loader",
@@ -361,6 +410,712 @@ class PhasePlanReviewTest(unittest.TestCase):
 
             errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
             self.assertTrue(any("implement or prove" in error for error in errors), errors)
+
+    def test_risk_ledger_requires_same_phase_acceptance_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "runtime bridge"
+            contract["scope"] = {
+                "layer": "SupApp.Runtime",
+                "allowed_paths": ["SupApp/Sources/SupApp/AppEnvironment.swift"],
+            }
+            contract["required_repo_outputs"] = ["SupApp/Sources/SupApp/AppEnvironment.swift"]
+            contract["acceptance_commands"] = ["xcodebuild -project App.xcodeproj -scheme App build"]
+            contract["risk_ledger"] = [
+                {
+                    "id": "R-boundary",
+                    "class": "secret_sdk_boundary",
+                    "action": "introduces",
+                    "required_evidence": ["python3 tests/validate_ios_boundaries.py"],
+                }
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("required_evidence" in error for error in errors), errors)
+
+    def test_risk_ledger_accepts_same_phase_acceptance_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_design_contract(
+                task_path,
+                [
+                    {
+                        "id": "obl.boundary",
+                        "class": "secret_sdk_boundary",
+                        "trigger": "Runtime bridge boundary changes.",
+                        "closure_condition": "Boundary validator passes.",
+                        "required_command_roles": ["acceptance"],
+                        "closure_command_refs": ["python3 tests/validate_ios_boundaries.py"],
+                    }
+                ],
+            )
+            contract = self.base_contract()
+            contract["name"] = "runtime bridge"
+            contract["scope"] = {
+                "layer": "SupApp.Runtime",
+                "allowed_paths": ["SupApp/Sources/SupApp/AppEnvironment.swift"],
+            }
+            contract["required_repo_outputs"] = ["SupApp/Sources/SupApp/AppEnvironment.swift"]
+            contract["acceptance_commands"] = [
+                "python3 tests/validate_ios_boundaries.py",
+                "xcodebuild -project App.xcodeproj -scheme App build",
+            ]
+            contract["risk_ledger"] = [
+                {
+                    "id": "R-boundary",
+                    "class": "secret_sdk_boundary",
+                    "action": "introduces",
+                    "required_evidence": ["python3 tests/validate_ios_boundaries.py"],
+                }
+            ]
+            contract["closes_obligations"] = ["obl.boundary"]
+
+            self.write_phase(task_path, 0, contract)
+
+            self.assertEqual(PHASE_PLAN_REVIEW.review_phase_plan(root, task_path), [])
+
+    def test_risk_ledger_accepts_same_phase_command_expectation_id(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_design_contract(
+                task_path,
+                [
+                    {
+                        "id": "obl.boundary",
+                        "class": "secret_sdk_boundary",
+                        "trigger": "Bridge boundary changes.",
+                        "closure_condition": "Boundary validator passes.",
+                        "required_command_roles": ["acceptance"],
+                        "closure_command_refs": ["ios-boundary-validator"],
+                    }
+                ],
+            )
+            contract = self.base_contract()
+            contract["name"] = "boundary repair"
+            contract["scope"] = {
+                "layer": "SupApp.Bridge",
+                "allowed_paths": ["SupApp/Sources/SupApp/Bridge/SupabaseBridge.swift"],
+            }
+            contract["required_repo_outputs"] = ["SupApp/Sources/SupApp/Bridge/SupabaseBridge.swift"]
+            contract["interfaces"] = [
+                {
+                    "path": "SupApp/Sources/SupApp/Bridge/SupabaseBridge.swift",
+                    "symbol": "SupabaseBridge",
+                    "signature": "public struct SupabaseBridge {}",
+                    "business_rules": ["No SDK secret crosses the app boundary."],
+                }
+            ]
+            contract["acceptance_commands"] = [
+                "python3 tests/validate_ios_boundaries.py",
+                "xcodebuild -project SupApp.xcodeproj -scheme SupApp -configuration Debug build",
+            ]
+            contract["command_expectations"] = [
+                {
+                    "id": "ios-boundary-validator",
+                    "command": "python3 tests/validate_ios_boundaries.py",
+                    "role": "acceptance",
+                    "target": "tests/validate_ios_boundaries.py",
+                }
+            ]
+            contract["risk_ledger"] = [
+                {
+                    "id": "R0-001",
+                    "class": "secret_sdk_boundary",
+                    "action": "modifies",
+                    "required_evidence": ["ios-boundary-validator"],
+                    "rationale": "Bridge boundary changes must be validated in this phase.",
+                }
+            ]
+            contract["closes_obligations"] = ["obl.boundary"]
+
+            self.write_phase(task_path, 0, contract)
+
+            self.assertEqual(PHASE_PLAN_REVIEW.review_phase_plan(root, task_path), [])
+
+    def test_risk_ledger_rejects_reproduction_only_command_expectation_id(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "boundary validator"
+            contract["scope"] = {"layer": "tests", "allowed_paths": ["tests/validate_ios_boundaries.py"]}
+            contract["required_repo_outputs"] = ["tests/validate_ios_boundaries.py"]
+            contract["verification_evidence"] = {
+                "reproduction": ["python3 tests/validate_ios_boundaries.py --repo-scan"],
+            }
+            contract["acceptance_commands"] = [
+                "python3 tests/validate_ios_boundaries.py --fixture tests/fixtures/ios_boundaries"
+            ]
+            contract["command_expectations"] = [
+                {
+                    "id": "ios-boundary-reproduction",
+                    "command": "python3 tests/validate_ios_boundaries.py --repo-scan",
+                    "role": "reproduction",
+                    "target": "tests/validate_ios_boundaries.py",
+                    "repo_scan": True,
+                }
+            ]
+            contract["risk_ledger"] = [
+                {
+                    "id": "R0-001",
+                    "class": "secret_sdk_boundary",
+                    "action": "verifies",
+                    "required_evidence": ["ios-boundary-reproduction"],
+                    "rationale": "Reproduction-only commands must not close acceptance evidence.",
+                }
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("required_evidence is not covered" in error for error in errors), errors)
+
+    def test_risk_ledger_rejects_partial_command_match(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["acceptance_commands"] = ["pytest"]
+            contract["risk_ledger"] = [
+                {
+                    "id": "R0-001",
+                    "class": "acceptance_validity",
+                    "action": "verifies",
+                    "required_evidence": ["pytest tests/test_specific.py"],
+                    "rationale": "Specific evidence cannot be closed by a broader substring match.",
+                }
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("required_evidence is not covered" in error for error in errors), errors)
+
+    def test_design_obligation_closure_requires_same_phase_acceptance_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_design_contract(
+                task_path,
+                [
+                    {
+                        "id": "obl.boundary",
+                        "class": "secret_sdk_boundary",
+                        "trigger": "Bridge boundary changes.",
+                        "closure_condition": "Boundary validator passes.",
+                        "required_command_roles": ["acceptance"],
+                        "closure_command_refs": ["ios-boundary-validator"],
+                    }
+                ],
+            )
+            contract = self.base_contract()
+            contract["acceptance_commands"] = ["xcodebuild -project App.xcodeproj -scheme App build"]
+            contract["closes_obligations"] = ["obl.boundary"]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("closure_command_refs" in error for error in errors), errors)
+
+    def test_design_obligation_closure_requires_available_design_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["closes_obligations"] = ["obl.boundary"]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("design-contract obligations are unavailable" in error for error in errors), errors)
+
+    def test_design_obligation_closure_roles_are_scoped_to_closure_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_design_contract(
+                task_path,
+                [
+                    {
+                        "id": "obl.boundary",
+                        "class": "secret_sdk_boundary",
+                        "trigger": "Bridge boundary changes.",
+                        "closure_condition": "Boundary validator passes.",
+                        "required_command_roles": ["acceptance"],
+                        "closure_command_refs": ["boundary-fixture"],
+                    }
+                ],
+            )
+            contract = self.base_contract()
+            contract["acceptance_commands"] = [
+                "python3 tests/validate_boundary.py --fixture tests/fixtures/boundary",
+                "xcodebuild -project App.xcodeproj -scheme App build",
+            ]
+            contract["command_expectations"] = [
+                {
+                    "id": "boundary-fixture",
+                    "command": "python3 tests/validate_boundary.py --fixture tests/fixtures/boundary",
+                    "role": "fixture",
+                    "target": "tests/fixtures/boundary",
+                    "repo_scan": False,
+                }
+            ]
+            contract["closes_obligations"] = ["obl.boundary"]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("required roles" in error for error in errors), errors)
+
+    def test_design_obligation_closure_rejects_reproduction_only_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_design_contract(
+                task_path,
+                [
+                    {
+                        "id": "obl.boundary",
+                        "class": "secret_sdk_boundary",
+                        "trigger": "Bridge boundary changes.",
+                        "closure_condition": "Boundary reproduction exists.",
+                        "required_command_roles": ["acceptance"],
+                        "closure_command_refs": ["ios-boundary-reproduction"],
+                    }
+                ],
+            )
+            contract = self.base_contract()
+            contract["verification_evidence"] = {
+                "reproduction": ["python3 tests/validate_ios_boundaries.py --repo-scan"],
+            }
+            contract["acceptance_commands"] = [
+                "python3 tests/validate_ios_boundaries.py --fixture tests/fixtures/ios_boundaries"
+            ]
+            contract["command_expectations"] = [
+                {
+                    "id": "ios-boundary-reproduction",
+                    "command": "python3 tests/validate_ios_boundaries.py --repo-scan",
+                    "role": "reproduction",
+                    "target": "tests/validate_ios_boundaries.py",
+                    "repo_scan": True,
+                }
+            ]
+            contract["closes_obligations"] = ["obl.boundary"]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("closure_command_refs" in error for error in errors), errors)
+
+    def test_design_obligation_closure_accepts_same_phase_command_expectation_id(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_design_contract(
+                task_path,
+                [
+                    {
+                        "id": "obl.boundary",
+                        "class": "secret_sdk_boundary",
+                        "trigger": "Bridge boundary changes.",
+                        "closure_condition": "Boundary validator passes.",
+                        "required_command_roles": ["acceptance"],
+                        "closure_command_refs": ["ios-boundary-validator"],
+                    }
+                ],
+            )
+            contract = self.base_contract()
+            contract["acceptance_commands"] = ["python3 tests/validate_ios_boundaries.py"]
+            contract["command_expectations"] = [
+                {
+                    "id": "ios-boundary-validator",
+                    "command": "python3 tests/validate_ios_boundaries.py",
+                    "role": "acceptance",
+                    "target": "tests/validate_ios_boundaries.py",
+                }
+            ]
+            contract["closes_obligations"] = ["obl.boundary"]
+
+            self.write_phase(task_path, 0, contract)
+
+            self.assertEqual(PHASE_PLAN_REVIEW.review_phase_plan(root, task_path), [])
+
+    def test_traceability_assigned_obligation_must_be_closed_by_same_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_design_contract(
+                task_path,
+                [
+                    {
+                        "id": "obl.boundary",
+                        "class": "secret_sdk_boundary",
+                        "trigger": "Bridge boundary changes.",
+                        "closure_condition": "Boundary validator passes.",
+                        "required_command_roles": ["acceptance"],
+                        "closure_command_refs": ["ios-boundary-validator"],
+                    }
+                ],
+            )
+            self.write_traceability_matrix(
+                task_path,
+                [
+                    {
+                        "phase": 0,
+                        "design_ref": "obl.boundary",
+                        "files": ["SupApp/Sources/SupApp/Bridge.swift"],
+                        "evidence": ["obligation:obl.boundary"],
+                    }
+                ],
+            )
+            contract = self.base_contract()
+            contract["acceptance_commands"] = ["python3 tests/validate_ios_boundaries.py"]
+            contract["command_expectations"] = [
+                {
+                    "id": "ios-boundary-validator",
+                    "command": "python3 tests/validate_ios_boundaries.py",
+                    "role": "acceptance",
+                    "target": "tests/validate_ios_boundaries.py",
+                }
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("traceability-matrix assigns obligation" in error for error in errors), errors)
+
+    def test_traceability_assigned_obligation_accepts_same_phase_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_design_contract(
+                task_path,
+                [
+                    {
+                        "id": "obl.boundary",
+                        "class": "secret_sdk_boundary",
+                        "trigger": "Bridge boundary changes.",
+                        "closure_condition": "Boundary validator passes.",
+                        "required_command_roles": ["acceptance"],
+                        "closure_command_refs": ["ios-boundary-validator"],
+                    }
+                ],
+            )
+            self.write_traceability_matrix(
+                task_path,
+                [
+                    {
+                        "phase": 0,
+                        "design_ref": "obl.boundary",
+                        "files": ["SupApp/Sources/SupApp/Bridge.swift"],
+                        "evidence": ["obligation:obl.boundary"],
+                    }
+                ],
+            )
+            contract = self.base_contract()
+            contract["acceptance_commands"] = ["python3 tests/validate_ios_boundaries.py"]
+            contract["command_expectations"] = [
+                {
+                    "id": "ios-boundary-validator",
+                    "command": "python3 tests/validate_ios_boundaries.py",
+                    "role": "acceptance",
+                    "target": "tests/validate_ios_boundaries.py",
+                }
+            ]
+            contract["closes_obligations"] = ["obl.boundary"]
+
+            self.write_phase(task_path, 0, contract)
+
+            self.assertEqual(PHASE_PLAN_REVIEW.review_phase_plan(root, task_path), [])
+
+    def test_public_interface_rejects_internal_protocol_exposure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "runtime bridge"
+            contract["scope"] = {
+                "layer": "SupApp.Runtime",
+                "allowed_paths": ["SupApp/Sources/SupApp/AppEnvironment.swift"],
+            }
+            contract["required_repo_outputs"] = ["SupApp/Sources/SupApp/AppEnvironment.swift"]
+            contract["interfaces"] = [
+                {
+                    "path": "SupApp/Sources/SupApp/AppEnvironment.swift",
+                    "symbol": "AppEnvironment.activityTokenPendingSyncer",
+                    "signature": "public let activityTokenPendingSyncer: ActivityTokenPendingSyncing?",
+                    "business_rules": ["Expose syncer intentionally."],
+                },
+                {
+                    "path": "SupApp/Sources/SupApp/ActivityTokenPendingSync.swift",
+                    "symbol": "ActivityTokenPendingSyncing",
+                    "signature": "protocol ActivityTokenPendingSyncing { func sync() async }",
+                    "business_rules": ["Local protocol."],
+                },
+            ]
+            contract["acceptance_commands"] = ["xcodebuild -project App.xcodeproj -scheme App build"]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("public interface exposes" in error for error in errors), errors)
+
+    def test_public_interface_rejects_structured_non_public_exposure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "runtime bridge"
+            contract["scope"] = {
+                "layer": "SupApp.Runtime",
+                "allowed_paths": ["SupApp/Sources/SupApp/AppEnvironment.swift"],
+            }
+            contract["required_repo_outputs"] = ["SupApp/Sources/SupApp/AppEnvironment.swift"]
+            contract["interfaces"] = [
+                {
+                    "path": "SupApp/Sources/SupApp/AppEnvironment.swift",
+                    "symbol": "AppEnvironment.activityTokenPendingSyncer",
+                    "signature": "let activityTokenPendingSyncer: any ActivityTokenPendingSyncing",
+                    "visibility": "public",
+                    "kind": "property",
+                    "exposes": ["ActivityTokenPendingSyncing"],
+                    "business_rules": ["Expose syncer intentionally."],
+                },
+                {
+                    "path": "SupApp/Sources/SupApp/ActivityTokenPendingSync.swift",
+                    "symbol": "ActivityTokenPendingSyncing",
+                    "signature": "protocol ActivityTokenPendingSyncing { func sync() async }",
+                    "visibility": "internal",
+                    "kind": "protocol",
+                    "business_rules": ["Local protocol."],
+                },
+            ]
+            contract["acceptance_commands"] = ["xcodebuild -project App.xcodeproj -scheme App build"]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("structured metadata" in error for error in errors), errors)
+
+    def test_public_interface_accepts_structured_public_exposure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "runtime bridge"
+            contract["scope"] = {
+                "layer": "SupApp.Runtime",
+                "allowed_paths": ["SupApp/Sources/SupApp/AppEnvironment.swift"],
+            }
+            contract["required_repo_outputs"] = ["SupApp/Sources/SupApp/AppEnvironment.swift"]
+            contract["interfaces"] = [
+                {
+                    "path": "SupApp/Sources/SupApp/AppEnvironment.swift",
+                    "symbol": "AppEnvironment.activityTokenPendingSyncer",
+                    "signature": "let activityTokenPendingSyncer: any ActivityTokenPendingSyncing",
+                    "visibility": "public",
+                    "kind": "property",
+                    "exposes": ["ActivityTokenPendingSyncing"],
+                    "business_rules": ["Expose syncer intentionally."],
+                },
+                {
+                    "path": "SupApp/Sources/SupApp/ActivityTokenPendingSync.swift",
+                    "symbol": "ActivityTokenPendingSyncing",
+                    "signature": "public protocol ActivityTokenPendingSyncing { func sync() async }",
+                    "visibility": "public",
+                    "kind": "protocol",
+                    "exposes": [],
+                    "business_rules": ["Public protocol."],
+                },
+            ]
+            contract["acceptance_commands"] = ["xcodebuild -project App.xcodeproj -scheme App build"]
+
+            self.write_phase(task_path, 0, contract)
+
+            self.assertEqual(PHASE_PLAN_REVIEW.review_phase_plan(root, task_path), [])
+
+    def test_structured_interface_metadata_takes_precedence_over_signature_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "runtime bridge"
+            contract["scope"] = {
+                "layer": "SupApp.Runtime",
+                "allowed_paths": ["SupApp/Sources/SupApp/AppEnvironment.swift"],
+            }
+            contract["required_repo_outputs"] = ["SupApp/Sources/SupApp/AppEnvironment.swift"]
+            contract["interfaces"] = [
+                {
+                    "path": "SupApp/Sources/SupApp/AppEnvironment.swift",
+                    "symbol": "AppEnvironment.activityTokenPendingSyncer",
+                    "signature": "public let activityTokenPendingSyncer: ActivityTokenPendingSyncing?",
+                    "visibility": "internal",
+                    "kind": "property",
+                    "business_rules": ["Signature text may be stale, metadata is authoritative."],
+                },
+                {
+                    "path": "SupApp/Sources/SupApp/ActivityTokenPendingSync.swift",
+                    "symbol": "ActivityTokenPendingSyncing",
+                    "signature": "protocol ActivityTokenPendingSyncing { func sync() async }",
+                    "visibility": "internal",
+                    "kind": "protocol",
+                    "business_rules": ["Local protocol."],
+                },
+            ]
+            contract["acceptance_commands"] = ["xcodebuild -project App.xcodeproj -scheme App build"]
+
+            self.write_phase(task_path, 0, contract)
+
+            self.assertEqual(PHASE_PLAN_REVIEW.review_phase_plan(root, task_path), [])
+
+    def test_boundary_risk_requires_secret_sdk_boundary_obligation_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "supapp bridge"
+            contract["scope"] = {
+                "layer": "SupApp.Runtime.NotificationBridge",
+                "allowed_paths": ["SupApp/Sources/SupApp/AppEnvironment.swift"],
+            }
+            contract["required_repo_outputs"] = ["SupApp/Sources/SupApp/AppEnvironment.swift"]
+            contract["instructions"] = [
+                {
+                    "id": "P0-001",
+                    "task": "Add bridge while preserving Supabase SDK and server secret boundary.",
+                    "expected_evidence": ["SupApp/Sources/SupApp/AppEnvironment.swift"],
+                }
+            ]
+            contract["acceptance_commands"] = [
+                "xcodebuild -project App.xcodeproj -scheme App build"
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("secret_sdk_boundary design obligation" in error for error in errors), errors)
+
+    def test_boundary_risk_accepts_secret_sdk_boundary_obligation_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_design_contract(
+                task_path,
+                [
+                    {
+                        "id": "obl.secret-boundary",
+                        "class": "secret_sdk_boundary",
+                        "trigger": "Supabase SDK bridge boundary changes.",
+                        "closure_condition": "Boundary validator passes.",
+                        "required_command_roles": ["acceptance"],
+                        "closure_command_refs": ["boundary-validator"],
+                    }
+                ],
+            )
+            contract = self.base_contract()
+            contract["name"] = "supapp bridge"
+            contract["scope"] = {
+                "layer": "SupApp.Runtime.NotificationBridge",
+                "allowed_paths": ["SupApp/Sources/SupApp/AppEnvironment.swift"],
+            }
+            contract["required_repo_outputs"] = ["SupApp/Sources/SupApp/AppEnvironment.swift"]
+            contract["instructions"] = [
+                {
+                    "id": "P0-001",
+                    "task": "Add bridge while preserving Supabase SDK and server secret boundary.",
+                    "expected_evidence": ["SupApp/Sources/SupApp/AppEnvironment.swift"],
+                }
+            ]
+            contract["closes_obligations"] = ["obl.secret-boundary"]
+            contract["acceptance_commands"] = [
+                "python3 tests/validate_boundaries.py",
+                "xcodebuild -project App.xcodeproj -scheme App build",
+            ]
+            contract["command_expectations"] = [
+                {
+                    "id": "boundary-validator",
+                    "command": "python3 tests/validate_boundaries.py",
+                    "role": "acceptance",
+                    "target": "tests/validate_boundaries.py",
+                }
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            self.assertEqual(PHASE_PLAN_REVIEW.review_phase_plan(root, task_path), [])
+
+    def test_append_preservation_claim_requires_transaction_or_concurrency_obligation_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "pending store"
+            contract["scope"] = {
+                "layer": "AmbientData",
+                "allowed_paths": ["Modules/AmbientData/Sources/AmbientData/AppGroupActivityTokenRegistry.swift"],
+            }
+            contract["required_repo_outputs"] = [
+                "Modules/AmbientData/Sources/AmbientData/AppGroupActivityTokenRegistry.swift"
+            ]
+            contract["interfaces"] = [
+                {
+                    "path": "Modules/AmbientData/Sources/AmbientData/AppGroupActivityTokenRegistry.swift",
+                    "symbol": "removePendingActivityTokenRegistrations",
+                    "signature": "public func removePendingActivityTokenRegistrations(activityIDs: Set<String>) throws",
+                    "business_rules": [
+                        "Removal preserves entries appended between sync read and removal write by re-reading UserDefaults."
+                    ],
+                }
+            ]
+            contract["acceptance_commands"] = [
+                "xcodebuild -project App.xcodeproj -scheme App build"
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("append-preserving" in error for error in errors), errors)
+
+    def test_append_preservation_claim_accepts_transaction_obligation_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_design_contract(
+                task_path,
+                [
+                    {
+                        "id": "obl.pending-store-transaction",
+                        "class": "transaction_boundary",
+                        "trigger": "Remove pending registrations after re-reading storage.",
+                        "closure_condition": "Transaction boundary validator passes.",
+                        "required_command_roles": ["acceptance"],
+                        "closure_command_refs": ["pending-store-validator"],
+                    }
+                ],
+            )
+            contract = self.base_contract()
+            contract["name"] = "pending store"
+            contract["scope"] = {
+                "layer": "AmbientData",
+                "allowed_paths": ["Modules/AmbientData/Sources/AmbientData/AppGroupActivityTokenRegistry.swift"],
+            }
+            contract["required_repo_outputs"] = [
+                "Modules/AmbientData/Sources/AmbientData/AppGroupActivityTokenRegistry.swift"
+            ]
+            contract["interfaces"] = [
+                {
+                    "path": "Modules/AmbientData/Sources/AmbientData/AppGroupActivityTokenRegistry.swift",
+                    "symbol": "removePendingActivityTokenRegistrations",
+                    "signature": "public func removePendingActivityTokenRegistrations(activityIDs: Set<String>) throws",
+                    "business_rules": [
+                        "Removal preserves entries appended between sync read and removal write by re-reading UserDefaults."
+                    ],
+                }
+            ]
+            contract["closes_obligations"] = ["obl.pending-store-transaction"]
+            contract["acceptance_commands"] = [
+                "python3 tests/validate_pending_store.py",
+                "xcodebuild -project App.xcodeproj -scheme App build",
+            ]
+            contract["command_expectations"] = [
+                {
+                    "id": "pending-store-validator",
+                    "command": "python3 tests/validate_pending_store.py",
+                    "role": "acceptance",
+                    "target": "tests/validate_pending_store.py",
+                }
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            self.assertEqual(PHASE_PLAN_REVIEW.review_phase_plan(root, task_path), [])
 
     def test_design_approval_text_must_not_remain_unapproved(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

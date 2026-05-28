@@ -1,0 +1,6 @@
+{
+  "status": "failed",
+  "errors_contain": [
+    "public interface exposes non-public interface symbol(s) via structured metadata"
+  ]
+}

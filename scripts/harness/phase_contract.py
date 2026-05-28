@@ -8,6 +8,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
+from command_policy import parse_command
 from decision_registry import validate_contract_refs
 from phase_semantics import (
     NON_IMPLEMENTATION_LAYERS as _NON_IMPLEMENTATION_LAYERS,
@@ -140,6 +141,8 @@ def _validate_command_expectations(value: Any) -> list[str]:
     if not isinstance(value, list):
         return ["`command_expectations` must be a list when present."]
     errors: list[str] = []
+    seen_ids: set[str] = set()
+    seen_commands: set[str] = set()
     for index, item in enumerate(value):
         if not isinstance(item, dict):
             errors.append(f"`command_expectations[{index}]` must be an object.")
@@ -147,6 +150,17 @@ def _validate_command_expectations(value: Any) -> list[str]:
         command = item.get("command")
         if not isinstance(command, str) or not command.strip():
             errors.append(f"`command_expectations[{index}].command` must be a non-empty string.")
+        elif command in seen_commands:
+            errors.append(f"Duplicate command_expectations command: {command}")
+        elif isinstance(command, str):
+            seen_commands.add(command)
+        expectation_id = item.get("id")
+        if not isinstance(expectation_id, str) or not expectation_id.strip():
+            errors.append(f"`command_expectations[{index}].id` must be a non-empty string.")
+        elif expectation_id in seen_ids:
+            errors.append(f"Duplicate command_expectations id: {expectation_id}")
+        else:
+            seen_ids.add(expectation_id)
         role = item.get("role")
         if role not in COMMAND_EXPECTATION_ROLES:
             errors.append(
@@ -160,6 +174,58 @@ def _validate_command_expectations(value: Any) -> list[str]:
         repo_scan = item.get("repo_scan")
         if repo_scan is not None and not isinstance(repo_scan, bool):
             errors.append(f"`command_expectations[{index}].repo_scan` must be boolean when present.")
+    return errors
+
+
+def _validate_command_expectation_sources(contract: dict[str, Any]) -> list[str]:
+    expectations = contract.get("command_expectations")
+    if not isinstance(expectations, list):
+        return []
+    acceptance = set(contract_acceptance_commands(contract))
+    verification = contract.get("verification_evidence") if isinstance(contract.get("verification_evidence"), dict) else {}
+    reproduction = set(string_list(verification.get("reproduction") if isinstance(verification, dict) else []))
+    alternative = set(string_list(verification.get("alternative_evidence") if isinstance(verification, dict) else []))
+    errors: list[str] = []
+    for index, item in enumerate(expectations):
+        if not isinstance(item, dict) or not isinstance(item.get("command"), str):
+            continue
+        command = item["command"]
+        role = item.get("role")
+        if role in {"acceptance", "fixture", "build", "meta"} and command not in acceptance:
+            errors.append(f"`command_expectations[{index}].command` must appear in acceptance_commands for role {role}.")
+        if role == "reproduction" and command not in reproduction and command not in alternative:
+            errors.append(f"`command_expectations[{index}].command` must appear in verification_evidence.reproduction or alternative_evidence.")
+    return errors
+
+
+def _validate_expected_evidence_items(instructions: Any) -> list[str]:
+    errors: list[str] = []
+    allowed_types = {"required_output", "required_repo_output", "command", "path"}
+    for instruction_index, instruction in enumerate(instructions or []):
+        if not isinstance(instruction, dict):
+            continue
+        for evidence_index, evidence in enumerate(instruction.get("expected_evidence") or []):
+            if not isinstance(evidence, dict):
+                continue
+            allowed_keys = {"type", "ref"}
+            extra = sorted(set(evidence) - allowed_keys)
+            if extra:
+                errors.append(
+                    f"`instructions[{instruction_index}].expected_evidence[{evidence_index}]` has unsupported keys: {extra!r}"
+                )
+            if evidence.get("type") not in allowed_types:
+                errors.append(f"`instructions[{instruction_index}].expected_evidence[{evidence_index}].type` is invalid.")
+            if not isinstance(evidence.get("ref"), str) or not evidence.get("ref", "").strip():
+                errors.append(f"`instructions[{instruction_index}].expected_evidence[{evidence_index}].ref` must be a non-empty string.")
+    return errors
+
+
+def _validate_command_policy(contract: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for index, command in enumerate(contract_acceptance_commands(contract)):
+        _argv, command_errors = parse_command(command)
+        for error in command_errors:
+            errors.append(f"`acceptance_commands[{index}]` violates command policy: {error}")
     return errors
 
 
@@ -354,7 +420,11 @@ def validate_phase_contract(
     errors.extend(_validate_fallback_behavior(contract.get("fallback_behavior")))
     errors.extend(_validate_validation_budget(contract.get("validation_budget")))
     errors.extend(_validate_command_expectations(contract.get("command_expectations")))
+    errors.extend(_validate_command_expectation_sources(contract))
+    errors.extend(_validate_command_policy(contract))
     errors.extend(_validate_decision_policy_shape(contract))
+    if contract.get("phase_kind") == "validation" and analyze_phase(contract, phase_name).writes_product_code:
+        errors.append("`phase_kind` validation cannot include product implementation paths.")
     if contract_needs_verification_evidence(contract, phase_name):
         errors.extend(_validate_verification_evidence(contract.get("verification_evidence"), contract))
     if decision_registry is not None:
@@ -402,6 +472,10 @@ def validate_phase_contract(
     else:
         if analyze_phase(contract, phase_name).writes_product_code and not interfaces:
             errors.append("`interfaces` must describe target signatures for non-documentation phases.")
+        structured_interface_mode = any(
+            isinstance(item, dict) and any(key in item for key in ["visibility", "kind", "exposes"])
+            for item in interfaces
+        )
         for index, item in enumerate(interfaces):
             if not isinstance(item, dict):
                 errors.append(f"`interfaces[{index}]` must be an object.")
@@ -409,6 +483,18 @@ def validate_phase_contract(
             for field in ["path", "symbol", "signature"]:
                 if not isinstance(item.get(field), str) or not item.get(field, "").strip():
                     errors.append(f"`interfaces[{index}].{field}` must be a non-empty string.")
+            if structured_interface_mode:
+                visibility = item.get("visibility")
+                if visibility not in {"public", "internal", "private"}:
+                    errors.append(f"`interfaces[{index}].visibility` must be public, internal, or private.")
+                kind = item.get("kind")
+                if kind not in {"function", "method", "property", "type", "protocol", "class", "struct", "enum", "doc", "module"}:
+                    errors.append(f"`interfaces[{index}].kind` must be valid structured interface metadata.")
+                exposes = item.get("exposes")
+                if exposes is not None and (not isinstance(exposes, list) or not all(isinstance(entry, str) and entry.strip() for entry in exposes)):
+                    errors.append(f"`interfaces[{index}].exposes` must be a list of non-empty strings when present.")
+                if visibility == "public" and "exposes" not in item:
+                    errors.append(f"`interfaces[{index}].exposes` is required for public interfaces.")
             business_rules = item.get("business_rules")
             if not isinstance(business_rules, list) or not string_list(business_rules):
                 errors.append(f"`interfaces[{index}].business_rules` must be a non-empty list.")
@@ -418,6 +504,7 @@ def validate_phase_contract(
     if not isinstance(instructions, list) or not instructions:
         errors.append("`instructions` must be a non-empty list.")
     else:
+        errors.extend(_validate_expected_evidence_items(instructions))
         for index, item in enumerate(instructions):
             if not isinstance(item, dict):
                 errors.append(f"`instructions[{index}]` must be an object.")
@@ -588,6 +675,7 @@ def checklist_markdown(contract: dict[str, Any]) -> str:
     if command_expectations:
         lines.extend(["", "## Command Expectations", ""])
         for item in command_expectations:
+            expectation_id = item.get("id", "")
             role = item.get("role", "")
             command = item.get("command", "")
             target = item.get("target")
@@ -598,7 +686,8 @@ def checklist_markdown(contract: dict[str, Any]) -> str:
             if repo_scan is not None:
                 suffix.append(f"repo_scan: {repo_scan}")
             suffix_text = f" ({', '.join(suffix)})" if suffix else ""
-            lines.append(f"- [ ] {role}: `{command}`{suffix_text}")
+            prefix = f"{expectation_id} {role}".strip()
+            lines.append(f"- [ ] {prefix}: `{command}`{suffix_text}")
 
     lines.extend(["", "## Required Outputs", ""])
     for raw_path in contract_required_outputs(contract):
