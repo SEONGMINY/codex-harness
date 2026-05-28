@@ -21,6 +21,7 @@ sys.path.insert(0, str(HARNESS_DIR))
 
 import policy_lineage  # noqa: E402
 import harness_attestation  # noqa: E402
+import start as harness_start  # noqa: E402
 
 
 class StartLauncherTest(unittest.TestCase):
@@ -126,6 +127,10 @@ class StartLauncherTest(unittest.TestCase):
         )
         (repo / ".codex" / "harness" / "scripts" / "scope_policy.py").write_text(
             "# scope policy helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "task_paths.py").write_text(
+            "# task path helper\n",
             encoding="utf-8",
         )
         (repo / ".codex" / "harness" / "scripts" / "policy_lineage.py").write_text(
@@ -411,6 +416,18 @@ class StartLauncherTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertIn("installed runtime drift detected", result.stderr)
+
+    def test_launcher_task_path_resolution_rejects_non_task_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp) / "repo"
+            (repo / "not-tasks" / "demo").mkdir(parents=True)
+
+            resolved = harness_start.resolve_task_path(
+                repo,
+                {"task_path": "not-tasks/demo"},
+            )
+
+            self.assertIsNone(resolved)
 
     def test_questions_artifact_in_final_output_sets_questions_needed_status(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

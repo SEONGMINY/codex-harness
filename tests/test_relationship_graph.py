@@ -188,7 +188,7 @@ class RelationshipGraphTest(unittest.TestCase):
         self.assertIn('n1["foo_bar.ts"]', mermaid)
         self.assertIn('n0 -->|"related"| n1', mermaid)
 
-    def test_cli_accepts_absolute_task_path_outside_root(self) -> None:
+    def test_cli_rejects_absolute_task_path_outside_root_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             root, task_path = self.make_task(tmp)
@@ -212,10 +212,8 @@ class RelationshipGraphTest(unittest.TestCase):
                 check=False,
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            graph = json.loads(result.stdout)
-            task_node = next(node for node in graph["nodes"] if node["id"] == "task:external-task")
-            self.assertEqual(task_node["metadata"]["path"], external_task.as_posix())
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Task directory must be under", result.stderr)
 
     def test_cli_accepts_root_relative_task_path_from_other_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

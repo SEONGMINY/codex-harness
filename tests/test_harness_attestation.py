@@ -35,6 +35,7 @@ class HarnessAttestationTest(unittest.TestCase):
         self.assertIn("harness:start.py", paths)
         self.assertIn("harness:install_preflight.py", paths)
         self.assertIn("harness:scope_policy.py", paths)
+        self.assertIn("harness:task_paths.py", paths)
         self.assertIn("harness:decision_registry.py", paths)
         self.assertIn("harness:init-task.py", paths)
         self.assertIn("harness:gen-docs-diff.py", paths)

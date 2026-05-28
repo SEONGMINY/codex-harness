@@ -29,6 +29,7 @@ from design_approval import design_approval_bundle_entries, design_approval_bund
 from harness_attestation import attestation_fingerprint, harness_attestation
 from policy_pack import policy_pack_metadata
 from policy_lineage import design_approval_scope_sha256, policy_pack_lineage_sha256
+from task_paths import resolve_task_path as resolve_harness_task_path
 
 
 SKIP_SNAPSHOT_DIRS = {
@@ -413,12 +414,10 @@ def resolve_task_path(root: Path, final: dict[str, object] | None) -> Path | Non
     task_path = final.get("task_path")
     if not isinstance(task_path, str) or not task_path.strip():
         return None
-    resolved = (root / task_path).resolve()
     try:
-        resolved.relative_to(root)
-    except ValueError:
+        return resolve_harness_task_path(root, task_path)
+    except (FileNotFoundError, ValueError):
         return None
-    return resolved if resolved.exists() else None
 
 
 def read_json_object(path: Path) -> dict[str, object] | None:
@@ -688,6 +687,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
         root / ".codex" / "harness" / "scripts" / "gen-relationship-graph.py",
         root / ".codex" / "harness" / "scripts" / "scope_policy.py",
+        root / ".codex" / "harness" / "scripts" / "task_paths.py",
         install_manifest_path,
     ]
     missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]

@@ -18,6 +18,7 @@ from file_lock import LockHandle, acquire_task_runtime_lock, release_lock
 from harness_attestation import harness_attestation
 from policy_pack import policy_pack_metadata
 from policy_lineage import policy_pack_fingerprint, validate_current_policy_lineage
+from task_paths import resolve_task_path
 
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
@@ -58,18 +59,6 @@ def now() -> str:
 
 def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def resolve_task_path(root: Path, task_arg: str) -> Path:
-    candidate = Path(task_arg)
-    if candidate.is_absolute() and candidate.is_dir():
-        return candidate
-    if candidate.is_dir():
-        return candidate.resolve()
-    task_path = root / "tasks" / task_arg
-    if task_path.is_dir():
-        return task_path
-    raise FileNotFoundError(f"Task directory not found: {task_arg}")
 
 
 def run_capture(args: list[str], cwd: Path, max_chars: int = 120_000) -> str:

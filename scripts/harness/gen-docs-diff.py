@@ -8,17 +8,7 @@ import subprocess
 from pathlib import Path
 
 from artifact_io import atomic_write_text
-
-def resolve_task_path(root: Path, task_arg: str) -> Path:
-    candidate = Path(task_arg)
-    if candidate.is_absolute() and candidate.is_dir():
-        return candidate
-    if candidate.is_dir():
-        return candidate.resolve()
-    task_path = root / "tasks" / task_arg
-    if task_path.is_dir():
-        return task_path
-    raise FileNotFoundError(f"Task directory not found: {task_arg}")
+from task_paths import resolve_task_path
 
 
 def main() -> int:

@@ -60,6 +60,7 @@ from policy_lineage import (
     validate_current_policy_lineage,
 )
 from scope_policy import required_output_repo_paths, traceable_changed_files
+from task_paths import resolve_task_path
 
 
 HARNESS_VERSION = "0.1.5"
@@ -160,18 +161,6 @@ PLACEHOLDER_PATTERNS = [
 
 def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def resolve_task_path(root: Path, task_arg: str) -> Path:
-    candidate = Path(task_arg)
-    if candidate.is_absolute() and candidate.is_dir():
-        return candidate
-    if candidate.is_dir():
-        return candidate.resolve()
-    task_path = root / "tasks" / task_arg
-    if task_path.is_dir():
-        return task_path
-    raise FileNotFoundError(f"Task directory not found: {task_arg}")
 
 
 def has_placeholder(text: str) -> bool:

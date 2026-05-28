@@ -70,6 +70,7 @@ from policy_lineage import (
     validate_current_policy_lineage,
 )
 from scope_policy import required_output_repo_paths, traceable_changed_files
+from task_paths import resolve_task_path
 from redaction import redact_text
 
 
@@ -145,6 +146,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "run-quality-checks.py",
         root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
         root / ".codex" / "harness" / "scripts" / "scope_policy.py",
+        root / ".codex" / "harness" / "scripts" / "task_paths.py",
         install_manifest_path,
     ]
     missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
@@ -334,18 +336,6 @@ def subprocess_output_text(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return value
-
-
-def resolve_task_path(root: Path, task_arg: str) -> Path:
-    candidate = Path(task_arg)
-    if candidate.is_absolute() and candidate.is_dir():
-        return candidate
-    if candidate.is_dir():
-        return candidate.resolve()
-    task_path = root / "tasks" / task_arg
-    if task_path.is_dir():
-        return task_path
-    raise FileNotFoundError(f"Task directory not found: {task_arg}")
 
 
 def phase_file(task_path: Path, phase_number: int) -> Path:
