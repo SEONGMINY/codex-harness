@@ -1839,21 +1839,118 @@ def append_attempt_manifest_record(
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-def read_attempt_manifest_records(task_path: Path, phase_number: int) -> list[dict[str, object]]:
+def read_attempt_manifest_records_with_errors(
+    task_path: Path,
+    phase_number: int,
+) -> tuple[list[dict[str, object]], list[str]]:
     path = phase_attempt_manifest_path(task_path, phase_number)
     if not path.exists():
-        return []
+        return [], []
     records: list[dict[str, object]] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    errors: list[str] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
         if not line.strip():
             continue
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
+            errors.append(f"Invalid phase {phase_number} attempt manifest JSON at line {line_number}.")
             continue
         if isinstance(record, dict):
             records.append(record)
+        else:
+            errors.append(f"Phase {phase_number} attempt manifest record at line {line_number} must be a JSON object.")
+    return records, errors
+
+
+def read_attempt_manifest_records(task_path: Path, phase_number: int) -> list[dict[str, object]]:
+    records, _errors = read_attempt_manifest_records_with_errors(task_path, phase_number)
     return records
+
+
+def runtime_artifact_ref_errors(
+    task_path: Path,
+    ref: object,
+    label: str,
+    expected_name: str | None = None,
+) -> list[str]:
+    if not isinstance(ref, dict):
+        return [f"{label} must be an artifact ref object."]
+    errors: list[str] = []
+    if expected_name is not None and ref.get("name") != expected_name:
+        errors.append(f"{label}.name must be {expected_name!r}.")
+    raw_path = ref.get("path")
+    path = resolve_task_artifact_path(task_path, raw_path)
+    if path is None:
+        errors.append(f"{label}.path is invalid.")
+        return errors
+    exists = ref.get("exists")
+    if not isinstance(exists, bool):
+        errors.append(f"{label}.exists must be boolean.")
+    elif exists != path.exists():
+        errors.append(f"{label}.exists does not match filesystem.")
+    if path.exists() and path.is_file():
+        expected_sha = file_sha256(path)
+        if ref.get("sha256") != expected_sha:
+            errors.append(f"{label}.sha256 does not match file content.")
+    elif "sha256" in ref:
+        errors.append(f"{label}.sha256 is present for a missing or non-file artifact.")
+    return errors
+
+
+def attempt_manifest_semantic_errors(
+    task_path: Path,
+    phase_number: int,
+    records: list[dict[str, object]],
+) -> list[str]:
+    errors: list[str] = []
+    terminal_by_attempt: dict[int, list[str]] = {}
+    for index, record in enumerate(records):
+        label = f"Phase {phase_number} attempt manifest record {index + 1}"
+        if record.get("schema_version") != 1:
+            errors.append(f"{label} schema_version must be 1.")
+        if record.get("artifact_kind") != "phase_attempt_manifest_record":
+            errors.append(f'{label} artifact_kind must be "phase_attempt_manifest_record".')
+        record_type = record.get("record_type")
+        if record_type not in {"attempt_started", *TERMINAL_ATTEMPT_RECORD_TYPES}:
+            errors.append(f"{label} record_type is invalid: {record_type!r}.")
+        if record.get("phase") != phase_number:
+            errors.append(f"{label} phase must be {phase_number}.")
+        attempt = record.get("attempt")
+        if not isinstance(attempt, int) or attempt <= 0:
+            errors.append(f"{label} attempt must be a positive integer.")
+            continue
+        if isinstance(record_type, str) and record_type in TERMINAL_ATTEMPT_RECORD_TYPES:
+            terminal_by_attempt.setdefault(attempt, []).append(record_type)
+        for artifact_key in ["result", "attempt_commit", "repair_packet", "repair_packet_summary"]:
+            if artifact_key in record:
+                errors.extend(
+                    runtime_artifact_ref_errors(
+                        task_path,
+                        record.get(artifact_key),
+                        f"{label}.{artifact_key}",
+                        expected_name=artifact_key,
+                    )
+                )
+        artifacts = record.get("artifacts")
+        if isinstance(artifacts, list):
+            for artifact_index, artifact in enumerate(artifacts):
+                errors.extend(
+                    runtime_artifact_ref_errors(
+                        task_path,
+                        artifact,
+                        f"{label}.artifacts[{artifact_index}]",
+                    )
+                )
+        elif "artifacts" in record:
+            errors.append(f"{label}.artifacts must be a list.")
+    for attempt, terminal_types in terminal_by_attempt.items():
+        if len(terminal_types) > 1:
+            errors.append(
+                f"Phase {phase_number} attempt {attempt} has multiple terminal manifest records: "
+                + ", ".join(terminal_types)
+            )
+    return errors
 
 
 def manifest_record_matches_current_reset(
@@ -2217,6 +2314,61 @@ def latest_valid_phase_attempt_commit(task_path: Path, phase_number: int) -> dic
     return valid
 
 
+def recovered_commit_terminalization_error(
+    task_path: Path,
+    phase_number: int,
+    commit: dict[str, object],
+    current_reset_generation: int,
+) -> str | None:
+    attempt = commit.get("attempt")
+    if not isinstance(attempt, int) or attempt <= 0:
+        return "Recovered commit has invalid attempt metadata."
+    terminal_record = attempt_terminal_manifest_record(task_path, phase_number, attempt, current_reset_generation)
+    if not terminal_record:
+        return None
+    if terminal_record.get("record_type") == "attempt_committed":
+        return None
+    return (
+        "Valid attempt commit conflicts with existing terminal manifest record: "
+        f"{terminal_record.get('record_type')}"
+    )
+
+
+def terminalize_recovered_attempt_commit(
+    task_path: Path,
+    phase_number: int,
+    commit: dict[str, object],
+    current_reset_generation: int,
+) -> None:
+    attempt = commit.get("attempt")
+    if not isinstance(attempt, int) or attempt <= 0:
+        return
+    terminal_record = attempt_terminal_manifest_record(task_path, phase_number, attempt, current_reset_generation)
+    if not terminal_record:
+        raw_commit_path = commit.get("_path")
+        commit_path = Path(raw_commit_path) if isinstance(raw_commit_path, str) else phase_attempt_commit_path(task_path, phase_number, attempt)
+        raw_result_path = commit.get("result") if isinstance(commit.get("result"), dict) else {}
+        result_path = resolve_task_artifact_path(task_path, raw_result_path.get("path"))
+        result_ref = {
+            "name": "result",
+            "path": raw_result_path.get("path"),
+            "exists": bool(result_path and result_path.exists()),
+        }
+        if result_path is not None and result_path.exists() and result_path.is_file():
+            result_ref["sha256"] = file_sha256(result_path)
+        append_attempt_manifest_record(
+            task_path,
+            phase_number,
+            attempt,
+            "attempt_committed",
+            status="committed",
+            result=result_ref,
+            attempt_commit=artifact_ref(task_path, "attempt_commit", commit_path),
+            recovery_action="recovered_from_valid_attempt_commit",
+        )
+    clear_repair_packet(task_path, phase_number)
+
+
 def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> list[dict[str, object]]:
     index_path = task_path / "index.json"
     task_index = read_json(index_path)
@@ -2226,6 +2378,24 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
             continue
         phase_number = int(phase["phase"])
         status = phase.get("status")
+        manifest_records, manifest_errors = read_attempt_manifest_records_with_errors(task_path, phase_number)
+        manifest_errors.extend(attempt_manifest_semantic_errors(task_path, phase_number, manifest_records))
+        if manifest_errors:
+            message = "Phase attempt manifest is invalid:\n" + "\n".join(f"- {error}" for error in manifest_errors)
+            changes.append(
+                {
+                    "phase": phase_number,
+                    "from_status": status,
+                    "to_status": "error",
+                    "reason": "invalid_attempt_manifest",
+                }
+            )
+            if not dry_run:
+                phase["status"] = "error"
+                phase["failed_at"] = now()
+                phase["error_message"] = message
+                write_last_error(task_path, phase_number, message)
+            continue
         commit = latest_valid_phase_attempt_commit(task_path, phase_number)
         reset_generation, reset_at = phase_reset_state(task_path, phase_number)
         if reset_at and status != "pending" and str(phase.get("reset_at") or "") != reset_at:
@@ -2246,8 +2416,30 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
         commit_attempt = commit.get("attempt") if commit else None
         commit_matches_phase_attempt = attempts <= 0 or commit_attempt == attempts
         if status in RUNNABLE_PHASE_STATUSES and commit and commit_matches_phase_attempt:
+            terminalization_error = recovered_commit_terminalization_error(
+                task_path,
+                phase_number,
+                commit,
+                reset_generation,
+            )
+            if terminalization_error:
+                changes.append(
+                    {
+                        "phase": phase_number,
+                        "from_status": status,
+                        "to_status": "error",
+                        "reason": "conflicting_attempt_terminal_record",
+                    }
+                )
+                if not dry_run:
+                    phase["status"] = "error"
+                    phase["failed_at"] = now()
+                    phase["error_message"] = terminalization_error
+                    write_last_error(task_path, phase_number, terminalization_error)
+                continue
             changes.append({"phase": phase_number, "from_status": status, "to_status": "completed", "reason": "valid_attempt_commit"})
             if not dry_run:
+                terminalize_recovered_attempt_commit(task_path, phase_number, commit, reset_generation)
                 phase["status"] = "completed"
                 phase["completed_at"] = now()
                 phase["attempts"] = commit.get("attempt")
@@ -3033,8 +3225,12 @@ def repair_context_integrity_errors(task_path: Path, phase_number: int) -> list[
     if not packet_path.exists() and not summary_path.exists():
         return []
     errors: list[str] = []
+    manifest_records, manifest_errors = read_attempt_manifest_records_with_errors(task_path, phase_number)
+    errors.extend(manifest_errors)
+    errors.extend(attempt_manifest_semantic_errors(task_path, phase_number, manifest_records))
     if not packet_path.exists() or not summary_path.exists():
-        return [f"Phase {phase_number} repair context requires both packet JSON and summary markdown."]
+        errors.append(f"Phase {phase_number} repair context requires both packet JSON and summary markdown.")
+        return errors
     try:
         packet = read_json(packet_path)
     except (OSError, json.JSONDecodeError) as exc:
@@ -3064,7 +3260,7 @@ def repair_context_integrity_errors(task_path: Path, phase_number: int) -> list[
         errors.append(f"Phase {phase_number} repair packet summary alias does not match attempt-scoped summary.")
     matching_records = [
         record
-        for record in read_attempt_manifest_records(task_path, phase_number)
+        for record in manifest_records
         if record.get("attempt") == attempt and record.get("record_type") in {"attempt_failed", "attempt_interrupted"}
     ]
     if not matching_records:

@@ -818,6 +818,91 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual([item["record_type"] for item in manifest], ["attempt_started", "attempt_interrupted"])
             self.assertTrue(RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).exists())
 
+    def test_running_projection_rejects_invalid_attempt_manifest_before_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            phase = {"phase": 0, "name": "demo", "status": "running", "attempts": 1}
+            packet = RUN_PHASES.build_repair_packet(
+                task_path,
+                0,
+                phase,
+                1,
+                "acceptance_commands",
+                "AC command failed.",
+                retryable=True,
+            )
+            RUN_PHASES.write_repair_packet(task_path, 0, packet, attempt=1)
+            with RUN_PHASES.open_append_text(RUN_PHASES.phase_attempt_manifest_path(task_path, 0)) as handle:
+                handle.write("{not-json}\n")
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [phase]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(changes[0]["reason"], "invalid_attempt_manifest")
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertIn("attempt manifest is invalid", task_index["phases"][0]["error_message"])
+            self.assertTrue(RUN_PHASES.phase_repair_packet_path(task_path, 0).exists())
+
+    def test_running_projection_marks_result_without_commit_as_interrupted(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            for name, path in {
+                "contract": RUN_PHASES.phase_contract_path(task_path, 0),
+                "checklist": RUN_PHASES.phase_checklist_path(task_path, 0),
+                "quality": RUN_PHASES.phase_quality_path(task_path, 0),
+                "handoff": RUN_PHASES.phase_handoff_path(task_path, 0),
+                "evidence": RUN_PHASES.phase_evidence_path(task_path, 0),
+                "gate": RUN_PHASES.phase_gate_path(task_path, 0),
+                "reconciliation": RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                "reconciliation_summary": RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+            }.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"{name}\n", encoding="utf-8")
+            prompt = RUN_PHASES.phase_attempt_prompt_path(task_path, 0, 1)
+            stdout = runtime / "phase0-output-attempt1.jsonl"
+            stderr = runtime / "phase0-stderr-attempt1.txt"
+            ac = RUN_PHASES.ac_results_path(task_path, 0, 1)
+            for path in [prompt, stdout, stderr, ac]:
+                path.write_text("attempt 1\n", encoding="utf-8")
+            RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                1,
+                0,
+                [],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                prompt,
+                stdout,
+                stderr,
+                ac,
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "running", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            manifest = self.read_attempt_manifest(task_path, 0)
+            self.assertEqual(changes[0]["reason"], "interrupted_running_phase")
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertEqual([item["record_type"] for item in manifest], ["attempt_interrupted"])
+            self.assertTrue(RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).exists())
+            packet = json.loads(RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).read_text(encoding="utf-8"))
+            self.assertFalse(packet["failure"]["retryable"])
+
     def test_running_projection_recovers_clean_retryable_failed_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
@@ -1065,6 +1150,295 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(changes[0]["reason"], "valid_attempt_commit")
             self.assertEqual(task_index["phases"][0]["status"], "completed")
             self.assertEqual(task_index["phases"][0]["attempts"], 1)
+            manifest = self.read_attempt_manifest(task_path, 0)
+            self.assertEqual(manifest[-1]["record_type"], "attempt_committed")
+            self.assertEqual(manifest[-1]["recovery_action"], "recovered_from_valid_attempt_commit")
+
+    def test_runtime_projection_terminalizes_recovered_commit_and_clears_repair_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            for name, path in {
+                "contract": RUN_PHASES.phase_contract_path(task_path, 0),
+                "checklist": RUN_PHASES.phase_checklist_path(task_path, 0),
+                "quality": RUN_PHASES.phase_quality_path(task_path, 0),
+                "handoff": RUN_PHASES.phase_handoff_path(task_path, 0),
+                "evidence": RUN_PHASES.phase_evidence_path(task_path, 0),
+                "gate": RUN_PHASES.phase_gate_path(task_path, 0),
+                "reconciliation": RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                "reconciliation_summary": RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+            }.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"{name}\n", encoding="utf-8")
+            packet = RUN_PHASES.build_repair_packet(
+                task_path,
+                0,
+                {"phase": 0, "name": "demo"},
+                1,
+                "acceptance_commands",
+                "Attempt one failed.",
+                retryable=True,
+            )
+            RUN_PHASES.write_repair_packet(task_path, 0, packet, attempt=1)
+            RUN_PHASES.append_attempt_manifest_record(task_path, 0, 2, "attempt_started", status="running", artifacts=[])
+            prompt = RUN_PHASES.phase_attempt_prompt_path(task_path, 0, 2)
+            stdout = runtime / "phase0-output-attempt2.jsonl"
+            stderr = runtime / "phase0-stderr-attempt2.txt"
+            ac = RUN_PHASES.ac_results_path(task_path, 0, 2)
+            for path in [prompt, stdout, stderr, ac]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("attempt 2\n", encoding="utf-8")
+            result_path = RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                2,
+                0,
+                [],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                prompt,
+                stdout,
+                stderr,
+                ac,
+            )
+            RUN_PHASES.write_phase_attempt_commit(task_path, 0, 2, result_path)
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "running", "attempts": 2}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            manifest = self.read_attempt_manifest(task_path, 0)
+            self.assertEqual(changes[0]["reason"], "valid_attempt_commit")
+            self.assertEqual(task_index["phases"][0]["status"], "completed")
+            self.assertEqual([item["record_type"] for item in manifest], ["attempt_failed", "attempt_started", "attempt_committed"])
+            self.assertFalse(RUN_PHASES.phase_repair_packet_path(task_path, 0).exists())
+            self.assertFalse(RUN_PHASES.phase_repair_packet_summary_path(task_path, 0).exists())
+
+    def test_runtime_projection_recovered_commit_terminalization_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            for name, path in {
+                "contract": RUN_PHASES.phase_contract_path(task_path, 0),
+                "checklist": RUN_PHASES.phase_checklist_path(task_path, 0),
+                "quality": RUN_PHASES.phase_quality_path(task_path, 0),
+                "handoff": RUN_PHASES.phase_handoff_path(task_path, 0),
+                "evidence": RUN_PHASES.phase_evidence_path(task_path, 0),
+                "gate": RUN_PHASES.phase_gate_path(task_path, 0),
+                "reconciliation": RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                "reconciliation_summary": RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+            }.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"{name}\n", encoding="utf-8")
+            prompt = RUN_PHASES.phase_attempt_prompt_path(task_path, 0, 1)
+            stdout = runtime / "phase0-output-attempt1.jsonl"
+            stderr = runtime / "phase0-stderr-attempt1.txt"
+            ac = RUN_PHASES.ac_results_path(task_path, 0, 1)
+            for path in [prompt, stdout, stderr, ac]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("attempt 1\n", encoding="utf-8")
+            result_path = RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                1,
+                0,
+                [],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                prompt,
+                stdout,
+                stderr,
+                ac,
+            )
+            commit_path = RUN_PHASES.write_phase_attempt_commit(task_path, 0, 1, result_path)
+            RUN_PHASES.append_attempt_manifest_record(
+                task_path,
+                0,
+                1,
+                "attempt_committed",
+                status="committed",
+                result=RUN_PHASES.artifact_ref(task_path, "result", result_path),
+                attempt_commit=RUN_PHASES.artifact_ref(task_path, "attempt_commit", commit_path),
+            )
+            packet = RUN_PHASES.build_repair_packet(
+                task_path,
+                0,
+                {"phase": 0, "name": "demo"},
+                1,
+                "acceptance_commands",
+                "stale alias",
+                retryable=True,
+            )
+            RUN_PHASES.write_json(RUN_PHASES.phase_repair_packet_path(task_path, 0), packet)
+            RUN_PHASES.phase_repair_packet_summary_path(task_path, 0).write_text(
+                RUN_PHASES.repair_packet_markdown(packet),
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "running", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            manifest = self.read_attempt_manifest(task_path, 0)
+            self.assertEqual(changes[0]["reason"], "valid_attempt_commit")
+            self.assertEqual([item["record_type"] for item in manifest], ["attempt_committed"])
+            self.assertFalse(RUN_PHASES.phase_repair_packet_path(task_path, 0).exists())
+            self.assertFalse(RUN_PHASES.phase_repair_packet_summary_path(task_path, 0).exists())
+
+    def test_runtime_projection_rejects_valid_commit_with_conflicting_terminal_record(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            for name, path in {
+                "contract": RUN_PHASES.phase_contract_path(task_path, 0),
+                "checklist": RUN_PHASES.phase_checklist_path(task_path, 0),
+                "quality": RUN_PHASES.phase_quality_path(task_path, 0),
+                "handoff": RUN_PHASES.phase_handoff_path(task_path, 0),
+                "evidence": RUN_PHASES.phase_evidence_path(task_path, 0),
+                "gate": RUN_PHASES.phase_gate_path(task_path, 0),
+                "reconciliation": RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                "reconciliation_summary": RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+            }.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"{name}\n", encoding="utf-8")
+            prompt = RUN_PHASES.phase_attempt_prompt_path(task_path, 0, 1)
+            stdout = runtime / "phase0-output-attempt1.jsonl"
+            stderr = runtime / "phase0-stderr-attempt1.txt"
+            ac = RUN_PHASES.ac_results_path(task_path, 0, 1)
+            for path in [prompt, stdout, stderr, ac]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("attempt 1\n", encoding="utf-8")
+            result_path = RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                1,
+                0,
+                [],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                prompt,
+                stdout,
+                stderr,
+                ac,
+            )
+            RUN_PHASES.write_phase_attempt_commit(task_path, 0, 1, result_path)
+            packet = RUN_PHASES.build_repair_packet(
+                task_path,
+                0,
+                {"phase": 0, "name": "demo"},
+                1,
+                "gate",
+                "Conflicting failure.",
+                retryable=False,
+            )
+            RUN_PHASES.write_repair_packet(task_path, 0, packet, attempt=1)
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "running", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            manifest = self.read_attempt_manifest(task_path, 0)
+            self.assertEqual(changes[0]["reason"], "conflicting_attempt_terminal_record")
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertIn("conflicts", task_index["phases"][0]["error_message"])
+            self.assertEqual([item["record_type"] for item in manifest], ["attempt_failed"])
+
+    def test_runtime_projection_rejects_duplicate_terminal_manifest_before_commit_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            for name, path in {
+                "contract": RUN_PHASES.phase_contract_path(task_path, 0),
+                "checklist": RUN_PHASES.phase_checklist_path(task_path, 0),
+                "quality": RUN_PHASES.phase_quality_path(task_path, 0),
+                "handoff": RUN_PHASES.phase_handoff_path(task_path, 0),
+                "evidence": RUN_PHASES.phase_evidence_path(task_path, 0),
+                "gate": RUN_PHASES.phase_gate_path(task_path, 0),
+                "reconciliation": RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                "reconciliation_summary": RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+            }.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"{name}\n", encoding="utf-8")
+            prompt = RUN_PHASES.phase_attempt_prompt_path(task_path, 0, 1)
+            stdout = runtime / "phase0-output-attempt1.jsonl"
+            stderr = runtime / "phase0-stderr-attempt1.txt"
+            ac = RUN_PHASES.ac_results_path(task_path, 0, 1)
+            for path in [prompt, stdout, stderr, ac]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("attempt 1\n", encoding="utf-8")
+            result_path = RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                1,
+                0,
+                [],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                prompt,
+                stdout,
+                stderr,
+                ac,
+            )
+            commit_path = RUN_PHASES.write_phase_attempt_commit(task_path, 0, 1, result_path)
+            packet = RUN_PHASES.build_repair_packet(
+                task_path,
+                0,
+                {"phase": 0, "name": "demo"},
+                1,
+                "gate",
+                "Failed terminal.",
+                retryable=False,
+            )
+            RUN_PHASES.write_repair_packet(task_path, 0, packet, attempt=1)
+            RUN_PHASES.append_attempt_manifest_record(
+                task_path,
+                0,
+                1,
+                "attempt_committed",
+                status="committed",
+                result=RUN_PHASES.artifact_ref(task_path, "result", result_path),
+                attempt_commit=RUN_PHASES.artifact_ref(task_path, "attempt_commit", commit_path),
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "running", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(changes[0]["reason"], "invalid_attempt_manifest")
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertIn("multiple terminal manifest records", task_index["phases"][0]["error_message"])
+            self.assertTrue(RUN_PHASES.phase_repair_packet_path(task_path, 0).exists())
 
     def test_runtime_projection_rejects_commit_with_tampered_artifact_hash(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

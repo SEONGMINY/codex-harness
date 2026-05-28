@@ -2149,14 +2149,15 @@ def validate_phase_attempt_manifest(
                     errors.extend(packet_errors)
 
     expected_attempt = phase.get("attempts")
-    if phase.get("status") == "completed" and isinstance(expected_attempt, int) and expected_attempt > 0 and records:
-        committed = [
-            record
-            for record in terminal_by_attempt.get(expected_attempt, [])
-            if record.get("record_type") == "attempt_committed"
-        ]
-        if not committed:
-            errors.append(f"Completed phase {phase_number} attempt {expected_attempt} is missing attempt_committed manifest record.")
+    if phase.get("status") == "completed":
+        if isinstance(expected_attempt, int) and expected_attempt > 0 and records:
+            committed = [
+                record
+                for record in terminal_by_attempt.get(expected_attempt, [])
+                if record.get("record_type") == "attempt_committed"
+            ]
+            if not committed:
+                errors.append(f"Completed phase {phase_number} attempt {expected_attempt} is missing attempt_committed manifest record.")
         if phase_repair_packet_path(task_path, phase_number).exists():
             errors.append(f"Completed phase {phase_number} must not retain active repair packet alias.")
         if phase_repair_packet_summary_path(task_path, phase_number).exists():

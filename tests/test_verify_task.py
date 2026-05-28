@@ -1308,6 +1308,39 @@ classDiagram
 
             self.assertTrue(any("Invalid attempt manifest JSON" in error for error in errors), errors)
 
+    def test_completed_phase_rejects_active_repair_alias_without_manifest_records(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True)
+            (runtime / "phase0-repair-packet.json").write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "attempt": 1,
+                        "status": "repair_required",
+                        "failure": {
+                            "type": "gate",
+                            "message": "failed",
+                            "retryable": False,
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (runtime / "phase0-repair-packet.md").write_text("repair\n", encoding="utf-8")
+
+            errors = VERIFY_TASK.validate_phase_attempt_manifest(
+                root,
+                task_path,
+                {"phase": 0, "name": "demo", "status": "completed", "attempts": 1},
+            )
+
+            self.assertTrue(any("active repair packet alias" in error for error in errors), errors)
+            self.assertTrue(any("active repair packet summary alias" in error for error in errors), errors)
+
     def test_extract_design_repo_paths_reads_files_to_change_section(self) -> None:
         text = """# Implementation Design Review
 
