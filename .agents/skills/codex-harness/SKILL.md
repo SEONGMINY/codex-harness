@@ -28,6 +28,8 @@ If a repair packet lists `contaminating_changes`, the runner observed changes ou
 
 If repository hooks are installed, `.codex/harness/scripts/run-phases.py` passes the active task, phase, and runtime contract through `CODEX_HARNESS_*` environment variables. Required hooks then use that contract to block obvious phase-scope violations and to continue Codex when required outputs are missing.
 
+`run-phases.py` serializes non-dry-run phase execution with a repository-level execution lock in addition to the per-task runtime lock. Treat this as intentional: phase agents mutate and inspect one shared worktree, so concurrent tasks must not write runtime proof from overlapping repository snapshots.
+
 ## Installation Check
 
 Before starting the workflow, check whether the current repository has the matching harness version:

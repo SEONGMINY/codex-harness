@@ -1257,6 +1257,37 @@ class RunCodexRuntimeTest(unittest.TestCase):
             top_index = json.loads((root / "tasks" / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(top_index["tasks"][0]["status"], "pending")
 
+    def test_repo_execution_lock_blocks_concurrent_phase_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            lock_path = RUN_PHASES.repo_execution_lock_path(root)
+            held = file_lock.acquire_lock(lock_path, boundary=root)
+            args = argparse.Namespace(dry_run=False, repo_lock_timeout=0)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "repo execution is active"):
+                    RUN_PHASES.acquire_repo_execution_lock(root, task_path, args)
+            finally:
+                file_lock.release_lock(held)
+
+            self.assertFalse(lock_path.exists())
+
+    def test_main_releases_task_lock_when_repo_execution_lock_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            held = file_lock.acquire_lock(RUN_PHASES.repo_execution_lock_path(root), boundary=root)
+            try:
+                with (
+                    mock.patch.object(sys, "argv", ["run-phases.py", "demo", "--root", str(root)]),
+                    mock.patch.object(RUN_PHASES, "harness_install_errors", return_value=[]),
+                    mock.patch.object(RUN_PHASES, "execute_phase") as execute_phase,
+                ):
+                    self.assertEqual(RUN_PHASES.main(), 1)
+                    execute_phase.assert_not_called()
+            finally:
+                file_lock.release_lock(held)
+
+            self.assertFalse(RUN_PHASES.runner_lock_path(task_path).exists())
+
     def test_parallel_top_index_updates_preserve_unrelated_entries(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, _task_path = self.make_task(Path(raw_tmp))
@@ -2015,6 +2046,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertIn("--full-auto", calls[3])
             self.assertIn("--yolo", calls[3])
             self.assertIn("--task-lock-held", calls[3])
+            self.assertIn("--repo-lock-held", calls[3])
 
     def test_current_policy_lineage_errors_rejects_unapproved_current_policy(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

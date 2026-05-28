@@ -14,7 +14,7 @@ from typing import Iterable
 from artifact_io import atomic_write_json, atomic_write_text
 from codex_exec import add_output_schema, run_codex_exec
 from command_policy import run_command
-from file_lock import LockHandle, acquire_task_runtime_lock, release_lock
+from file_lock import LockHandle, acquire_repo_execution_lock, acquire_task_runtime_lock, release_lock
 from harness_attestation import harness_attestation
 from policy_pack import policy_pack_metadata
 from policy_lineage import policy_pack_fingerprint, validate_current_policy_lineage
@@ -259,12 +259,20 @@ def main() -> int:
         help="Pass --dangerously-bypass-approvals-and-sandbox to codex exec.",
     )
     parser.add_argument("--task-lock-held", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--repo-lock-held", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--repo-lock-timeout",
+        type=int,
+        default=0,
+        help="Wait up to this many seconds for another run-phases repo execution to finish.",
+    )
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
     task_path = resolve_task_path(root, args.task)
     runtime_dir = task_path / "context-pack" / "runtime"
     lock_handle: LockHandle | None = None
+    repo_lock_handle: LockHandle | None = None
 
     try:
         if not args.task_lock_held:
@@ -272,6 +280,17 @@ def main() -> int:
                 lock_handle = acquire_task_runtime_lock(task_path, "evaluate-task")
             except RuntimeError as exc:
                 print(f"Another codex-harness task operation is active: {exc}", file=sys.stderr)
+                return 1
+        if not args.repo_lock_held:
+            try:
+                repo_lock_handle = acquire_repo_execution_lock(
+                    root,
+                    "evaluate-task",
+                    task_path=task_path,
+                    wait_timeout_seconds=args.repo_lock_timeout,
+                )
+            except RuntimeError as exc:
+                print(f"Another codex-harness repo execution is active: {exc}", file=sys.stderr)
                 return 1
 
         task_index = read_json(task_path / "index.json")
@@ -321,6 +340,7 @@ def main() -> int:
         print(output_path)
         return 0
     finally:
+        release_lock(repo_lock_handle)
         release_lock(lock_handle)
 
 

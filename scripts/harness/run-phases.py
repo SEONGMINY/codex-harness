@@ -54,9 +54,11 @@ from env_policy import sanitized_env
 from file_lock import (
     LockHandle,
     acquire_lock,
+    acquire_repo_execution_lock as acquire_shared_repo_execution_lock,
     acquire_task_runtime_lock,
     release_lock,
     remove_stale_lock,
+    repo_execution_lock_path,
     task_runtime_lock_path,
 )
 from harness_attestation import attestation_fingerprint, harness_attestation
@@ -1262,6 +1264,26 @@ def acquire_runner_lock(task_path: Path, dry_run: bool) -> LockHandle | None:
 
 
 def release_runner_lock(handle: LockHandle | None) -> None:
+    release_lock(handle)
+
+
+def acquire_repo_execution_lock(root: Path, task_path: Path, args: argparse.Namespace) -> LockHandle | None:
+    if getattr(args, "dry_run", False):
+        return None
+    try:
+        return acquire_shared_repo_execution_lock(
+            root,
+            "run-phases",
+            task_path=task_path,
+            wait_timeout_seconds=getattr(args, "repo_lock_timeout", 0),
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Another codex-harness repo execution is active: {repo_execution_lock_path(root)}"
+        ) from exc
+
+
+def release_repo_execution_lock(handle: LockHandle | None) -> None:
     release_lock(handle)
 
 
@@ -2706,6 +2728,7 @@ def run_evaluation(root: Path, task_path: Path, args: argparse.Namespace) -> int
     if args.yolo:
         command.append("--yolo")
     command.append("--task-lock-held")
+    command.append("--repo-lock-held")
     return subprocess.run(command, cwd=root, check=False).returncode
 
 
@@ -3658,6 +3681,12 @@ def main() -> int:
     )
     parser.add_argument("--skip-install", action="store_true", help="Skip package-manager install preflight.")
     parser.add_argument("--install-timeout", type=non_negative_int, default=600)
+    parser.add_argument(
+        "--repo-lock-timeout",
+        type=non_negative_int,
+        default=0,
+        help="Wait up to this many seconds for another run-phases repo execution to finish.",
+    )
     parser.add_argument("--full-auto", action="store_true", help="Pass --full-auto to codex exec.")
     parser.add_argument("--strict-current-harness", action="store_true", help="Require current harness runtime metadata.")
     parser.add_argument(
@@ -3678,12 +3707,16 @@ def main() -> int:
             print(f"- {error}", file=sys.stderr)
         return 1
     task_path = resolve_task_path(root, args.task)
+    runner_lock: LockHandle | None = None
+    repo_lock: LockHandle | None = None
     try:
-        lock_path = acquire_runner_lock(task_path, args.dry_run)
-    except RuntimeError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-    try:
+        try:
+            runner_lock = acquire_runner_lock(task_path, args.dry_run)
+            repo_lock = acquire_repo_execution_lock(root, task_path, args)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+
         if args.from_phase is not None and args.resume_repair:
             print("--from and --resume-repair cannot be used together.", file=sys.stderr)
             return 1
@@ -3706,7 +3739,8 @@ def main() -> int:
                 return 1
         return 1 if args.failed else 0
     finally:
-        release_runner_lock(lock_path)
+        release_repo_execution_lock(repo_lock)
+        release_runner_lock(runner_lock)
 
 
 if __name__ == "__main__":

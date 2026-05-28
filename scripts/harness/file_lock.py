@@ -135,6 +135,10 @@ def task_runtime_lock_path(task_path: Path) -> Path:
     return task_path / "context-pack" / "runtime" / "run-phases.lock"
 
 
+def repo_execution_lock_path(root: Path) -> Path:
+    return root / ".codex" / "harness" / "repo-execution.lock"
+
+
 def acquire_task_runtime_lock(
     task_path: Path,
     owner: str,
@@ -146,6 +150,24 @@ def acquire_task_runtime_lock(
         metadata={"owner": owner, "task_dir": task_path.name},
         wait_timeout_seconds=wait_timeout_seconds,
         boundary=task_path,
+    )
+
+
+def acquire_repo_execution_lock(
+    root: Path,
+    owner: str,
+    *,
+    task_path: Path | None = None,
+    wait_timeout_seconds: float = 0,
+) -> LockHandle:
+    metadata = {"owner": owner}
+    if task_path is not None:
+        metadata["task_dir"] = task_path.name
+    return acquire_lock(
+        repo_execution_lock_path(root),
+        metadata=metadata,
+        wait_timeout_seconds=wait_timeout_seconds,
+        boundary=root,
     )
 
 
