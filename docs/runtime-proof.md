@@ -15,9 +15,9 @@ tasks/<task-dir>/context-pack/runtime/
 phase가 실행되면 runner는 다음 파일을 만듭니다.
 
 ```text
-phase<N>-prompt.md
-phase<N>-contract.json
-phase<N>-checklist.md
+phase<N>-prompt-attempt<M>.md
+phase<N>-contract-attempt<M>.json
+phase<N>-checklist-attempt<M>.md
 phase<N>-output-attempt<M>.jsonl
 phase<N>-stderr-attempt<M>.txt
 phase<N>-ac-attempt<M>.json
@@ -31,6 +31,18 @@ phase<N>-baseline.json
 phase<N>-result.json
 phase<N>-attempt<M>-commit.json
 ```
+
+호환성과 사람이 보기 쉬운 latest view를 위해 다음 phase-scoped alias도 유지됩니다.
+
+```text
+phase<N>-prompt.md
+phase<N>-contract.json
+phase<N>-checklist.md
+```
+
+무결성 기준은 attempt-scoped 파일입니다. `phase<N>-attempt<M>-commit.json`은
+해당 attempt의 prompt, contract, checklist와 실행 산출물 hash를 고정합니다.
+phase-scoped alias는 최신 attempt를 보기 위한 편의 파일이며 commit proof의 기준으로 쓰지 않습니다.
 
 실패하거나 다시 시도하면 다음 파일도 생깁니다.
 
@@ -61,7 +73,8 @@ relationship graph는 읽기 전용 보조 출력입니다.
 
 ## 프롬프트
 
-`phase<N>-prompt.md`는 Codex에게 실제로 전달된 프롬프트입니다.
+`phase<N>-prompt-attempt<M>.md`는 해당 attempt에서 Codex에게 실제로 전달된 프롬프트입니다.
+`phase<N>-prompt.md`는 최신 attempt 프롬프트의 alias입니다.
 
 여기에는 다음이 조합됩니다.
 
@@ -76,7 +89,8 @@ relationship graph는 읽기 전용 보조 출력입니다.
 
 ## contract
 
-`phase<N>-contract.json`은 실행 직전에 확정된 phase contract입니다.
+`phase<N>-contract-attempt<M>.json`은 해당 attempt 실행 직전에 확정된 phase contract입니다.
+`phase<N>-contract.json`은 최신 attempt contract의 alias입니다.
 
 Codex가 phase 파일 안의 contract를 바꾸면 runner는 변조로 보고 실패시킵니다.
 

@@ -203,7 +203,12 @@ tasks/<task-dir>/
   context-pack/
     static/
     runtime/
+      phase<N>-prompt-attempt<M>.md
+      phase<N>-contract-attempt<M>.json
+      phase<N>-checklist-attempt<M>.md
+      phase<N>-prompt.md
       phase<N>-contract.json
+      phase<N>-checklist.md
       phase<N>-ac-attempt<M>.json
       phase<N>-evidence.json
       phase<N>-gate.json
@@ -211,6 +216,7 @@ tasks/<task-dir>/
       phase<N>-reconciliation.json
       phase<N>-repair-packet.md
       phase<N>-result.json
+      phase<N>-attempt<M>-commit.json
     handoffs/
       phase<N>.md
   index.json

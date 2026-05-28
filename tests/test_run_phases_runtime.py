@@ -594,6 +594,60 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(task_index["phases"][0]["status"], "completed")
             self.assertEqual(task_index["phases"][0]["attempts"], 1)
 
+    def test_runtime_projection_rejects_commit_with_tampered_artifact_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            paths = {
+                "contract": RUN_PHASES.phase_attempt_contract_path(task_path, 0, 1),
+                "checklist": RUN_PHASES.phase_attempt_checklist_path(task_path, 0, 1),
+                "prompt": RUN_PHASES.phase_attempt_prompt_path(task_path, 0, 1),
+                "stdout": runtime / "phase0-output-attempt1.jsonl",
+                "stderr": runtime / "phase0-stderr-attempt1.txt",
+                "ac": RUN_PHASES.ac_results_path(task_path, 0, 1),
+                "quality": RUN_PHASES.phase_quality_path(task_path, 0),
+                "handoff": RUN_PHASES.phase_handoff_path(task_path, 0),
+                "evidence": RUN_PHASES.phase_evidence_path(task_path, 0),
+                "gate": RUN_PHASES.phase_gate_path(task_path, 0),
+                "reconciliation": RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                "reconciliation_summary": RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+            }
+            for name, path in paths.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"{name}\n", encoding="utf-8")
+            result_path = RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                1,
+                0,
+                [],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                paths["prompt"],
+                paths["stdout"],
+                paths["stderr"],
+                paths["ac"],
+                contract_path=paths["contract"],
+                checklist_path=paths["checklist"],
+            )
+            RUN_PHASES.write_phase_attempt_commit(task_path, 0, 1, result_path)
+            paths["prompt"].write_text("tampered\n", encoding="utf-8")
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "running", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(changes[0]["reason"], "interrupted_running_phase")
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+
     def test_runtime_projection_ignores_attempt_commit_before_reset_marker(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
@@ -2203,10 +2257,128 @@ class RunCodexRuntimeTest(unittest.TestCase):
             commit_path = task_path / result["artifacts"]["attempt_commit"]
             commit = json.loads(commit_path.read_text(encoding="utf-8"))
             baseline = json.loads(RUN_PHASES.phase_baseline_path(task_path, 0).read_text(encoding="utf-8"))
+            self.assertEqual(result["artifacts"]["prompt"], "context-pack/runtime/phase0-prompt-attempt1.md")
+            self.assertEqual(result["artifacts"]["contract"], "context-pack/runtime/phase0-contract-attempt1.json")
+            self.assertEqual(result["artifacts"]["checklist"], "context-pack/runtime/phase0-checklist-attempt1.md")
+            self.assertTrue((task_path / "context-pack" / "runtime" / "phase0-prompt.md").exists())
+            self.assertTrue(RUN_PHASES.phase_contract_path(task_path, 0).exists())
+            self.assertTrue(RUN_PHASES.phase_checklist_path(task_path, 0).exists())
             self.assertEqual(result["repo_content"]["required_repo_outputs"][0]["before"]["exists"], False)
             self.assertEqual(commit["result"]["sha256"], RUN_PHASES.file_sha256(RUN_PHASES.phase_result_path(task_path, 0)))
+            by_name = {item["name"]: item for item in commit["artifacts"]}
+            self.assertEqual(
+                by_name["prompt"]["sha256"],
+                RUN_PHASES.file_sha256(task_path / result["artifacts"]["prompt"]),
+            )
             self.assertIn("src/app.py", result["changed_files"])
             self.assertEqual(baseline["required_repo_outputs"][0]["path"], "src/app.py")
+
+    def test_execute_phase_retry_keeps_attempt_prompt_artifacts_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (task_path / "phases").mkdir(parents=True)
+            (task_path / "context-pack" / "handoffs").mkdir(parents=True)
+            subprocess.run(["git", "init"], cwd=root, text=True, capture_output=True, check=False)
+            ac_counter = tmp / "ac-counter.txt"
+            ac_script = tmp / "acceptance.py"
+            ac_script.write_text(
+                "from pathlib import Path\n"
+                f"counter = Path({str(ac_counter)!r})\n"
+                "count = int(counter.read_text(encoding='utf-8')) if counter.exists() else 0\n"
+                "counter.write_text(str(count + 1), encoding='utf-8')\n"
+                "raise SystemExit(1 if count == 0 else 0)\n",
+                encoding="utf-8",
+            )
+            contract = {
+                "phase": 0,
+                "name": "demo",
+                "read_first": {"docs": [], "previous_outputs": []},
+                "scope": {
+                    "layer": "docs",
+                    "allowed_paths": ["tasks/demo/context-pack/handoffs/**", "tasks/demo/index.json"],
+                },
+                "interfaces": [],
+                "decision_refs": [],
+                "architecture_refs": [],
+                "dependency_policy": {"new_dependencies": "forbidden"},
+                "instructions": [{"id": "P0-001", "task": "Write the handoff."}],
+                "success_criteria": ["The handoff exists."],
+                "stop_rules": ["Stop if required context is missing."],
+                "fallback_behavior": {"if_blocked": "Write the blocker to the handoff."},
+                "validation_budget": {"max_attempts": 2, "command_timeout_seconds": 600},
+                "missing_evidence_behavior": "Treat missing evidence as unresolved.",
+                "acceptance_commands": [f"{sys.executable} {ac_script}"],
+                "required_outputs": ["context-pack/handoffs/phase0.md"],
+            }
+            (task_path / "phases" / "phase0.md").write_text(
+                "# Phase 0: demo\n\n## Contract\n\n```json\n"
+                + json.dumps(contract, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "docs": [],
+                        "common_docs": [],
+                        "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    sys.stdin.read()
+                    from pathlib import Path
+                    Path.cwd().joinpath("tasks/demo/context-pack/handoffs/phase0.md").write_text(
+                        "# Handoff\\n\\n## Change Trace\\n\\n- `tasks/demo/index.json`: `P0-001`\\n",
+                        encoding="utf-8",
+                    )
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=3,
+                ac_timeout=600,
+                codex_bin=str(fake),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(
+                    RUN_PHASES,
+                    "run_quality_checks",
+                    return_value={"status": "passed", "checks": [], "blocking_reasons": []},
+                ),
+            ):
+                self.assertTrue(RUN_PHASES.execute_phase(root, task_path, args))
+
+            result = json.loads(RUN_PHASES.phase_result_path(task_path, 0).read_text(encoding="utf-8"))
+            commit = json.loads((task_path / result["artifacts"]["attempt_commit"]).read_text(encoding="utf-8"))
+            attempt1_prompt = RUN_PHASES.phase_attempt_prompt_path(task_path, 0, 1)
+            attempt2_prompt = RUN_PHASES.phase_attempt_prompt_path(task_path, 0, 2)
+            self.assertEqual(result["attempt"], 2)
+            self.assertTrue(attempt1_prompt.exists())
+            self.assertTrue(attempt2_prompt.exists())
+            self.assertNotIn("Repair mode:", attempt1_prompt.read_text(encoding="utf-8"))
+            self.assertIn("Repair mode:", attempt2_prompt.read_text(encoding="utf-8"))
+            self.assertEqual(result["artifacts"]["prompt"], "context-pack/runtime/phase0-prompt-attempt2.md")
+            by_name = {item["name"]: item for item in commit["artifacts"]}
+            self.assertEqual(by_name["prompt"]["sha256"], RUN_PHASES.file_sha256(attempt2_prompt))
 
     def test_execute_phase_stops_retry_when_scope_cleanup_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

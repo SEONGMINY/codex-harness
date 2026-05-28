@@ -452,6 +452,18 @@ def phase_checklist_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-checklist.md"
 
 
+def phase_attempt_prompt_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-prompt-attempt{attempt}.md"
+
+
+def phase_attempt_contract_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-contract-attempt{attempt}.json"
+
+
+def phase_attempt_checklist_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-checklist-attempt{attempt}.md"
+
+
 def phase_evidence_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-evidence.json"
 
@@ -595,12 +607,20 @@ def build_prompt(
     phase: dict,
     include_repair_packet: bool = True,
     materialize_runtime_artifacts: bool = True,
+    contract_path: Path | None = None,
+    checklist_path: Path | None = None,
 ) -> str:
     phase_number = int(phase["phase"])
     phase_path = phase_file(task_path, phase_number)
     phase_markdown = phase_path.read_text(encoding="utf-8")
     if materialize_runtime_artifacts:
-        contract_data = materialize_phase_contract(task_path, phase_number, phase_markdown)
+        contract_data = materialize_phase_contract_bundle(
+            task_path,
+            phase_number,
+            phase_markdown,
+            contract_path=contract_path,
+            checklist_path=checklist_path,
+        )
     else:
         contract_data = phase_contract_from_markdown(phase_markdown)
 
@@ -722,13 +742,33 @@ def phase_contract_from_markdown(phase_markdown: str) -> dict:
 
 
 def materialize_phase_contract(task_path: Path, phase_number: int, phase_markdown: str) -> dict:
+    return materialize_phase_contract_bundle(task_path, phase_number, phase_markdown)
+
+
+def materialize_phase_contract_bundle(
+    task_path: Path,
+    phase_number: int,
+    phase_markdown: str,
+    *,
+    contract_path: Path | None = None,
+    checklist_path: Path | None = None,
+) -> dict:
     contract_data = phase_contract_from_markdown(phase_markdown)
-    phase_contract_path(task_path, phase_number).parent.mkdir(parents=True, exist_ok=True)
-    write_json(phase_contract_path(task_path, phase_number), contract_data)
+    contract_target = contract_path or phase_contract_path(task_path, phase_number)
+    checklist_target = checklist_path or phase_checklist_path(task_path, phase_number)
+    contract_target.parent.mkdir(parents=True, exist_ok=True)
+    write_json(contract_target, contract_data)
     atomic_write_text(
-        phase_checklist_path(task_path, phase_number),
+        checklist_target,
         checklist_markdown(contract_data),
     )
+    phase_contract_alias = phase_contract_path(task_path, phase_number)
+    phase_checklist_alias = phase_checklist_path(task_path, phase_number)
+    if contract_target != phase_contract_alias:
+        phase_contract_alias.parent.mkdir(parents=True, exist_ok=True)
+        write_json(phase_contract_alias, contract_data)
+    if checklist_target != phase_checklist_alias:
+        atomic_write_text(phase_checklist_alias, checklist_markdown(contract_data))
     return contract_data
 
 
@@ -1448,10 +1488,14 @@ def write_phase_result(
     before_repo_outputs: list[dict[str, object]] | None = None,
     before_snapshot: dict[str, str] | None = None,
     after_snapshot: dict[str, str] | None = None,
+    contract_path: Path | None = None,
+    checklist_path: Path | None = None,
 ) -> Path:
     contract = {}
+    contract_artifact_path = contract_path or phase_contract_path(task_path, phase_number)
+    checklist_artifact_path = checklist_path or phase_checklist_path(task_path, phase_number)
     try:
-        contract = read_json(phase_contract_path(task_path, phase_number))
+        contract = read_json(contract_artifact_path)
     except (OSError, json.JSONDecodeError):
         contract = {}
     commands_run = []
@@ -1488,8 +1532,8 @@ def write_phase_result(
         "policy_pack": runtime_policy_pack(),
         "harness_attestation": RUNTIME_HARNESS_ATTESTATION,
         "artifacts": {
-            "contract": task_relative(phase_contract_path(task_path, phase_number), task_path),
-            "checklist": task_relative(phase_checklist_path(task_path, phase_number), task_path),
+            "contract": task_relative(contract_artifact_path, task_path),
+            "checklist": task_relative(checklist_artifact_path, task_path),
             "prompt": task_relative(prompt_path, task_path),
             "stdout": task_relative(output_path, task_path),
             "stderr": task_relative(stderr_path, task_path),
@@ -1529,7 +1573,7 @@ def write_phase_result(
                 value = command.get(key)
                 if isinstance(value, str) and value:
                     commands_by_ref[value] = command
-        contract_sha = file_sha256(phase_contract_path(task_path, phase_number)) if phase_contract_path(task_path, phase_number).exists() else ""
+        contract_sha = file_sha256(contract_artifact_path) if contract_artifact_path.exists() else ""
         design_sha = file_sha256(design_contract_path) if design_contract_path.exists() else ""
         assertion_entries = []
         for outcome in outcomes:
@@ -1617,6 +1661,36 @@ def write_phase_reset_marker(task_path: Path, phase_number: int, reset_at: str, 
     return path
 
 
+def attempt_commit_artifacts_valid(
+    task_path: Path,
+    commit: dict[str, object],
+    result: dict[str, object] | None = None,
+) -> bool:
+    artifacts = commit.get("artifacts") if isinstance(commit.get("artifacts"), list) else []
+    if result is not None:
+        result_artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+        committed_names = {item.get("name") for item in artifacts if isinstance(item, dict)}
+        expected_names = {
+            name
+            for name, raw_path in result_artifacts.items()
+            if name != "attempt_commit" and isinstance(raw_path, str) and raw_path
+        }
+        if not expected_names.issubset(committed_names):
+            return False
+    for item in artifacts:
+        if not isinstance(item, dict):
+            return False
+        raw_path = item.get("path")
+        if not isinstance(raw_path, str) or not raw_path:
+            return False
+        path = task_path / raw_path
+        if not path.exists() or not path.is_file():
+            return False
+        if item.get("sha256") != file_sha256(path):
+            return False
+    return True
+
+
 def latest_valid_phase_attempt_commit(task_path: Path, phase_number: int) -> dict[str, object] | None:
     marker_path = phase_reset_marker_path(task_path, phase_number)
     reset_at = ""
@@ -1638,6 +1712,12 @@ def latest_valid_phase_attempt_commit(task_path: Path, phase_number: int) -> dic
         result_ref = data.get("result") if isinstance(data.get("result"), dict) else {}
         result_path = task_path / str(result_ref.get("path") or "")
         if not result_path.exists() or result_ref.get("sha256") != file_sha256(result_path):
+            continue
+        try:
+            result_data = read_json(result_path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not attempt_commit_artifacts_valid(task_path, data, result_data):
             continue
         lineage, lineage_errors = approved_policy_pack_lineage(task_path)
         if lineage_errors:
@@ -2738,25 +2818,22 @@ def execute_phase(
         args.failed = True
         return False
 
+    try:
+        initial_contract = phase_contract_from_markdown(phase_file(task_path, phase_number).read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        initial_contract = None
     prompt = build_prompt(
         root,
         task_path,
         task_index,
         phase,
         include_repair_packet=attempts > 0 or phase_repair_packet_summary_path(task_path, phase_number).exists(),
-        materialize_runtime_artifacts=not args.dry_run,
+        materialize_runtime_artifacts=False,
     )
     if args.dry_run:
         print(prompt)
         return False
 
-    prompt_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-prompt.md"
-    prompt_path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(prompt_path, prompt)
-    try:
-        initial_contract = runtime_phase_contract(task_path, phase_number)
-    except (FileNotFoundError, ValueError):
-        initial_contract = None
     max_attempts, ac_timeout = contract_validation_budget(initial_contract, args)
 
     install_errors = run_install_preflight(root, task_path, args)
@@ -2768,7 +2845,7 @@ def execute_phase(
         write_json(index_path, task_index)
         update_top_index(root, task_path.name, "error")
         try:
-            contract = runtime_phase_contract(task_path, phase_number)
+            contract = initial_contract or runtime_phase_contract(task_path, phase_number)
             required_outputs = contract_outputs(phase, contract)
             required_repo_outputs = contract_repo_outputs(contract)
         except (FileNotFoundError, ValueError):
@@ -2829,10 +2906,27 @@ def execute_phase(
         phase_start_snapshot = baseline_snapshot(phase_baseline)
         phase_start_repo_outputs = baseline_required_repo_outputs(phase_baseline)
 
+        prompt_path = phase_attempt_prompt_path(task_path, phase_number, attempt)
+        contract_path = phase_attempt_contract_path(task_path, phase_number, attempt)
+        checklist_path = phase_attempt_checklist_path(task_path, phase_number, attempt)
         output_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-output-attempt{attempt}.jsonl"
         stderr_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-stderr-attempt{attempt}.txt"
         clear_attempt_artifacts(task_path, phase_number)
-        prompt_path.write_text(prompt, encoding="utf-8")
+        prompt = build_prompt(
+            root,
+            task_path,
+            read_json(index_path),
+            phase,
+            include_repair_packet=attempts > 0
+            or attempt > attempts + 1
+            or phase_repair_packet_summary_path(task_path, phase_number).exists(),
+            materialize_runtime_artifacts=True,
+            contract_path=contract_path,
+            checklist_path=checklist_path,
+        )
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(prompt_path, prompt)
+        atomic_write_text(task_path / "context-pack" / "runtime" / f"phase{phase_number}-prompt.md", prompt)
         returncode = run_codex(
             root,
             task_path,
@@ -2904,7 +2998,6 @@ def execute_phase(
                 ),
             )
             if retryable:
-                prompt = build_prompt(root, task_path, read_json(index_path), phase)
                 continue
             task_index = read_json(index_path)
             set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
@@ -2989,7 +3082,6 @@ def execute_phase(
                     ),
                 )
                 if retryable:
-                    prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     break
                 task_index = read_json(index_path)
                 set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
@@ -3040,7 +3132,6 @@ def execute_phase(
                     ),
                 )
                 if retryable:
-                    prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     continue
                 task_index = read_json(index_path)
                 set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
@@ -3090,7 +3181,6 @@ def execute_phase(
                     ),
                 )
                 if retryable:
-                    prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     continue
                 task_index = read_json(index_path)
                 set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
@@ -3170,7 +3260,6 @@ def execute_phase(
                     ),
                 )
                 if retryable:
-                    prompt = build_prompt(root, task_path, read_json(index_path), phase)
                     continue
                 task_index = read_json(index_path)
                 set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
@@ -3197,6 +3286,8 @@ def execute_phase(
                 before_repo_outputs=phase_start_repo_outputs,
                 before_snapshot=phase_start_snapshot,
                 after_snapshot=final_snapshot,
+                contract_path=contract_path,
+                checklist_path=checklist_path,
             )
             write_phase_attempt_commit(task_path, phase_number, attempt, result_path)
             append_progress(task_path, f"phase {phase_number}: attempt {attempt} completed")

@@ -851,6 +851,8 @@ def validate_artifacts(
         return ["`artifacts` must be an object."]
     errors: list[str] = []
     expected_paths = {
+        "contract": f"context-pack/runtime/phase{phase_number}-contract.json",
+        "checklist": f"context-pack/runtime/phase{phase_number}-checklist.md",
         "prompt": f"context-pack/runtime/phase{phase_number}-prompt.md",
         "handoff": f"context-pack/handoffs/phase{phase_number}.md",
         "quality": f"context-pack/runtime/phase{phase_number}-quality.json",
@@ -858,17 +860,31 @@ def validate_artifacts(
     if attempt is not None:
         expected_paths.update(
             {
+                "contract": f"context-pack/runtime/phase{phase_number}-contract-attempt{attempt}.json",
+                "checklist": f"context-pack/runtime/phase{phase_number}-checklist-attempt{attempt}.md",
+                "prompt": f"context-pack/runtime/phase{phase_number}-prompt-attempt{attempt}.md",
                 "stdout": f"context-pack/runtime/phase{phase_number}-output-attempt{attempt}.jsonl",
                 "stderr": f"context-pack/runtime/phase{phase_number}-stderr-attempt{attempt}.txt",
                 "ac_results": f"context-pack/runtime/phase{phase_number}-ac-attempt{attempt}.json",
             }
         )
-    for key in ["prompt", "stdout", "stderr", "ac_results", "quality", "handoff"]:
+    legacy_paths = {
+        "contract": f"context-pack/runtime/phase{phase_number}-contract.json",
+        "checklist": f"context-pack/runtime/phase{phase_number}-checklist.md",
+        "prompt": f"context-pack/runtime/phase{phase_number}-prompt.md",
+    }
+    required_artifact_keys = {"prompt", "stdout", "stderr", "ac_results", "quality", "handoff"}
+    for key in ["contract", "checklist", "prompt", "stdout", "stderr", "ac_results", "quality", "handoff"]:
         raw_path = value.get(key)
         if not isinstance(raw_path, str) or not raw_path.strip():
-            errors.append(f"`artifacts.{key}` must be a non-empty string.")
+            if key in required_artifact_keys:
+                errors.append(f"`artifacts.{key}` must be a non-empty string.")
             continue
-        if key in expected_paths and raw_path != expected_paths[key]:
+        if (
+            key in expected_paths
+            and raw_path != expected_paths[key]
+            and raw_path != legacy_paths.get(key)
+        ):
             errors.append(f"`artifacts.{key}` must be {expected_paths[key]}.")
         target, path_errors = resolve_task_relative_path(root, task_path, raw_path, f"artifacts.{key}")
         errors.extend(path_errors)
@@ -1296,10 +1312,15 @@ def validate_obligation_closure_ledger(
         if not isinstance(assertion, dict):
             continue
         errors.extend(validate_runner_version(assertion.get("runner_version"), "obligation_closure assertion", strict_current=strict_current_harness))
-        contract_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-contract.json"
+        raw_contract = artifacts.get("contract") if isinstance(artifacts, dict) else None
+        contract_path = (
+            task_path / raw_contract
+            if isinstance(raw_contract, str) and raw_contract
+            else task_path / "context-pack" / "runtime" / f"phase{phase_number}-contract.json"
+        )
         design_path = task_path / "context-pack" / "static" / "design-contract.json"
         if contract_path.exists() and assertion.get("phase_contract_sha256") != file_sha256(contract_path):
-            errors.append("obligation_closure phase_contract_sha256 does not match current phase contract.")
+            errors.append("obligation_closure phase_contract_sha256 does not match phase result contract artifact.")
         if design_path.exists() and assertion.get("design_contract_sha256") != file_sha256(design_path):
             errors.append("obligation_closure design_contract_sha256 does not match current design contract.")
         if approved_bundle_sha and assertion.get("design_approval_bundle_sha256") not in {None, approved_bundle_sha}:
