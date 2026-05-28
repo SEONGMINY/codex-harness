@@ -179,32 +179,43 @@ class RunCodexRuntimeTest(unittest.TestCase):
             lock_path = Path(raw_tmp) / "tasks" / "demo" / "context-pack" / "runtime" / "run-phases.lock"
             lock_path.parent.mkdir(parents=True)
             lock_path.write_text('{"pid":123,"started_at":"old"}\n', encoding="utf-8")
+            original_file_identity = file_lock.file_identity
 
-            def replace_lock_before_unlink(_path: Path) -> bool:
+            def replace_lock_before_identity_check(path: Path) -> tuple[int, int, int, int]:
                 lock_path.unlink()
                 lock_path.write_text(
                     json.dumps({"pid": os.getpid(), "started_at": "fresh"}) + "\n",
                     encoding="utf-8",
                 )
-                return True
+                return original_file_identity(path)
 
-            with mock.patch.object(file_lock, "lock_is_stale", side_effect=replace_lock_before_unlink):
+            with mock.patch.object(file_lock, "file_identity", side_effect=replace_lock_before_identity_check):
                 removed = RUN_PHASES.remove_stale_lock(lock_path)
 
             self.assertFalse(removed)
             self.assertEqual(json.loads(lock_path.read_text(encoding="utf-8"))["started_at"], "fresh")
 
-    def test_acquire_lock_treats_fresh_partial_lock_as_active(self) -> None:
+    def test_acquire_lock_reclaims_unlocked_partial_lock_file(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             lock_path = Path(raw_tmp) / "runtime" / "run-phases.lock"
             lock_path.parent.mkdir(parents=True)
             lock_path.write_text("", encoding="utf-8")
 
-            with self.assertRaises(RuntimeError):
-                RUN_PHASES.acquire_lock(lock_path)
+            handle = RUN_PHASES.acquire_lock(lock_path)
 
-            self.assertTrue(lock_path.exists())
-            self.assertEqual(lock_path.read_text(encoding="utf-8"), "")
+            payload = json.loads(lock_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["pid"], os.getpid())
+            RUN_PHASES.release_lock(handle)
+
+    def test_acquire_lock_treats_held_partial_lock_as_active(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            lock_path = Path(raw_tmp) / "runtime" / "run-phases.lock"
+            handle = RUN_PHASES.acquire_lock(lock_path)
+            try:
+                with self.assertRaises(RuntimeError):
+                    RUN_PHASES.acquire_lock(lock_path)
+            finally:
+                RUN_PHASES.release_lock(handle)
 
     def test_acquire_lock_rejects_symlink_parent(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -2769,8 +2780,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             (root / "package.json").write_text('{"packageManager":"pnpm@9.0.0"}\n', encoding="utf-8")
             (root / "pnpm-workspace.yaml").write_text("packages: []\n", encoding="utf-8")
             lock_path = RUN_PHASES.install_preflight_lock_path(root)
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_path.write_text(json.dumps({"pid": os.getpid(), "started_at": "active"}) + "\n", encoding="utf-8")
+            lock_handle = file_lock.acquire_lock(lock_path, wait_timeout_seconds=0.0)
             fake_bin = tmp / "bin"
             fake_bin.mkdir()
             marker = tmp / "pnpm-runs.txt"
@@ -2789,7 +2799,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 errors = RUN_PHASES.run_install_preflight(root, task_path, args)
             finally:
                 os.environ["PATH"] = old_path
-                lock_path.unlink(missing_ok=True)
+                file_lock.release_lock(lock_handle)
 
             self.assertTrue(any("exited 125" in error for error in errors), errors)
             self.assertFalse(marker.exists())

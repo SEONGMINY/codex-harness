@@ -8,7 +8,6 @@ import json
 import os
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
@@ -50,13 +49,11 @@ class FileLockTest(unittest.TestCase):
             self.assertTrue(path.exists())
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["started_at"], "fresh")
 
-    def test_stale_invalid_json_lock_is_reclaimed(self) -> None:
+    def test_unlocked_invalid_json_lock_file_is_reclaimed(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             path = Path(raw_tmp) / "runtime" / "state.lock"
             path.parent.mkdir(parents=True)
             path.write_text("", encoding="utf-8")
-            stale_mtime = time.time() - FILE_LOCK.LOCK_INVALID_JSON_STALE_SECONDS - 1
-            os.utime(path, (stale_mtime, stale_mtime))
 
             handle = FILE_LOCK.acquire_lock(path)
 
@@ -64,14 +61,42 @@ class FileLockTest(unittest.TestCase):
             self.assertEqual(payload["pid"], os.getpid())
             FILE_LOCK.release_lock(handle)
 
-    def test_fresh_invalid_json_lock_is_active(self) -> None:
+    def test_unlocked_pid_file_for_live_process_is_reclaimed(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             path = Path(raw_tmp) / "runtime" / "state.lock"
             path.parent.mkdir(parents=True)
-            path.write_text("", encoding="utf-8")
+            path.write_text(
+                json.dumps({"pid": os.getpid(), "started_at": "old"}) + "\n",
+                encoding="utf-8",
+            )
 
-            with self.assertRaisesRegex(RuntimeError, "Another codex-harness process is active"):
-                FILE_LOCK.acquire_lock(path)
+            handle = FILE_LOCK.acquire_lock(path)
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["pid"], os.getpid())
+            self.assertNotEqual(payload["started_at"], "old")
+            FILE_LOCK.release_lock(handle)
+
+    def test_active_advisory_lock_blocks_second_acquire(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            path = Path(raw_tmp) / "runtime" / "state.lock"
+            handle = FILE_LOCK.acquire_lock(path)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "Another codex-harness process is active"):
+                    FILE_LOCK.acquire_lock(path)
+            finally:
+                FILE_LOCK.release_lock(handle)
+
+            self.assertFalse(path.exists())
+
+    def test_stale_checks_do_not_create_missing_lock_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            path = Path(raw_tmp) / "runtime" / "state.lock"
+
+            self.assertTrue(FILE_LOCK.lock_is_stale(path))
+            self.assertTrue(FILE_LOCK.remove_stale_lock(path))
+
+            self.assertFalse(path.exists())
 
     def test_lock_rejects_symlink_parent_with_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

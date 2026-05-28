@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import fcntl
 from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -12,26 +13,14 @@ from typing import Any, NamedTuple
 from artifact_io import ensure_no_symlink_path
 
 
-LOCK_INVALID_JSON_STALE_SECONDS = 30
-
-
 class LockHandle(NamedTuple):
     path: Path
     identity: tuple[int, int, int, int]
+    fd: int
 
 
 def now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
-
-
-def process_is_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 def file_identity(path: Path) -> tuple[int, int, int, int]:
@@ -39,57 +28,87 @@ def file_identity(path: Path) -> tuple[int, int, int, int]:
     return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
 
 
+def fd_identity(fd: int) -> tuple[int, int, int, int]:
+    stat = os.fstat(fd)
+    return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+
+
+def open_lock_file(path: Path, boundary: Path | None = None, *, create: bool = True) -> int:
+    ensure_no_symlink_path(path, boundary=boundary)
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_no_symlink_path(path.parent, boundary=boundary)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDWR | nofollow
+    if create:
+        flags |= os.O_CREAT
+    return os.open(path, flags, 0o600)
+
+
+def try_lock_fd(fd: int) -> bool:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def write_lock_payload(fd: int, metadata: dict[str, Any] | None = None) -> None:
+    payload: dict[str, Any] = {"pid": os.getpid(), "started_at": now()}
+    if metadata:
+        payload.update(metadata)
+    data = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, data)
+    os.fsync(fd)
+
+
 def lock_is_stale(path: Path) -> bool:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        try:
-            age_seconds = time.time() - path.stat().st_mtime
-        except OSError:
-            return True
-        return age_seconds > LOCK_INVALID_JSON_STALE_SECONDS
-    pid = data.get("pid") if isinstance(data, dict) else None
-    if not isinstance(pid, int) or pid <= 0:
+        fd = open_lock_file(path, create=False)
+    except FileNotFoundError:
         return True
-    return not process_is_alive(pid)
+    except OSError:
+        return True
+    try:
+        return try_lock_fd(fd)
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
 
 
 def remove_stale_lock(path: Path) -> bool:
     try:
-        observed_identity = file_identity(path)
+        fd = open_lock_file(path, create=False)
     except FileNotFoundError:
         return True
-    if not lock_is_stale(path):
+    except OSError:
         return False
     try:
-        current_identity = file_identity(path)
-    except FileNotFoundError:
-        return True
-    if current_identity != observed_identity:
-        return False
-    try:
-        path.unlink()
-        return True
-    except FileNotFoundError:
-        return True
-
-
-def write_lock_candidate(path: Path, metadata: dict[str, Any] | None = None, boundary: Path | None = None) -> Path:
-    ensure_no_symlink_path(path, boundary=boundary)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    ensure_no_symlink_path(path.parent, boundary=boundary)
-    candidate = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-    payload: dict[str, Any] = {"pid": os.getpid(), "started_at": now()}
-    if metadata:
-        payload.update(metadata)
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY | nofollow, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    return candidate
+        if not try_lock_fd(fd):
+            return False
+        observed_identity = fd_identity(fd)
+        try:
+            current_identity = file_identity(path)
+        except FileNotFoundError:
+            return True
+        if current_identity != observed_identity:
+            return False
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
 
 
 def acquire_lock(
@@ -101,20 +120,15 @@ def acquire_lock(
 ) -> LockHandle:
     deadline = time.monotonic() + wait_timeout_seconds
     while True:
-        candidate = write_lock_candidate(path, metadata, boundary)
-        try:
-            os.link(candidate, path)
-        except FileExistsError as exc:
-            candidate.unlink(missing_ok=True)
-            if remove_stale_lock(path):
-                continue
-            if wait_timeout_seconds > 0 and time.monotonic() < deadline:
-                time.sleep(poll_interval_seconds)
-                continue
-            raise RuntimeError(f"Another codex-harness process is active: {path}") from exc
-        finally:
-            candidate.unlink(missing_ok=True)
-        return LockHandle(path=path, identity=file_identity(path))
+        fd = open_lock_file(path, boundary)
+        if try_lock_fd(fd):
+            write_lock_payload(fd, metadata)
+            return LockHandle(path=path, identity=fd_identity(fd), fd=fd)
+        os.close(fd)
+        if wait_timeout_seconds > 0 and time.monotonic() < deadline:
+            time.sleep(poll_interval_seconds)
+            continue
+        raise RuntimeError(f"Another codex-harness process is active: {path}")
 
 
 def task_runtime_lock_path(task_path: Path) -> Path:
@@ -142,5 +156,12 @@ def release_lock(handle: LockHandle | None) -> None:
         if file_identity(handle.path) != handle.identity:
             return
     except FileNotFoundError:
-        return
-    handle.path.unlink(missing_ok=True)
+        pass
+    else:
+        handle.path.unlink(missing_ok=True)
+    finally:
+        try:
+            fcntl.flock(handle.fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(handle.fd)
