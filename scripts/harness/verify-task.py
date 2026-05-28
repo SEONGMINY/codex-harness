@@ -1770,6 +1770,38 @@ def validate_latest_repo_content_matches_current(root: Path, phase_results: list
     return errors
 
 
+def validate_repo_content_attestation_shape(value: object, label: str) -> list[str]:
+    if not isinstance(value, dict):
+        return [f"{label} repo_content must be an object."]
+    errors: list[str] = []
+    changed_files = value.get("changed_files")
+    required_repo_outputs = value.get("required_repo_outputs")
+    if not isinstance(changed_files, list):
+        errors.append(f"{label} repo_content.changed_files must be a list.")
+        changed_files = []
+    if not isinstance(required_repo_outputs, list):
+        errors.append(f"{label} repo_content.required_repo_outputs must be a list.")
+        required_repo_outputs = []
+    if value.get("changed_files_digest") != stable_json_sha256(changed_files):
+        errors.append(f"{label} repo_content.changed_files_digest does not match changed_files.")
+    if value.get("required_repo_outputs_digest") != stable_json_sha256(required_repo_outputs):
+        errors.append(f"{label} repo_content.required_repo_outputs_digest does not match required_repo_outputs.")
+    content_without_digest = {key: item for key, item in value.items() if key != "digest"}
+    if value.get("digest") != stable_json_sha256(content_without_digest):
+        errors.append(f"{label} repo_content.digest does not match repo_content.")
+    return errors
+
+
+def repo_content_changed_paths(value: object) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+    paths: list[str] = []
+    for item in value.get("changed_files") or []:
+        if isinstance(item, dict) and isinstance(item.get("path"), str):
+            paths.append(item["path"])
+    return sorted(paths)
+
+
 def evaluation_repair_result_iteration(path: Path) -> int | None:
     match = re.fullmatch(r"evaluation-repair(\d+)-result\.json", path.name)
     if not match:
@@ -1797,16 +1829,37 @@ def validate_evaluation_repair_result(root: Path, task_path: Path, path: Path, d
         errors.append(f"{label} codex_exit_code must be 0.")
     if data.get("scope_violations") not in (None, []):
         errors.append(f"{label} scope_violations must be empty.")
+    changed_files = data.get("changed_files")
+    if not isinstance(changed_files, list) or not all(isinstance(item, str) for item in changed_files):
+        errors.append(f"{label} changed_files must be a list of paths.")
+        changed_files = []
+    allowed_paths = data.get("allowed_paths")
+    if not isinstance(allowed_paths, list) or not all(isinstance(item, str) for item in allowed_paths):
+        errors.append(f"{label} allowed_paths must be a list of paths.")
+        allowed_paths = []
     if data.get("handoff_exists") is not True:
         errors.append(f"{label} handoff_exists must be true.")
     handoff = data.get("handoff")
+    ignored_paths: list[str] = []
     if not isinstance(handoff, str) or not handoff:
         errors.append(f"{label} handoff must be a path.")
     else:
+        ignored_paths = [f"tasks/{task_path.name}/{handoff.strip('/')}"]
         handoff_path, path_errors = resolve_task_relative_path(root, task_path, handoff, f"{label}.handoff")
         errors.extend(path_errors)
         if handoff_path is not None and (not handoff_path.exists() or not handoff_path.is_file()):
             errors.append(f"{label} handoff path does not exist: {rel(root, handoff_path)}")
+    recomputed_violations = scope_violations(
+        [path for path in changed_files if not path_allowed(path, ignored_paths)],
+        allowed_paths,
+        [],
+    )
+    if data.get("scope_violations") != recomputed_violations:
+        errors.append(f"{label} scope_violations do not match changed_files and allowed_paths.")
+    repo_content = data.get("repo_content")
+    errors.extend(validate_repo_content_attestation_shape(repo_content, label))
+    if sorted(changed_files) != repo_content_changed_paths(repo_content):
+        errors.append(f"{label} changed_files must match repo_content.changed_files.")
     errors.extend(
         validate_policy_pack_metadata(
             data.get("policy_pack"),
@@ -1856,11 +1909,34 @@ def validate_evaluation_repair_result(root: Path, task_path: Path, path: Path, d
                     f"{label} artifact_ref",
                 )
             )
+        last_message_path, path_errors = resolve_task_relative_path(
+            root,
+            task_path,
+            expected_artifacts["last_message"],
+            f"{label}.last_message",
+        )
+        errors.extend(path_errors)
+        if last_message_path is not None and last_message_path.exists() and last_message_path.is_file():
+            try:
+                last_message = json.loads(last_message_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                errors.append(f"{label} last_message is invalid JSON: {exc}")
+            else:
+                if not isinstance(last_message, dict):
+                    errors.append(f"{label} last_message must be a JSON object.")
+                elif last_message.get("status") != "completed":
+                    errors.append(f'{label} last_message status must be "completed".')
     return errors
 
 
-def validate_evaluation_repair_results(root: Path, task_path: Path, runtime_dir: Path) -> list[str]:
-    phase_results: list[tuple[int, dict[str, Any]]] = []
+def validate_evaluation_repair_results(
+    root: Path,
+    task_path: Path,
+    runtime_dir: Path,
+    *,
+    base_phase_results: list[tuple[int, dict[str, Any]]] | None = None,
+) -> list[str]:
+    phase_results: list[tuple[int, dict[str, Any]]] = list(base_phase_results or [])
     errors: list[str] = []
     repair_paths = sorted(
         runtime_dir.glob("evaluation-repair*-result.json"),
@@ -1878,7 +1954,8 @@ def validate_evaluation_repair_results(root: Path, task_path: Path, runtime_dir:
         if isinstance(data, dict):
             errors.extend(validate_evaluation_repair_result(root, task_path, path, data))
             iteration = data.get("iteration")
-            phase_results.append((iteration if isinstance(iteration, int) else 0, data))
+            order = 1_000_000 + (iteration if isinstance(iteration, int) else 0)
+            phase_results.append((order, data))
         else:
             errors.append(f"Evaluation repair result must be a JSON object: {rel(root, path)}")
     errors.extend(validate_latest_repo_content_matches_current(root, phase_results))
@@ -2420,7 +2497,8 @@ def verify(
             if phase_number == 0:
                 errors.extend(require_file(root, runtime_dir / "docs-diff.md", "docs diff", check_placeholder=False))
 
-    errors.extend(validate_latest_repo_content_matches_current(root, completed_phase_results))
+    if not require_evaluation:
+        errors.extend(validate_latest_repo_content_matches_current(root, completed_phase_results))
 
     if design_info and design_kind == "review":
         errors.extend(validate_traceability_matrix(root, static_dir / "traceability-matrix.json", design_ref_ids, phase_design_refs))
@@ -2463,7 +2541,14 @@ def verify(
                 strict_current_harness=strict_current_harness,
             )
         )
-        errors.extend(validate_evaluation_repair_results(root, task_path, runtime_dir))
+        errors.extend(
+            validate_evaluation_repair_results(
+                root,
+                task_path,
+                runtime_dir,
+                base_phase_results=completed_phase_results,
+            )
+        )
 
     if not registry_errors:
         for phase in phases:

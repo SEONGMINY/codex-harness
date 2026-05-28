@@ -367,6 +367,9 @@ class VerifyTaskHelperTest(unittest.TestCase):
         codex_exit_code: int = 0,
         scope_violations: list[str] | None = None,
         handoff_exists: bool = True,
+        changed_files: list[str] | None = None,
+        allowed_paths: list[str] | None = None,
+        last_message_status: str = "completed",
     ) -> None:
         runtime_dir = task_path / "context-pack" / "runtime"
         handoff_dir = task_path / "context-pack" / "handoffs"
@@ -379,10 +382,29 @@ class VerifyTaskHelperTest(unittest.TestCase):
             "last_message": runtime_dir / "evaluation-repair1-last-message.json",
         }
         for name, path in artifacts.items():
-            path.write_text(f"{name}\n", encoding="utf-8")
+            if name == "last_message":
+                path.write_text(
+                    json.dumps(
+                        {
+                            "status": last_message_status,
+                            "handoff_path": f"tasks/{task_path.name}/context-pack/handoffs/evaluation-repair1.md",
+                            "changed_files": [],
+                            "checks_run": [],
+                            "remaining_risks": [],
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+            else:
+                path.write_text(f"{name}\n", encoding="utf-8")
         handoff = handoff_dir / "evaluation-repair1.md"
         if handoff_exists:
             handoff.write_text("repair handoff\n", encoding="utf-8")
+        if changed_files is None:
+            changed_files = VERIFY_TASK.repo_content_changed_paths(repo_content)
+        if allowed_paths is None:
+            allowed_paths = changed_files[:]
         artifact_paths = {**artifacts, "handoff": handoff}
         artifact_refs = []
         for name, path in artifact_paths.items():
@@ -403,6 +425,8 @@ class VerifyTaskHelperTest(unittest.TestCase):
                     "iteration": 1,
                     "status": status,
                     "codex_exit_code": codex_exit_code,
+                    "changed_files": changed_files,
+                    "allowed_paths": allowed_paths,
                     "scope_violations": scope_violations or [],
                     "handoff": str(handoff.relative_to(task_path)),
                     "handoff_exists": handoff_exists,
@@ -1223,6 +1247,123 @@ classDiagram
 
             self.assertTrue(any("runner_version must match current" in error for error in errors), errors)
             self.assertTrue(any("policy_pack does not match current" in error for error in errors), errors)
+
+    def test_evaluation_repair_result_rejects_tampered_repo_content_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime = task_path / "context-pack" / "runtime"
+            target = root / "src" / "demo.py"
+            target.parent.mkdir(parents=True)
+            target.write_text("after repair\n", encoding="utf-8")
+            changed_files = [
+                {
+                    "path": "src/demo.py",
+                    "before_digest": "<missing>",
+                    "after_digest": VERIFY_TASK.file_sha256(target),
+                }
+            ]
+            repo_content = {
+                "changed_files": changed_files,
+                "changed_files_digest": VERIFY_TASK.stable_json_sha256(changed_files),
+                "required_repo_outputs": [],
+                "required_repo_outputs_digest": VERIFY_TASK.stable_json_sha256([]),
+                "digest": "tampered",
+            }
+            self.write_evaluation_repair_result(root, task_path, repo_content=repo_content)
+
+            errors = VERIFY_TASK.validate_evaluation_repair_results(root, task_path, runtime)
+
+            self.assertTrue(any("repo_content.digest does not match" in error for error in errors), errors)
+
+    def test_evaluation_repair_result_recomputes_scope_and_rejects_blocked_last_message(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime = task_path / "context-pack" / "runtime"
+            target = root / "outside.txt"
+            target.parent.mkdir(parents=True)
+            target.write_text("outside\n", encoding="utf-8")
+            changed_files = [
+                {
+                    "path": "outside.txt",
+                    "before_digest": "<missing>",
+                    "after_digest": VERIFY_TASK.file_sha256(target),
+                }
+            ]
+            repo_content = {
+                "changed_files": changed_files,
+                "changed_files_digest": VERIFY_TASK.stable_json_sha256(changed_files),
+                "required_repo_outputs": [],
+                "required_repo_outputs_digest": VERIFY_TASK.stable_json_sha256([]),
+            }
+            repo_content["digest"] = VERIFY_TASK.stable_json_sha256(repo_content)
+            self.write_evaluation_repair_result(
+                root,
+                task_path,
+                repo_content=repo_content,
+                changed_files=["outside.txt"],
+                allowed_paths=["src"],
+                scope_violations=[],
+                last_message_status="blocked",
+            )
+
+            errors = VERIFY_TASK.validate_evaluation_repair_results(root, task_path, runtime)
+
+            self.assertTrue(any("scope_violations do not match" in error for error in errors), errors)
+            self.assertTrue(any('last_message status must be "completed"' in error for error in errors), errors)
+
+    def test_evaluation_repair_repo_content_supersedes_phase_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime = task_path / "context-pack" / "runtime"
+            target = root / "src" / "demo.py"
+            target.parent.mkdir(parents=True)
+            target.write_text("phase output\n", encoding="utf-8")
+            phase_digest = VERIFY_TASK.file_sha256(target)
+            target.write_text("evaluation repair output\n", encoding="utf-8")
+            repair_digest = VERIFY_TASK.file_sha256(target)
+            changed_files = [
+                {
+                    "path": "src/demo.py",
+                    "before_digest": phase_digest,
+                    "after_digest": repair_digest,
+                }
+            ]
+            repo_content = {
+                "changed_files": changed_files,
+                "changed_files_digest": VERIFY_TASK.stable_json_sha256(changed_files),
+                "required_repo_outputs": [],
+                "required_repo_outputs_digest": VERIFY_TASK.stable_json_sha256([]),
+            }
+            repo_content["digest"] = VERIFY_TASK.stable_json_sha256(repo_content)
+            self.write_evaluation_repair_result(root, task_path, repo_content=repo_content)
+
+            errors = VERIFY_TASK.validate_evaluation_repair_results(
+                root,
+                task_path,
+                runtime,
+                base_phase_results=[
+                    (
+                        0,
+                        {
+                            "repo_content": {
+                                "changed_files": [
+                                    {
+                                        "path": "src/demo.py",
+                                        "before_digest": "<missing>",
+                                        "after_digest": phase_digest,
+                                    }
+                                ],
+                                "required_repo_outputs": [],
+                            }
+                        },
+                    )
+                ],
+            )
+
+            self.assertEqual(errors, [])
 
     def test_phase_attempt_manifest_rejects_tampered_repair_packet_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
