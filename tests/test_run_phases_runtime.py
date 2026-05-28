@@ -190,6 +190,33 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertFalse(removed)
             self.assertEqual(json.loads(lock_path.read_text(encoding="utf-8"))["started_at"], "fresh")
 
+    def test_acquire_lock_treats_fresh_partial_lock_as_active(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            lock_path = Path(raw_tmp) / "runtime" / "run-phases.lock"
+            lock_path.parent.mkdir(parents=True)
+            lock_path.write_text("", encoding="utf-8")
+
+            with self.assertRaises(RuntimeError):
+                RUN_PHASES.acquire_lock(lock_path)
+
+            self.assertTrue(lock_path.exists())
+            self.assertEqual(lock_path.read_text(encoding="utf-8"), "")
+
+    def test_release_lock_does_not_delete_replaced_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            lock_path = Path(raw_tmp) / "runtime" / "run-phases.lock"
+            handle = RUN_PHASES.acquire_lock(lock_path)
+            lock_path.unlink()
+            lock_path.write_text(
+                json.dumps({"pid": os.getpid(), "started_at": "fresh"}) + "\n",
+                encoding="utf-8",
+            )
+
+            RUN_PHASES.release_lock(handle)
+
+            self.assertTrue(lock_path.exists())
+            self.assertEqual(json.loads(lock_path.read_text(encoding="utf-8"))["started_at"], "fresh")
+
     def test_run_shell_records_timeout_instead_of_raising(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             script = Path(raw_tmp) / "sleep.py"
@@ -1048,6 +1075,66 @@ class RunCodexRuntimeTest(unittest.TestCase):
             ).read_text(encoding="utf-8")
             self.assertIn("Task verification failed before phase execution.", last_error)
 
+    def test_execute_phase_marks_install_lock_contention_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "docs": [],
+                        "common_docs": [],
+                        "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=1,
+                ac_timeout=600,
+                codex_bin=str(tmp / "unused-codex"),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+            )
+
+            def install_contention(_root: Path, _task_path: Path, _args: argparse.Namespace) -> list[str]:
+                RUN_PHASES.install_preflight_path(task_path).write_text(
+                    json.dumps(
+                        {
+                            "command": ["pnpm", "install"],
+                            "exit_code": RUN_PHASES.INSTALL_PREFLIGHT_LOCK_EXIT_CODE,
+                            "lock_error": "Another codex-harness process is active.",
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return ["Install preflight failed: pnpm install exited 125."]
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "build_prompt", return_value="prompt"),
+                mock.patch.object(RUN_PHASES, "runtime_phase_contract", return_value={}),
+                mock.patch.object(RUN_PHASES, "run_install_preflight", side_effect=install_contention),
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            repair_packet = json.loads(
+                (task_path / "context-pack" / "runtime" / "phase0-repair-packet.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(repair_packet["failure"]["type"], "install_preflight")
+            self.assertTrue(repair_packet["failure"]["retryable"])
+
     def test_gate_fails_when_handoff_change_trace_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
@@ -1647,6 +1734,119 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 os.environ["PATH"] = old_path
 
             self.assertEqual(marker.read_text(encoding="utf-8"), "run\n")
+            self.assertFalse(RUN_PHASES.install_preflight_lock_path(root).exists())
+
+    def test_install_preflight_rejects_concurrent_repo_install(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (root / "package.json").write_text('{"packageManager":"pnpm@9.0.0"}\n', encoding="utf-8")
+            (root / "pnpm-workspace.yaml").write_text("packages: []\n", encoding="utf-8")
+            lock_path = RUN_PHASES.install_preflight_lock_path(root)
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path.write_text(json.dumps({"pid": os.getpid(), "started_at": "active"}) + "\n", encoding="utf-8")
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            marker = tmp / "pnpm-runs.txt"
+            pnpm = fake_bin / "pnpm"
+            pnpm.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('run\\n', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            pnpm.chmod(pnpm.stat().st_mode | 0o111)
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{fake_bin}:{old_path}"
+            try:
+                args = argparse.Namespace(skip_install=False, install_preflight_done=False, install_timeout=10)
+                errors = RUN_PHASES.run_install_preflight(root, task_path, args)
+            finally:
+                os.environ["PATH"] = old_path
+                lock_path.unlink(missing_ok=True)
+
+            self.assertTrue(any("exited 125" in error for error in errors), errors)
+            self.assertFalse(marker.exists())
+            payload = json.loads(RUN_PHASES.install_preflight_path(task_path).read_text(encoding="utf-8"))
+            self.assertEqual(payload["exit_code"], 125)
+            self.assertIn("lock_error", payload)
+
+    def test_install_preflight_reclaims_stale_repo_install_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (root / "package.json").write_text('{"packageManager":"pnpm@9.0.0"}\n', encoding="utf-8")
+            (root / "pnpm-workspace.yaml").write_text("packages: []\n", encoding="utf-8")
+            lock_path = RUN_PHASES.install_preflight_lock_path(root)
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path.write_text(json.dumps({"pid": -1, "started_at": "stale"}) + "\n", encoding="utf-8")
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            marker = tmp / "pnpm-runs.txt"
+            pnpm = fake_bin / "pnpm"
+            pnpm.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('run\\n', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            pnpm.chmod(pnpm.stat().st_mode | 0o111)
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{fake_bin}:{old_path}"
+            try:
+                args = argparse.Namespace(skip_install=False, install_preflight_done=False, install_timeout=10)
+                errors = RUN_PHASES.run_install_preflight(root, task_path, args)
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertEqual(errors, [])
+            self.assertEqual(marker.read_text(encoding="utf-8"), "run\n")
+            self.assertFalse(lock_path.exists())
+
+    def test_install_preflight_timeout_releases_repo_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (root / "package.json").write_text('{"packageManager":"pnpm@9.0.0"}\n', encoding="utf-8")
+            (root / "pnpm-workspace.yaml").write_text("packages: []\n", encoding="utf-8")
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            pnpm = fake_bin / "pnpm"
+            pnpm.write_text(
+                "#!/usr/bin/env python3\n"
+                "import time\n"
+                "time.sleep(2)\n",
+                encoding="utf-8",
+            )
+            pnpm.chmod(pnpm.stat().st_mode | 0o111)
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{fake_bin}:{old_path}"
+            try:
+                args = argparse.Namespace(skip_install=False, install_preflight_done=False, install_timeout=1)
+                errors = RUN_PHASES.run_install_preflight(root, task_path, args)
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertTrue(any("exited 124" in error for error in errors), errors)
+            payload = json.loads(RUN_PHASES.install_preflight_path(task_path).read_text(encoding="utf-8"))
+            self.assertEqual(payload["exit_code"], 124)
+            self.assertFalse(RUN_PHASES.install_preflight_lock_path(root).exists())
+
+    def test_install_preflight_lock_contention_is_retryable_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            _, task_path = self.make_task(Path(raw_tmp))
+            RUN_PHASES.install_preflight_path(task_path).write_text(
+                json.dumps(
+                    {
+                        "command": ["pnpm", "install"],
+                        "exit_code": RUN_PHASES.INSTALL_PREFLIGHT_LOCK_EXIT_CODE,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(RUN_PHASES.install_preflight_failure_retryable(task_path))
 
     def test_execute_phase_uses_contract_attempt_budget(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

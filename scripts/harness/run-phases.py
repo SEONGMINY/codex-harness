@@ -11,9 +11,10 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, NamedTuple
 
 HARNESS_VERSION = "0.1.5"
 
@@ -67,6 +68,8 @@ RUNNABLE_PHASE_STATUSES = {"pending", "running"}
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUNTIME_HARNESS_ATTESTATION = harness_attestation()
+INSTALL_PREFLIGHT_LOCK_EXIT_CODE = 125
+LOCK_INVALID_JSON_STALE_SECONDS = 30
 MANDATORY_STATIC_FILES = [
     "original-prompt.md",
     "product.md",
@@ -91,6 +94,11 @@ PLACEHOLDER_PATTERNS = [
     re.compile(r"Replace this", re.IGNORECASE),
     re.compile(r"Replace with", re.IGNORECASE),
 ]
+
+
+class LockHandle(NamedTuple):
+    path: Path
+    identity: tuple[int, int, int, int]
 
 
 def now() -> str:
@@ -244,6 +252,49 @@ def install_preflight_path(task_path: Path) -> Path:
     return task_path / "context-pack" / "runtime" / "install-preflight.json"
 
 
+def install_preflight_lock_path(root: Path) -> Path:
+    return root / ".codex" / "harness" / "install-preflight.lock"
+
+
+def write_lock_candidate(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    candidate = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    payload = {"pid": os.getpid(), "started_at": now()}
+    fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    return candidate
+
+
+def acquire_lock(path: Path) -> LockHandle:
+    while True:
+        candidate = write_lock_candidate(path)
+        try:
+            os.link(candidate, path)
+        except FileExistsError as exc:
+            candidate.unlink(missing_ok=True)
+            if remove_stale_lock(path):
+                continue
+            raise RuntimeError(f"Another codex-harness process is active: {path}") from exc
+        finally:
+            candidate.unlink(missing_ok=True)
+        return LockHandle(path=path, identity=file_identity(path))
+
+
+def release_lock(handle: LockHandle | None) -> None:
+    if handle is None:
+        return
+    try:
+        if file_identity(handle.path) != handle.identity:
+            return
+    except FileNotFoundError:
+        return
+    handle.path.unlink(missing_ok=True)
+
+
 def run_install_preflight(root: Path, task_path: Path, args: argparse.Namespace) -> list[str]:
     if getattr(args, "skip_install", False) or getattr(args, "install_preflight_done", False):
         return []
@@ -254,7 +305,10 @@ def run_install_preflight(root: Path, task_path: Path, args: argparse.Namespace)
     if command is None:
         return []
     started_at = now()
+    lock_handle: LockHandle | None = None
+    install_path = install_preflight_path(task_path)
     try:
+        lock_handle = acquire_lock(install_preflight_lock_path(root))
         result = subprocess.run(
             command,
             cwd=root,
@@ -265,18 +319,30 @@ def run_install_preflight(root: Path, task_path: Path, args: argparse.Namespace)
         )
         exit_code = result.returncode
         output = (result.stdout + result.stderr).strip()
+        completed_at = now()
+        lock_error = None
     except subprocess.TimeoutExpired as exc:
         exit_code = 124
         output = ((exc.stdout or "") + (exc.stderr or "")).strip()
         output = (output + f"\nTimed out after {getattr(args, 'install_timeout', 600)} seconds.").strip()
+        completed_at = now()
+        lock_error = None
+    except RuntimeError as exc:
+        exit_code = INSTALL_PREFLIGHT_LOCK_EXIT_CODE
+        output = f"{exc}. Retry this phase after the active install preflight finishes."
+        completed_at = now()
+        lock_error = str(exc)
+    finally:
+        release_lock(lock_handle)
     payload = {
         "command": command,
         "started_at": started_at,
-        "completed_at": now(),
+        "completed_at": completed_at,
         "exit_code": exit_code,
         "output_tail": truncate_text(output, 6_000),
     }
-    install_path = install_preflight_path(task_path)
+    if lock_error is not None:
+        payload["lock_error"] = lock_error
     install_path.parent.mkdir(parents=True, exist_ok=True)
     write_json(install_path, payload)
     if exit_code != 0:
@@ -1038,7 +1104,11 @@ def lock_is_stale(path: Path) -> bool:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return True
+        try:
+            age_seconds = time.time() - path.stat().st_mtime
+        except OSError:
+            return True
+        return age_seconds > LOCK_INVALID_JSON_STALE_SECONDS
     pid = data.get("pid") if isinstance(data, dict) else None
     if not isinstance(pid, int) or pid <= 0:
         return True
@@ -1070,28 +1140,25 @@ def remove_stale_lock(path: Path) -> bool:
         return True
 
 
-def acquire_runner_lock(task_path: Path, dry_run: bool) -> Path | None:
+def install_preflight_failure_retryable(task_path: Path) -> bool:
+    try:
+        payload = read_json(install_preflight_path(task_path))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+    return payload.get("exit_code") == INSTALL_PREFLIGHT_LOCK_EXIT_CODE
+
+
+def acquire_runner_lock(task_path: Path, dry_run: bool) -> LockHandle | None:
     if dry_run:
         return None
-    path = runner_lock_path(task_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"pid": os.getpid(), "started_at": now()}
-    while True:
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            if remove_stale_lock(path):
-                continue
-            raise RuntimeError(f"Another run-phases process is active: {path}") from exc
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-        return path
+    try:
+        return acquire_lock(runner_lock_path(task_path))
+    except RuntimeError as exc:
+        raise RuntimeError(f"Another run-phases process is active: {runner_lock_path(task_path)}") from exc
 
 
-def release_runner_lock(path: Path | None) -> None:
-    if path is not None:
-        path.unlink(missing_ok=True)
+def release_runner_lock(handle: LockHandle | None) -> None:
+    release_lock(handle)
 
 
 def allowed_path_activity_root(root: Path, raw_path: str) -> Path | None:
@@ -2708,7 +2775,7 @@ def execute_phase(
                 attempts,
                 "install_preflight",
                 message,
-                retryable=False,
+                retryable=install_preflight_failure_retryable(task_path),
                 contract=contract,
                 required_outputs=required_outputs,
                 required_repo_outputs=required_repo_outputs,
