@@ -2964,6 +2964,26 @@ def verify_task(
     return subprocess.run(command, cwd=root, check=False).returncode
 
 
+def finalize_completed_task(root: Path, task_path: Path, args: argparse.Namespace) -> int:
+    generate_relationship_graph(root, task_path)
+    if verify_task(root, task_path) != 0:
+        update_top_index(root, task_path.name, "error")
+        args.failed = True
+        return 1
+    if args.evaluate:
+        eval_returncode = run_evaluation_review_loop(root, task_path, args)
+        if eval_returncode != 0:
+            update_top_index(root, task_path.name, "error")
+            args.failed = True
+            return 1
+        if verify_task(root, task_path, require_evaluation=True) != 0:
+            update_top_index(root, task_path.name, "error")
+            args.failed = True
+            return 1
+    update_top_index(root, task_path.name, "completed")
+    return 0
+
+
 def apply_phase_reset(
     root: Path,
     task_path: Path,
@@ -3684,18 +3704,8 @@ def main() -> int:
 
         task_index = read_json(task_path / "index.json")
         if not args.dry_run and all(phase.get("status") == "completed" for phase in task_index.get("phases", [])):
-            generate_relationship_graph(root, task_path)
-            if verify_task(root, task_path) != 0:
-                update_top_index(root, task_path.name, "error")
-                args.failed = True
+            if finalize_completed_task(root, task_path, args) != 0:
                 return 1
-            update_top_index(root, task_path.name, "completed")
-            if args.evaluate:
-                eval_returncode = run_evaluation_review_loop(root, task_path, args)
-                if eval_returncode != 0:
-                    args.failed = True
-                elif verify_task(root, task_path, require_evaluation=True) != 0:
-                    args.failed = True
         return 1 if args.failed else 0
     finally:
         release_runner_lock(lock_path)

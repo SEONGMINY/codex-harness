@@ -2130,6 +2130,107 @@ class RunCodexRuntimeTest(unittest.TestCase):
             improve.assert_called_once()
             self.assertTrue(args.failed)
 
+    def test_finalize_completed_task_marks_error_when_evaluation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (root / "tasks" / "index.json").write_text(
+                json.dumps({"tasks": [{"dir": "demo", "status": "running"}]}) + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(evaluate=True, failed=False)
+
+            with (
+                mock.patch.object(RUN_PHASES, "generate_relationship_graph"),
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "run_evaluation_review_loop", return_value=1),
+            ):
+                self.assertEqual(RUN_PHASES.finalize_completed_task(root, task_path, args), 1)
+
+            top_index = json.loads((root / "tasks" / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(top_index["tasks"][0]["status"], "error")
+            self.assertIn("failed_at", top_index["tasks"][0])
+            self.assertNotIn("completed_at", top_index["tasks"][0])
+            self.assertTrue(args.failed)
+
+    def test_main_marks_top_index_error_when_completed_task_evaluation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (root / "tasks" / "index.json").write_text(
+                json.dumps({"tasks": [{"dir": "demo", "status": "running"}]}) + "\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed"}]})
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(sys, "argv", ["run-phases.py", "demo", "--root", str(root), "--evaluate"]),
+                mock.patch.object(RUN_PHASES, "harness_install_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "reconcile_before_execution"),
+                mock.patch.object(RUN_PHASES, "execute_phase", return_value=False),
+                mock.patch.object(RUN_PHASES, "generate_relationship_graph"),
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "run_evaluation_review_loop", return_value=1),
+            ):
+                self.assertEqual(RUN_PHASES.main(), 1)
+
+            top_index = json.loads((root / "tasks" / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(top_index["tasks"][0]["status"], "error")
+            self.assertIn("failed_at", top_index["tasks"][0])
+            self.assertNotIn("completed_at", top_index["tasks"][0])
+
+    def test_finalize_completed_task_requires_evaluation_artifact_verification_before_completed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (root / "tasks" / "index.json").write_text(
+                json.dumps({"tasks": [{"dir": "demo", "status": "running"}]}) + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(evaluate=True, failed=False)
+
+            with (
+                mock.patch.object(RUN_PHASES, "generate_relationship_graph"),
+                mock.patch.object(RUN_PHASES, "verify_task", side_effect=[0, 1]) as verify,
+                mock.patch.object(RUN_PHASES, "run_evaluation_review_loop", return_value=0),
+            ):
+                self.assertEqual(RUN_PHASES.finalize_completed_task(root, task_path, args), 1)
+
+            self.assertEqual(verify.call_count, 2)
+            self.assertEqual(verify.call_args_list[1].kwargs, {"require_evaluation": True})
+            top_index = json.loads((root / "tasks" / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(top_index["tasks"][0]["status"], "error")
+            self.assertIn("failed_at", top_index["tasks"][0])
+            self.assertNotIn("completed_at", top_index["tasks"][0])
+            self.assertTrue(args.failed)
+
+    def test_finalize_completed_task_marks_completed_after_evaluation_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (root / "tasks" / "index.json").write_text(
+                json.dumps({"tasks": [{"dir": "demo", "status": "running"}]}) + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(evaluate=True, failed=False)
+
+            with (
+                mock.patch.object(RUN_PHASES, "generate_relationship_graph"),
+                mock.patch.object(RUN_PHASES, "verify_task", side_effect=[0, 0]) as verify,
+                mock.patch.object(RUN_PHASES, "run_evaluation_review_loop", return_value=0),
+            ):
+                self.assertEqual(RUN_PHASES.finalize_completed_task(root, task_path, args), 0)
+
+            self.assertEqual(verify.call_count, 2)
+            self.assertEqual(verify.call_args_list[1].kwargs, {"require_evaluation": True})
+            top_index = json.loads((root / "tasks" / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(top_index["tasks"][0]["status"], "completed")
+            self.assertIn("completed_at", top_index["tasks"][0])
+            self.assertNotIn("failed_at", top_index["tasks"][0])
+            self.assertFalse(args.failed)
+
     def test_evaluation_improvement_records_repo_content_attestation(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
