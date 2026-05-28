@@ -289,6 +289,32 @@ class VerifyTaskHelperTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def write_evaluation_artifacts(self, task_path: Path) -> None:
+        runtime_dir = task_path / "context-pack" / "runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        approval = json.loads(
+            (task_path / "context-pack" / "static" / "design-approval.json").read_text(encoding="utf-8")
+        )
+        (runtime_dir / "evaluation-command-results.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "policy_pack": VERIFY_TASK.policy_pack_metadata(),
+                    "harness_attestation": VERIFY_TASK.harness_attestation(),
+                    "design_approval_scope_sha256": approval["design_approval_scope_sha256"],
+                    "commands": [],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (runtime_dir / "evaluation-prompt.md").write_text("Evaluate this task.\n", encoding="utf-8")
+        (runtime_dir / "evaluation-output.jsonl").write_text('{"event":"done"}\n', encoding="utf-8")
+        (runtime_dir / "evaluation-last-message.json").write_text(
+            json.dumps({"verdict": "approved", "blockers": [], "required_followups": []}) + "\n",
+            encoding="utf-8",
+        )
+
     def test_mermaid_validation_accepts_allowed_diagram_types(self) -> None:
         text = """# Implementation Design Review
 
@@ -839,6 +865,76 @@ classDiagram
             self.assertEqual(errors, [
                 "Missing design approval: tasks/demo/context-pack/static/design-approval.json"
             ])
+
+    def test_verify_with_evaluation_requirement_accepts_valid_evaluation_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+            self.write_design_approval(root, task_path)
+            self.write_evaluation_artifacts(task_path)
+
+            errors = VERIFY_TASK.verify(
+                root,
+                task_path,
+                require_evaluation=True,
+                require_design_approval=True,
+            )
+
+            self.assertEqual(errors, [])
+
+    def test_verify_with_evaluation_requirement_rejects_repair_result_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+            self.write_design_approval(root, task_path)
+            self.write_evaluation_artifacts(task_path)
+            runtime_dir = task_path / "context-pack" / "runtime"
+            target = root / "src" / "demo.py"
+            target.parent.mkdir(parents=True)
+            target.write_text("after repair\n", encoding="utf-8")
+            changed_files = [
+                {
+                    "path": "src/demo.py",
+                    "before_digest": "<missing>",
+                    "after_digest": VERIFY_TASK.file_sha256(target),
+                }
+            ]
+            required_repo_outputs: list[dict[str, object]] = []
+            repo_content = {
+                "changed_files": changed_files,
+                "changed_files_digest": VERIFY_TASK.stable_json_sha256(changed_files),
+                "required_repo_outputs": required_repo_outputs,
+                "required_repo_outputs_digest": VERIFY_TASK.stable_json_sha256(required_repo_outputs),
+            }
+            repo_content["digest"] = VERIFY_TASK.stable_json_sha256(repo_content)
+            (runtime_dir / "evaluation-repair1-result.json").write_text(
+                json.dumps(
+                    {
+                        "iteration": 1,
+                        "status": "completed",
+                        "codex_exit_code": 0,
+                        "scope_violations": [],
+                        "handoff_exists": True,
+                        "repo_content": repo_content,
+                        "policy_pack": VERIFY_TASK.current_policy_pack_fingerprint(),
+                        "harness_attestation": VERIFY_TASK.harness_attestation(),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            target.write_text("drift after repair\n", encoding="utf-8")
+
+            errors = VERIFY_TASK.verify(
+                root,
+                task_path,
+                require_evaluation=True,
+                require_design_approval=True,
+            )
+
+            self.assertTrue(any("does not match current file digest" in error for error in errors), errors)
 
     def test_extract_design_repo_paths_reads_files_to_change_section(self) -> None:
         text = """# Implementation Design Review

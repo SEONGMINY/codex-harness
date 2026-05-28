@@ -1773,14 +1773,26 @@ def verify(
             errors.append(f"Phase closes_obligations entry is not in design-contract.json obligations: {unknown_closed}")
 
     if require_evaluation:
+        evaluation_command_results = runtime_dir / "evaluation-command-results.json"
+        errors.extend(require_file(root, evaluation_command_results, "evaluation command results", False))
+        approved_evaluation_policy_packs = None
+        if (static_dir / DESIGN_APPROVAL_FILE).exists():
+            approved_evaluation_policy_packs, lineage_errors = approved_policy_pack_lineage(root, task_path)
+            errors.extend(lineage_errors)
         errors.extend(
-            require_file(root, runtime_dir / "evaluation-command-results.json", "evaluation command results", False)
+            validate_evaluation_command_results(
+                root,
+                task_path,
+                evaluation_command_results,
+                approved_policy_packs=approved_evaluation_policy_packs,
+            )
         )
         errors.extend(require_file(root, runtime_dir / "evaluation-prompt.md", "evaluation prompt"))
         errors.extend(require_file(root, runtime_dir / "evaluation-output.jsonl", "evaluation output", False))
         evaluation_final = runtime_dir / "evaluation-last-message.json"
         errors.extend(require_file(root, evaluation_final, "evaluation final output", False))
         errors.extend(validate_evaluation_final(root, evaluation_final))
+        errors.extend(validate_evaluation_repair_results(root, task_path, runtime_dir))
 
     if not registry_errors:
         for phase in phases:
