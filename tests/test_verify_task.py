@@ -1158,6 +1158,28 @@ classDiagram
 
             self.assertTrue(any("phase_proofs must match completed phases" in error for error in errors), errors)
 
+    def test_evaluation_commit_allows_legacy_missing_repair_proofs_without_repairs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+            self.write_design_approval(root, task_path)
+            self.write_evaluation_artifacts(task_path)
+            commit_path = task_path / "context-pack" / "runtime" / "evaluation-commit.json"
+            commit = json.loads(commit_path.read_text(encoding="utf-8"))
+            commit.pop("repair_proofs", None)
+            commit_path.write_text(json.dumps(commit) + "\n", encoding="utf-8")
+
+            errors = VERIFY_TASK.validate_evaluation_commit(
+                root,
+                task_path,
+                commit_path,
+                [],
+                approved_policy_packs=[VERIFY_TASK.current_policy_pack_fingerprint()],
+            )
+
+            self.assertEqual(errors, [])
+
     def test_evaluation_commit_repair_proofs_seal_repair_result(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "repo"
@@ -1202,6 +1224,57 @@ classDiagram
             )
 
             self.assertTrue(any("repair 1 result sha256 does not match" in error for error in errors), errors)
+
+    def test_evaluation_commit_repair_proofs_rejects_duplicates_and_malformed_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+            self.write_design_approval(root, task_path)
+            self.write_evaluation_artifacts(task_path)
+            runtime_dir = task_path / "context-pack" / "runtime"
+            repo_content = {
+                "changed_files": [],
+                "changed_files_digest": VERIFY_TASK.stable_json_sha256([]),
+                "required_repo_outputs": [],
+                "required_repo_outputs_digest": VERIFY_TASK.stable_json_sha256([]),
+            }
+            repo_content["digest"] = VERIFY_TASK.stable_json_sha256(repo_content)
+            self.write_evaluation_repair_result(root, task_path, repo_content=repo_content)
+            repair_path = runtime_dir / "evaluation-repair1-result.json"
+            commit_path = runtime_dir / "evaluation-commit.json"
+            commit = json.loads(commit_path.read_text(encoding="utf-8"))
+            valid_proof = {
+                "iteration": 1,
+                "result": {
+                    "name": "result",
+                    "path": "context-pack/runtime/evaluation-repair1-result.json",
+                    "exists": True,
+                    "sha256": VERIFY_TASK.file_sha256(repair_path),
+                },
+            }
+            commit["repair_proofs"] = [
+                valid_proof,
+                {**valid_proof},
+                {"iteration": 2},
+                "not-object",
+                {"iteration": 0, "result": {}},
+            ]
+            commit_path.write_text(json.dumps(commit) + "\n", encoding="utf-8")
+
+            errors = VERIFY_TASK.validate_evaluation_commit(
+                root,
+                task_path,
+                commit_path,
+                [],
+                approved_policy_packs=[VERIFY_TASK.current_policy_pack_fingerprint()],
+            )
+
+            self.assertTrue(any("duplicate iteration 1" in error for error in errors), errors)
+            self.assertTrue(any("repair_proofs[2] must include result" in error for error in errors), errors)
+            self.assertTrue(any("repair_proofs[3] must be an object" in error for error in errors), errors)
+            self.assertTrue(any("repair_proofs[4].iteration must be a positive integer" in error for error in errors), errors)
+            self.assertTrue(any("repair_proofs must match evaluation repair results" in error for error in errors), errors)
 
     def test_evaluation_commit_repair_proofs_must_match_repair_results(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

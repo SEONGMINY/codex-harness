@@ -1210,15 +1210,6 @@ def validate_evaluation_commit(
                 f"Evaluation commit phase {phase_number}",
             )
         )
-    repair_proofs = commit.get("repair_proofs")
-    if not isinstance(repair_proofs, list):
-        errors.append("Evaluation commit repair_proofs must be a list.")
-        repair_proofs = []
-    by_iteration = {
-        item.get("iteration"): item
-        for item in repair_proofs
-        if isinstance(item, dict) and isinstance(item.get("iteration"), int)
-    }
     repair_paths = sorted(
         (task_path / "context-pack" / "runtime").glob("evaluation-repair*-result.json"),
         key=lambda item: (
@@ -1227,6 +1218,30 @@ def validate_evaluation_commit(
             else 10**9
         ),
     )
+    repair_proofs = commit.get("repair_proofs")
+    if repair_proofs is None and not repair_paths:
+        repair_proofs = []
+    elif not isinstance(repair_proofs, list):
+        errors.append("Evaluation commit repair_proofs must be a list.")
+        repair_proofs = []
+    by_iteration: dict[int, dict[str, Any]] = {}
+    duplicate_iterations: list[int] = []
+    for index, item in enumerate(repair_proofs):
+        if not isinstance(item, dict):
+            errors.append(f"Evaluation commit repair_proofs[{index}] must be an object.")
+            continue
+        iteration = item.get("iteration")
+        if not isinstance(iteration, int) or iteration <= 0:
+            errors.append(f"Evaluation commit repair_proofs[{index}].iteration must be a positive integer.")
+            continue
+        if "result" not in item:
+            errors.append(f"Evaluation commit repair_proofs[{index}] must include result.")
+        if iteration in by_iteration:
+            duplicate_iterations.append(iteration)
+            continue
+        by_iteration[iteration] = item
+    for iteration in sorted(set(duplicate_iterations)):
+        errors.append(f"Evaluation commit repair_proofs has duplicate iteration {iteration}.")
     expected_iterations = {
         iteration
         for path_item in repair_paths
