@@ -357,6 +357,69 @@ class VerifyTaskHelperTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def write_evaluation_repair_result(
+        self,
+        root: Path,
+        task_path: Path,
+        *,
+        repo_content: dict[str, object],
+        status: str = "completed",
+        codex_exit_code: int = 0,
+        scope_violations: list[str] | None = None,
+        handoff_exists: bool = True,
+    ) -> None:
+        runtime_dir = task_path / "context-pack" / "runtime"
+        handoff_dir = task_path / "context-pack" / "handoffs"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        handoff_dir.mkdir(parents=True, exist_ok=True)
+        artifacts = {
+            "prompt": runtime_dir / "evaluation-repair1-prompt.md",
+            "stdout": runtime_dir / "evaluation-repair1-output.jsonl",
+            "stderr": runtime_dir / "evaluation-repair1-stderr.txt",
+            "last_message": runtime_dir / "evaluation-repair1-last-message.json",
+        }
+        for name, path in artifacts.items():
+            path.write_text(f"{name}\n", encoding="utf-8")
+        handoff = handoff_dir / "evaluation-repair1.md"
+        if handoff_exists:
+            handoff.write_text("repair handoff\n", encoding="utf-8")
+        artifact_paths = {**artifacts, "handoff": handoff}
+        artifact_refs = []
+        for name, path in artifact_paths.items():
+            entry: dict[str, object] = {
+                "name": name,
+                "path": str(path.relative_to(task_path)),
+                "exists": path.exists(),
+            }
+            if path.exists() and path.is_file():
+                entry["sha256"] = VERIFY_TASK.file_sha256(path)
+            artifact_refs.append(entry)
+        (runtime_dir / "evaluation-repair1-result.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "runner_version": VERIFY_TASK.HARNESS_VERSION,
+                    "repair_scope": "evaluation_improvement",
+                    "iteration": 1,
+                    "status": status,
+                    "codex_exit_code": codex_exit_code,
+                    "scope_violations": scope_violations or [],
+                    "handoff": str(handoff.relative_to(task_path)),
+                    "handoff_exists": handoff_exists,
+                    "repo_content": repo_content,
+                    "policy_pack": VERIFY_TASK.policy_pack_metadata(),
+                    "harness_attestation": VERIFY_TASK.harness_attestation(),
+                    "artifacts": {
+                        name: str(path.relative_to(task_path))
+                        for name, path in artifacts.items()
+                    },
+                    "artifact_refs": artifact_refs,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
     def test_mermaid_validation_accepts_allowed_diagram_types(self) -> None:
         text = """# Implementation Design Review
 
@@ -1096,22 +1159,7 @@ classDiagram
                 "required_repo_outputs_digest": VERIFY_TASK.stable_json_sha256(required_repo_outputs),
             }
             repo_content["digest"] = VERIFY_TASK.stable_json_sha256(repo_content)
-            (runtime_dir / "evaluation-repair1-result.json").write_text(
-                json.dumps(
-                    {
-                        "iteration": 1,
-                        "status": "completed",
-                        "codex_exit_code": 0,
-                        "scope_violations": [],
-                        "handoff_exists": True,
-                        "repo_content": repo_content,
-                        "policy_pack": VERIFY_TASK.current_policy_pack_fingerprint(),
-                        "harness_attestation": VERIFY_TASK.harness_attestation(),
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
+            self.write_evaluation_repair_result(root, task_path, repo_content=repo_content)
             target.write_text("drift after repair\n", encoding="utf-8")
 
             errors = VERIFY_TASK.verify(
@@ -1122,6 +1170,59 @@ classDiagram
             )
 
             self.assertTrue(any("does not match current file digest" in error for error in errors), errors)
+
+    def test_evaluation_repair_result_rejects_failed_status_and_scope_violations(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime = task_path / "context-pack" / "runtime"
+            repo_content = {
+                "changed_files": [],
+                "changed_files_digest": VERIFY_TASK.stable_json_sha256([]),
+                "required_repo_outputs": [],
+                "required_repo_outputs_digest": VERIFY_TASK.stable_json_sha256([]),
+            }
+            repo_content["digest"] = VERIFY_TASK.stable_json_sha256(repo_content)
+            self.write_evaluation_repair_result(
+                root,
+                task_path,
+                repo_content=repo_content,
+                status="failed",
+                codex_exit_code=1,
+                scope_violations=["outside.txt"],
+                handoff_exists=False,
+            )
+
+            errors = VERIFY_TASK.validate_evaluation_repair_results(root, task_path, runtime)
+
+            self.assertTrue(any('status must be "completed"' in error for error in errors), errors)
+            self.assertTrue(any("codex_exit_code must be 0" in error for error in errors), errors)
+            self.assertTrue(any("scope_violations must be empty" in error for error in errors), errors)
+            self.assertTrue(any("handoff_exists must be true" in error for error in errors), errors)
+
+    def test_evaluation_repair_result_requires_current_runtime_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime = task_path / "context-pack" / "runtime"
+            repo_content = {
+                "changed_files": [],
+                "changed_files_digest": VERIFY_TASK.stable_json_sha256([]),
+                "required_repo_outputs": [],
+                "required_repo_outputs_digest": VERIFY_TASK.stable_json_sha256([]),
+            }
+            repo_content["digest"] = VERIFY_TASK.stable_json_sha256(repo_content)
+            self.write_evaluation_repair_result(root, task_path, repo_content=repo_content)
+            result_path = runtime / "evaluation-repair1-result.json"
+            data = json.loads(result_path.read_text(encoding="utf-8"))
+            data["runner_version"] = "0.0.0"
+            data["policy_pack"]["sha256"] = "stale"
+            result_path.write_text(json.dumps(data) + "\n", encoding="utf-8")
+
+            errors = VERIFY_TASK.validate_evaluation_repair_results(root, task_path, runtime)
+
+            self.assertTrue(any("runner_version must match current" in error for error in errors), errors)
+            self.assertTrue(any("policy_pack does not match current" in error for error in errors), errors)
 
     def test_extract_design_repo_paths_reads_files_to_change_section(self) -> None:
         text = """# Implementation Design Review
@@ -3645,22 +3746,7 @@ classDiagram
                 "required_repo_outputs_digest": VERIFY_TASK.stable_json_sha256(required_repo_outputs),
             }
             repo_content["digest"] = VERIFY_TASK.stable_json_sha256(repo_content)
-            (runtime / "evaluation-repair1-result.json").write_text(
-                json.dumps(
-                    {
-                        "iteration": 1,
-                        "status": "completed",
-                        "codex_exit_code": 0,
-                        "scope_violations": [],
-                        "handoff_exists": True,
-                        "repo_content": repo_content,
-                        "policy_pack": VERIFY_TASK.current_policy_pack_fingerprint(),
-                        "harness_attestation": VERIFY_TASK.harness_attestation(),
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
+            self.write_evaluation_repair_result(root, task_path, repo_content=repo_content)
             target.write_text("drift after repair\n", encoding="utf-8")
 
             errors = VERIFY_TASK.validate_evaluation_repair_results(root, task_path, runtime)

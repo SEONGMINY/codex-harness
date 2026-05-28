@@ -1738,16 +1738,119 @@ def validate_latest_repo_content_matches_current(root: Path, phase_results: list
     return errors
 
 
+def evaluation_repair_result_iteration(path: Path) -> int | None:
+    match = re.fullmatch(r"evaluation-repair(\d+)-result\.json", path.name)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def validate_evaluation_repair_result(root: Path, task_path: Path, path: Path, data: dict[str, Any]) -> list[str]:
+    label = f"Evaluation repair result {path.name}"
+    errors: list[str] = []
+    expected_iteration = evaluation_repair_result_iteration(path)
+    if expected_iteration is None:
+        errors.append(f"{label} filename must include a numeric repair iteration.")
+    if data.get("iteration") != expected_iteration:
+        errors.append(f"{label} iteration must match filename iteration {expected_iteration}.")
+    if data.get("schema_version") != 1:
+        errors.append(f"{label} schema_version must be 1.")
+    if data.get("runner_version") != HARNESS_VERSION:
+        errors.append(f"{label} runner_version must match current harness version {HARNESS_VERSION}.")
+    if data.get("repair_scope") != "evaluation_improvement":
+        errors.append(f'{label} repair_scope must be "evaluation_improvement".')
+    if data.get("status") != "completed":
+        errors.append(f'{label} status must be "completed".')
+    if data.get("codex_exit_code") != 0:
+        errors.append(f"{label} codex_exit_code must be 0.")
+    if data.get("scope_violations") not in (None, []):
+        errors.append(f"{label} scope_violations must be empty.")
+    if data.get("handoff_exists") is not True:
+        errors.append(f"{label} handoff_exists must be true.")
+    handoff = data.get("handoff")
+    if not isinstance(handoff, str) or not handoff:
+        errors.append(f"{label} handoff must be a path.")
+    else:
+        handoff_path, path_errors = resolve_task_relative_path(root, task_path, handoff, f"{label}.handoff")
+        errors.extend(path_errors)
+        if handoff_path is not None and (not handoff_path.exists() or not handoff_path.is_file()):
+            errors.append(f"{label} handoff path does not exist: {rel(root, handoff_path)}")
+    errors.extend(
+        validate_policy_pack_metadata(
+            data.get("policy_pack"),
+            label,
+            strict_current=True,
+        )
+    )
+    errors.extend(
+        validate_harness_attestation_metadata(
+            data.get("harness_attestation"),
+            label,
+            strict_current=True,
+        )
+    )
+    artifacts = data.get("artifacts") if isinstance(data.get("artifacts"), dict) else {}
+    for name in ["prompt", "stdout", "stderr", "last_message"]:
+        raw_path = artifacts.get(name)
+        if not isinstance(raw_path, str) or not raw_path:
+            errors.append(f"{label} artifacts.{name} must be a path.")
+            continue
+        artifact_path, path_errors = resolve_task_relative_path(
+            root,
+            task_path,
+            raw_path,
+            f"{label}.artifacts.{name}",
+        )
+        errors.extend(path_errors)
+        if artifact_path is not None and (not artifact_path.exists() or not artifact_path.is_file()):
+            errors.append(f"{label} artifacts.{name} path does not exist: {rel(root, artifact_path)}")
+    if isinstance(expected_iteration, int):
+        expected_artifacts = {
+            "prompt": f"context-pack/runtime/evaluation-repair{expected_iteration}-prompt.md",
+            "stdout": f"context-pack/runtime/evaluation-repair{expected_iteration}-output.jsonl",
+            "stderr": f"context-pack/runtime/evaluation-repair{expected_iteration}-stderr.txt",
+            "last_message": f"context-pack/runtime/evaluation-repair{expected_iteration}-last-message.json",
+            "handoff": f"context-pack/handoffs/evaluation-repair{expected_iteration}.md",
+        }
+        artifact_refs = artifact_entries_by_name(data.get("artifact_refs"))
+        for name, expected_path in expected_artifacts.items():
+            errors.extend(
+                validate_commit_artifact_ref(
+                    root,
+                    task_path,
+                    artifact_refs.get(name),
+                    name,
+                    expected_path,
+                    f"{label} artifact_ref",
+                )
+            )
+    return errors
+
+
 def validate_evaluation_repair_results(root: Path, task_path: Path, runtime_dir: Path) -> list[str]:
     phase_results: list[tuple[int, dict[str, Any]]] = []
-    for path in sorted(runtime_dir.glob("evaluation-repair*-result.json")):
+    errors: list[str] = []
+    repair_paths = sorted(
+        runtime_dir.glob("evaluation-repair*-result.json"),
+        key=lambda item: (
+            evaluation_repair_result_iteration(item)
+            if evaluation_repair_result_iteration(item) is not None
+            else 10**9
+        ),
+    )
+    for path in repair_paths:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             return [f"Invalid evaluation repair result JSON: {rel(root, path)}: {exc}"]
         if isinstance(data, dict):
-            phase_results.append((int(data.get("iteration") or 0), data))
-    return validate_latest_repo_content_matches_current(root, phase_results)
+            errors.extend(validate_evaluation_repair_result(root, task_path, path, data))
+            iteration = data.get("iteration")
+            phase_results.append((iteration if isinstance(iteration, int) else 0, data))
+        else:
+            errors.append(f"Evaluation repair result must be a JSON object: {rel(root, path)}")
+    errors.extend(validate_latest_repo_content_matches_current(root, phase_results))
+    return errors
 
 
 def validate_obligation_closure_ledger(

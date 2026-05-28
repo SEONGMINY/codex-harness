@@ -3181,6 +3181,9 @@ def run_evaluation_improvement(
     violations = scope_violations(traceable_files, allowed_paths, [])
     handoff_exists = evaluation_repair_handoff_path(task_path, iteration).exists()
     result = {
+        "schema_version": 1,
+        "runner_version": HARNESS_VERSION,
+        "repair_scope": "evaluation_improvement",
         "iteration": iteration,
         "status": "completed" if returncode == 0 and not violations and handoff_exists else "failed",
         "codex_exit_code": returncode,
@@ -3198,6 +3201,13 @@ def run_evaluation_improvement(
             "stderr": str(stderr_path.relative_to(task_path)),
             "last_message": str(last_message_path.relative_to(task_path)),
         },
+        "artifact_refs": [
+            artifact_ref(task_path, "prompt", prompt_path),
+            artifact_ref(task_path, "stdout", output_path),
+            artifact_ref(task_path, "stderr", stderr_path),
+            artifact_ref(task_path, "last_message", last_message_path),
+            artifact_ref(task_path, "handoff", evaluation_repair_handoff_path(task_path, iteration)),
+        ],
     }
     write_json(evaluation_repair_result_path(task_path, iteration), result)
     if returncode != 0:
@@ -3367,12 +3377,14 @@ def earliest_repair_phase(task_path: Path, task_index: dict) -> int | None:
         phase_number = int(phase["phase"])
         if phase.get("status") in {"error", "repair_required"}:
             candidates.append(phase_number)
-        if (runtime_dir / f"phase{phase_number}-repair-packet.json").exists():
-            candidates.append(phase_number)
-    for packet_path in runtime_dir.glob("phase*-repair-packet-attempt*.json"):
-        match = re.match(r"phase(\d+)-repair-packet-attempt\d+\.json$", packet_path.name)
-        if match:
-            candidates.append(int(match.group(1)))
+        if not (runtime_dir / f"phase{phase_number}-repair-packet.json").exists():
+            continue
+        commit = latest_valid_phase_attempt_commit(task_path, phase_number)
+        commit_attempt = commit.get("attempt") if commit else None
+        phase_attempt = phase.get("attempts")
+        if phase.get("status") == "completed" and commit and commit_attempt == phase_attempt:
+            continue
+        candidates.append(phase_number)
     return min(candidates) if candidates else None
 
 
@@ -3955,6 +3967,7 @@ def execute_phase(
                 gate_path=phase_attempt_gate_path(task_path, phase_number, attempt),
             )
             commit_path = write_phase_attempt_commit(task_path, phase_number, attempt, result_path)
+            clear_repair_packet(task_path, phase_number)
             append_attempt_manifest_record(
                 task_path,
                 phase_number,

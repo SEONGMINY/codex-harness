@@ -3232,7 +3232,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertTrue(RUN_PHASES.phase_reset_marker_path(task_path, 2).exists())
             self.assertTrue(repair_packet.exists())
 
-    def test_resume_repair_finds_attempt_scoped_repair_packet_without_alias(self) -> None:
+    def test_resume_repair_ignores_attempt_scoped_repair_packet_without_alias(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             root, task_path = self.make_task(tmp)
@@ -3258,13 +3258,72 @@ class RunCodexRuntimeTest(unittest.TestCase):
             repair_packet.parent.mkdir(parents=True, exist_ok=True)
             repair_packet.write_text('{"phase":1,"attempt":1}\n', encoding="utf-8")
 
+            result = RUN_PHASES.apply_repair_resume(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertIsNone(result)
+            self.assertEqual(task_index["phases"][0]["status"], "completed")
+            self.assertEqual(task_index["phases"][1]["status"], "pending")
+            self.assertFalse(RUN_PHASES.phase_reset_marker_path(task_path, 1).exists())
+            self.assertTrue(repair_packet.exists())
+
+    def test_resume_repair_ignores_stale_alias_for_completed_phase_with_valid_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            for path in [
+                RUN_PHASES.phase_contract_path(task_path, 0),
+                RUN_PHASES.phase_checklist_path(task_path, 0),
+                RUN_PHASES.phase_quality_path(task_path, 0),
+                RUN_PHASES.phase_evidence_path(task_path, 0),
+                RUN_PHASES.phase_gate_path(task_path, 0),
+                RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+                RUN_PHASES.phase_handoff_path(task_path, 0),
+            ]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("artifact\n", encoding="utf-8")
+            prompt = RUN_PHASES.phase_attempt_prompt_path(task_path, 0, 1)
+            stdout = runtime / "phase0-output-attempt1.jsonl"
+            stderr = runtime / "phase0-stderr-attempt1.txt"
+            ac = RUN_PHASES.write_ac_results(task_path, 0, 1, [{"command": "true", "exit_code": 0}])
+            for path in [prompt, stdout, stderr]:
+                path.write_text("attempt 1\n", encoding="utf-8")
+            result_path = RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                1,
+                0,
+                [],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                prompt,
+                stdout,
+                stderr,
+                ac,
+            )
+            RUN_PHASES.write_phase_attempt_commit(task_path, 0, 1, result_path)
+            RUN_PHASES.phase_repair_packet_path(task_path, 0).write_text('{"phase":0,"attempt":1}\n', encoding="utf-8")
+            (root / "tasks").mkdir(parents=True, exist_ok=True)
+            (root / "tasks" / "index.json").write_text(
+                json.dumps({"tasks": [{"dir": "demo", "status": "completed"}]}) + "\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
             RUN_PHASES.apply_repair_resume(root, task_path, dry_run=False)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(task_index["phases"][0]["status"], "completed")
-            self.assertEqual(task_index["phases"][1]["status"], "pending")
-            self.assertTrue(RUN_PHASES.phase_reset_marker_path(task_path, 1).exists())
-            self.assertTrue(repair_packet.exists())
+            self.assertFalse(RUN_PHASES.phase_reset_marker_path(task_path, 0).exists())
 
     def test_reconcile_projection_recovers_marker_first_reset_crash_to_pending(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -4194,6 +4253,8 @@ class RunCodexRuntimeTest(unittest.TestCase):
             )
             self.assertTrue(RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).exists())
             self.assertTrue(RUN_PHASES.phase_attempt_repair_packet_summary_path(task_path, 0, 1).exists())
+            self.assertFalse(RUN_PHASES.phase_repair_packet_path(task_path, 0).exists())
+            self.assertFalse(RUN_PHASES.phase_repair_packet_summary_path(task_path, 0).exists())
             repair_packet = json.loads(
                 RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).read_text(encoding="utf-8")
             )
