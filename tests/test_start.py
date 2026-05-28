@@ -79,6 +79,10 @@ class StartLauncherTest(unittest.TestCase):
             "# evidence obligations helper\n",
             encoding="utf-8",
         )
+        (repo / ".codex" / "harness" / "scripts" / "file_lock.py").write_text(
+            "# file lock helper\n",
+            encoding="utf-8",
+        )
         (repo / ".codex" / "harness" / "scripts" / "harness_attestation.py").write_text(
             "# harness attestation helper\n",
             encoding="utf-8",

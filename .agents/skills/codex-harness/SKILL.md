@@ -42,6 +42,7 @@ required = [
     root / ".codex" / "harness" / "install-manifest.json",
     root / ".codex" / "harness" / "scripts" / "skill" / "SKILL.md",
     root / ".codex" / "harness" / "scripts" / "start.py",
+    root / ".codex" / "harness" / "scripts" / "file_lock.py",
     root / ".codex" / "harness" / "scripts" / "install_preflight.py",
     root / ".codex" / "harness" / "scripts" / "run-phases.py",
     root / ".codex" / "harness" / "scripts" / "relationship_graph.py",

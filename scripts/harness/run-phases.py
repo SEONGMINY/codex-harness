@@ -14,7 +14,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, NamedTuple
+from typing import Iterable
 
 HARNESS_VERSION = "0.1.5"
 
@@ -51,6 +51,7 @@ from phase_contract import (
 from phase_semantics import analyze_phase
 from command_policy import run_command
 from env_policy import sanitized_env
+from file_lock import LockHandle, acquire_lock, release_lock, remove_stale_lock
 from harness_attestation import attestation_fingerprint, harness_attestation
 from obligation_ledger import build_phase_obligation_assertion_outcomes, design_obligations_by_id
 from policy_pack import policy_pack_metadata
@@ -71,7 +72,6 @@ SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUNTIME_HARNESS_ATTESTATION = harness_attestation()
 INSTALL_PREFLIGHT_LOCK_EXIT_CODE = 125
-LOCK_INVALID_JSON_STALE_SECONDS = 30
 MANDATORY_STATIC_FILES = [
     "original-prompt.md",
     "product.md",
@@ -96,11 +96,6 @@ PLACEHOLDER_PATTERNS = [
     re.compile(r"Replace this", re.IGNORECASE),
     re.compile(r"Replace with", re.IGNORECASE),
 ]
-
-
-class LockHandle(NamedTuple):
-    path: Path
-    identity: tuple[int, int, int, int]
 
 
 def now() -> str:
@@ -130,6 +125,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "artifact_io.py",
         root / ".codex" / "harness" / "scripts" / "command_policy.py",
         root / ".codex" / "harness" / "scripts" / "env_policy.py",
+        root / ".codex" / "harness" / "scripts" / "file_lock.py",
         root / ".codex" / "harness" / "scripts" / "harness_attestation.py",
         root / ".codex" / "harness" / "scripts" / "install_preflight.py",
         root / ".codex" / "harness" / "scripts" / "obligation_ledger.py",
@@ -257,43 +253,8 @@ def install_preflight_lock_path(root: Path) -> Path:
     return root / ".codex" / "harness" / "install-preflight.lock"
 
 
-def write_lock_candidate(path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    candidate = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
-    payload = {"pid": os.getpid(), "started_at": now()}
-    fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    return candidate
-
-
-def acquire_lock(path: Path) -> LockHandle:
-    while True:
-        candidate = write_lock_candidate(path)
-        try:
-            os.link(candidate, path)
-        except FileExistsError as exc:
-            candidate.unlink(missing_ok=True)
-            if remove_stale_lock(path):
-                continue
-            raise RuntimeError(f"Another codex-harness process is active: {path}") from exc
-        finally:
-            candidate.unlink(missing_ok=True)
-        return LockHandle(path=path, identity=file_identity(path))
-
-
-def release_lock(handle: LockHandle | None) -> None:
-    if handle is None:
-        return
-    try:
-        if file_identity(handle.path) != handle.identity:
-            return
-    except FileNotFoundError:
-        return
-    handle.path.unlink(missing_ok=True)
+def top_index_lock_path(root: Path) -> Path:
+    return root / ".codex" / "harness" / "tasks-index.lock"
 
 
 def run_install_preflight(root: Path, task_path: Path, args: argparse.Namespace) -> list[str]:
@@ -1257,21 +1218,25 @@ def update_top_index(root: Path, task_dir: str, status: str) -> None:
     top_index_path = root / "tasks" / "index.json"
     if not top_index_path.exists():
         return
-    top_index = read_json(top_index_path)
-    for task in top_index.get("tasks", []):
-        if task.get("dir") == task_dir:
-            task["status"] = status
-            if status == "completed":
-                task["completed_at"] = now()
-                task.pop("failed_at", None)
-            if status == "error":
-                task["failed_at"] = now()
-                task.pop("completed_at", None)
-            if status == "pending":
-                task.pop("completed_at", None)
-                task.pop("failed_at", None)
-            write_json(top_index_path, top_index)
-            return
+    lock_handle = acquire_lock(top_index_lock_path(root), wait_timeout_seconds=30, boundary=root)
+    try:
+        top_index = read_json(top_index_path)
+        for task in top_index.get("tasks", []):
+            if task.get("dir") == task_dir:
+                task["status"] = status
+                if status == "completed":
+                    task["completed_at"] = now()
+                    task.pop("failed_at", None)
+                if status == "error":
+                    task["failed_at"] = now()
+                    task.pop("completed_at", None)
+                if status == "pending":
+                    task.pop("completed_at", None)
+                    task.pop("failed_at", None)
+                write_json(top_index_path, top_index)
+                return
+    finally:
+        release_lock(lock_handle)
 
 
 def write_last_error(task_path: Path, phase_number: int, message: str) -> None:
@@ -1280,56 +1245,6 @@ def write_last_error(task_path: Path, phase_number: int, message: str) -> None:
         runtime_dir / f"phase{phase_number}-last-error.md",
         f"# Phase {phase_number} Last Error\n\n{message.rstrip()}\n",
     )
-
-
-def process_is_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-def lock_is_stale(path: Path) -> bool:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        try:
-            age_seconds = time.time() - path.stat().st_mtime
-        except OSError:
-            return True
-        return age_seconds > LOCK_INVALID_JSON_STALE_SECONDS
-    pid = data.get("pid") if isinstance(data, dict) else None
-    if not isinstance(pid, int) or pid <= 0:
-        return True
-    return not process_is_alive(pid)
-
-
-def file_identity(path: Path) -> tuple[int, int, int, int]:
-    stat = path.stat()
-    return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
-
-
-def remove_stale_lock(path: Path) -> bool:
-    try:
-        observed_identity = file_identity(path)
-    except FileNotFoundError:
-        return True
-    if not lock_is_stale(path):
-        return False
-    try:
-        current_identity = file_identity(path)
-    except FileNotFoundError:
-        return True
-    if current_identity != observed_identity:
-        return False
-    try:
-        path.unlink()
-        return True
-    except FileNotFoundError:
-        return True
 
 
 def install_preflight_failure_retryable(task_path: Path) -> bool:

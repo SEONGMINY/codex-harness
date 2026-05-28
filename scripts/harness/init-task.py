@@ -5,10 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
+
+from artifact_io import atomic_write_json, atomic_write_text
+from file_lock import acquire_lock, release_lock
 
 
 COMMON_DOC_TEMPLATES = {
@@ -385,11 +389,7 @@ def read_json(path: Path, default: dict) -> dict:
 
 
 def write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(path, data)
 
 
 def git_head(root: Path) -> str | None:
@@ -408,8 +408,29 @@ def git_head(root: Path) -> str | None:
 def write_text_if_missing(path: Path, content: str) -> None:
     if path.exists():
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    atomic_write_text(path, content)
+
+
+def top_index_lock_path(root: Path) -> Path:
+    return root / ".codex" / "harness" / "tasks-index.lock"
+
+
+def next_task_identity(top_index: dict, tasks_root: Path, task_name: str) -> tuple[int, str]:
+    used_ids = []
+    registered_dirs = set()
+    for task in top_index.get("tasks", []):
+        try:
+            used_ids.append(int(task["id"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+        if isinstance(task, dict) and isinstance(task.get("dir"), str):
+            registered_dirs.add(task["dir"])
+    next_id = max(used_ids, default=-1) + 1
+    while True:
+        task_dir = f"{next_id}-{task_name}"
+        if task_dir not in registered_dirs:
+            return next_id, task_dir
+        next_id += 1
 
 
 def docs_index(task_dir: str, common_docs: list[str], docs: list[str]) -> str:
@@ -598,6 +619,9 @@ def main() -> int:
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
+    # Keep artifact symlink checks bounded to the target repository even when
+    # init-task is launched from another working directory.
+    os.chdir(root)
     tasks_root = root / "tasks"
     tasks_root.mkdir(parents=True, exist_ok=True)
 
@@ -605,98 +629,105 @@ def main() -> int:
     if args.prompt_file:
         prompt = Path(args.prompt_file).read_text(encoding="utf-8")
 
-    top_index_path = tasks_root / "index.json"
-    top_index = read_json(top_index_path, {"tasks": []})
-    next_id = max((int(task["id"]) for task in top_index["tasks"]), default=-1) + 1
-
     task_name = slugify(args.name)
-    task_dir = f"{next_id}-{task_name}"
-    task_path = tasks_root / task_dir
-    phases_path = task_path / "phases"
-    context_path = task_path / "context-pack"
-    common_docs_path = root / "docs" / "harness"
-    docs_path = task_path / "docs"
-
-    for directory in [
-        phases_path,
-        context_path / "static",
-        context_path / "runtime",
-        context_path / "handoffs",
-        common_docs_path,
-        docs_path,
-    ]:
-        directory.mkdir(parents=True, exist_ok=True)
-
-    common_docs = []
-    for filename, template in COMMON_DOC_TEMPLATES.items():
-        target = common_docs_path / filename
-        write_text_if_missing(target, template)
-        common_docs.append(str(target.relative_to(root)))
-
-    docs = []
-    for filename, template in DOC_TEMPLATES.items():
-        target = docs_path / filename
-        write_text_if_missing(target, template)
-        docs.append(str(target.relative_to(root)))
-
-    (context_path / "static" / "original-prompt.md").write_text(
-        prompt.rstrip() + "\n",
-        encoding="utf-8",
+    top_index_path = tasks_root / "index.json"
+    lock_handle = acquire_lock(
+        top_index_lock_path(root),
+        {"scope": "tasks/index.json", "operation": "init-task"},
+        wait_timeout_seconds=30,
+        boundary=root,
     )
-    for filename, template in STATIC_TEMPLATES.items():
-        write_text_if_missing(context_path / "static" / filename, template)
-    for filename, template in STATIC_JSON_TEMPLATES.items():
-        target = context_path / "static" / filename
-        if not target.exists():
-            write_json(target, template)
-    write_text_if_missing(
-        context_path / "static" / "docs-index.md",
-        docs_index(task_dir, common_docs, docs),
-    )
+    try:
+        top_index = read_json(top_index_path, {"tasks": []})
+        next_id, task_dir = next_task_identity(top_index, tasks_root, task_name)
+        task_path = tasks_root / task_dir
+        phases_path = task_path / "phases"
+        context_path = task_path / "context-pack"
+        common_docs_path = root / "docs" / "harness"
+        docs_path = task_path / "docs"
 
-    phase_entries = []
-    for phase_number, raw_name in enumerate(args.phase):
-        phase_name = slugify(raw_name)
-        (phases_path / f"phase{phase_number}.md").write_text(
-            phase_template(phase_number, phase_name, common_docs, docs),
-            encoding="utf-8",
+        for directory in [
+            phases_path,
+            context_path / "static",
+            context_path / "runtime",
+            context_path / "handoffs",
+            common_docs_path,
+            docs_path,
+        ]:
+            directory.mkdir(parents=True, exist_ok=True)
+
+        common_docs = []
+        for filename, template in COMMON_DOC_TEMPLATES.items():
+            target = common_docs_path / filename
+            write_text_if_missing(target, template)
+            common_docs.append(str(target.relative_to(root)))
+
+        docs = []
+        for filename, template in DOC_TEMPLATES.items():
+            target = docs_path / filename
+            write_text_if_missing(target, template)
+            docs.append(str(target.relative_to(root)))
+
+        atomic_write_text(
+            context_path / "static" / "original-prompt.md",
+            prompt.rstrip() + "\n",
         )
-        phase_entries.append(
+        for filename, template in STATIC_TEMPLATES.items():
+            write_text_if_missing(context_path / "static" / filename, template)
+        for filename, template in STATIC_JSON_TEMPLATES.items():
+            target = context_path / "static" / filename
+            if not target.exists():
+                write_json(target, template)
+        write_text_if_missing(
+            context_path / "static" / "docs-index.md",
+            docs_index(task_dir, common_docs, docs),
+        )
+
+        phase_entries = []
+        for phase_number, raw_name in enumerate(args.phase):
+            phase_name = slugify(raw_name)
+            atomic_write_text(
+                phases_path / f"phase{phase_number}.md",
+                phase_template(phase_number, phase_name, common_docs, docs),
+            )
+            phase_entries.append(
+                {
+                    "phase": phase_number,
+                    "name": phase_name,
+                    "status": "pending",
+                    "ac_commands": [],
+                    "required_outputs": [
+                        f"context-pack/handoffs/phase{phase_number}.md"
+                    ],
+                }
+            )
+
+        task_index = {
+            "project": args.project,
+            "task": task_name,
+            "prompt": prompt,
+            "baseline": git_head(root),
+            "created_at": now(),
+            "totalPhases": len(phase_entries),
+            "common_docs": common_docs,
+            "docs": docs,
+            "evaluation_commands": args.evaluation_command,
+            "phases": phase_entries,
+        }
+        write_json(task_path / "index.json", task_index)
+
+        top_index.setdefault("tasks", []).append(
             {
-                "phase": phase_number,
-                "name": phase_name,
+                "id": next_id,
+                "name": task_name,
+                "dir": task_dir,
                 "status": "pending",
-                "ac_commands": [],
-                "required_outputs": [
-                    f"context-pack/handoffs/phase{phase_number}.md"
-                ],
+                "created_at": task_index["created_at"],
             }
         )
-
-    task_index = {
-        "project": args.project,
-        "task": task_name,
-        "prompt": prompt,
-        "baseline": git_head(root),
-        "created_at": now(),
-        "totalPhases": len(phase_entries),
-        "common_docs": common_docs,
-        "docs": docs,
-        "evaluation_commands": args.evaluation_command,
-        "phases": phase_entries,
-    }
-    write_json(task_path / "index.json", task_index)
-
-    top_index["tasks"].append(
-        {
-            "id": next_id,
-            "name": task_name,
-            "dir": task_dir,
-            "status": "pending",
-            "created_at": task_index["created_at"],
-        }
-    )
-    write_json(top_index_path, top_index)
+        write_json(top_index_path, top_index)
+    finally:
+        release_lock(lock_handle)
 
     print(task_path)
     return 0

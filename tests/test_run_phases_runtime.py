@@ -28,6 +28,7 @@ RUN_PHASES = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(RUN_PHASES)
 import env_policy  # noqa: E402
+import file_lock  # noqa: E402
 
 
 class RunCodexRuntimeTest(unittest.TestCase):
@@ -49,6 +50,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 "env_policy.py",
                 "evidence_obligations.py",
                 "evaluate-task.py",
+                "file_lock.py",
                 "install_preflight.py",
                 "obligation_ledger.py",
                 "phase_contract.py",
@@ -185,7 +187,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 )
                 return True
 
-            with mock.patch.object(RUN_PHASES, "lock_is_stale", side_effect=replace_lock_before_unlink):
+            with mock.patch.object(file_lock, "lock_is_stale", side_effect=replace_lock_before_unlink):
                 removed = RUN_PHASES.remove_stale_lock(lock_path)
 
             self.assertFalse(removed)
@@ -202,6 +204,35 @@ class RunCodexRuntimeTest(unittest.TestCase):
 
             self.assertTrue(lock_path.exists())
             self.assertEqual(lock_path.read_text(encoding="utf-8"), "")
+
+    def test_acquire_lock_rejects_symlink_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            real_runtime = tmp / "real-runtime"
+            real_runtime.mkdir()
+            symlink_runtime = tmp / "runtime"
+            symlink_runtime.symlink_to(real_runtime, target_is_directory=True)
+
+            with self.assertRaisesRegex(RuntimeError, "must not be a symlink"):
+                RUN_PHASES.acquire_lock(symlink_runtime / "run-phases.lock")
+
+            self.assertFalse((real_runtime / "run-phases.lock").exists())
+
+    def test_acquire_lock_rejects_symlink_target(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            runtime = tmp / "runtime"
+            runtime.mkdir()
+            external_lock = tmp / "external.lock"
+            external_lock.write_text('{"pid":-1}\n', encoding="utf-8")
+            lock_path = runtime / "run-phases.lock"
+            lock_path.symlink_to(external_lock)
+
+            with self.assertRaisesRegex(RuntimeError, "must not be a symlink"):
+                RUN_PHASES.acquire_lock(lock_path)
+
+            self.assertTrue(lock_path.is_symlink())
+            self.assertEqual(external_lock.read_text(encoding="utf-8"), '{"pid":-1}\n')
 
     def test_release_lock_does_not_delete_replaced_lock(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -1189,6 +1220,62 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(task_index["phases"][0]["status"], "pending")
             self.assertEqual(task_index["phases"][0]["reset_at"], marker["reset_at"])
             self.assertFalse(RUN_PHASES.phase_baseline_path(task_path, 0).exists())
+
+    def test_update_top_index_uses_global_index_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, _task_path = self.make_task(Path(raw_tmp))
+            (root / "tasks" / "index.json").write_text(
+                json.dumps({"tasks": [{"dir": "demo", "status": "pending"}]}) + "\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                RUN_PHASES,
+                "acquire_lock",
+                side_effect=RuntimeError("Another codex-harness process is active"),
+            ) as acquire_lock:
+                with self.assertRaisesRegex(RuntimeError, "Another codex-harness process is active"):
+                    RUN_PHASES.update_top_index(root, "demo", "completed")
+
+            acquire_lock.assert_called_once_with(
+                RUN_PHASES.top_index_lock_path(root),
+                wait_timeout_seconds=30,
+                boundary=root,
+            )
+
+            top_index = json.loads((root / "tasks" / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(top_index["tasks"][0]["status"], "pending")
+
+    def test_parallel_top_index_updates_preserve_unrelated_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, _task_path = self.make_task(Path(raw_tmp))
+            (root / "tasks" / "index.json").write_text(
+                json.dumps(
+                    {
+                        "tasks": [
+                            {"dir": "api", "status": "pending"},
+                            {"dir": "web", "status": "pending"},
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            threads = [
+                threading.Thread(target=RUN_PHASES.update_top_index, args=(root, "api", "completed")),
+                threading.Thread(target=RUN_PHASES.update_top_index, args=(root, "web", "error")),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            top_index = json.loads((root / "tasks" / "index.json").read_text(encoding="utf-8"))
+            by_dir = {task["dir"]: task for task in top_index["tasks"]}
+            self.assertEqual(by_dir["api"]["status"], "completed")
+            self.assertIn("completed_at", by_dir["api"])
+            self.assertEqual(by_dir["web"]["status"], "error")
+            self.assertIn("failed_at", by_dir["web"])
 
     def test_runtime_projection_marks_completed_phase_without_commit_as_error(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

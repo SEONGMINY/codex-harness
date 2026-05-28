@@ -673,6 +673,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "design_contract.py",
         root / ".codex" / "harness" / "scripts" / "env_policy.py",
         root / ".codex" / "harness" / "scripts" / "evidence_obligations.py",
+        root / ".codex" / "harness" / "scripts" / "file_lock.py",
         root / ".codex" / "harness" / "scripts" / "harness_attestation.py",
         root / ".codex" / "harness" / "scripts" / "install_preflight.py",
         root / ".codex" / "harness" / "scripts" / "obligation_ledger.py",

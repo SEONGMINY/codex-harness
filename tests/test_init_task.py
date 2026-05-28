@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -17,29 +18,32 @@ VERIFY_TASK = ROOT / "scripts" / "harness" / "verify-task.py"
 
 
 class InitTaskTest(unittest.TestCase):
+    def run_init_task(self, repo: Path, name: str = "recording-flow") -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(INIT_TASK),
+                name,
+                "--project",
+                "demo",
+                "--prompt",
+                "Build recording flow.",
+                "--phase",
+                "implementation",
+                "--root",
+                str(repo),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
     def test_task_includes_implementation_quality_doc(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp) / "repo"
             repo.mkdir()
 
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(INIT_TASK),
-                    "recording-flow",
-                    "--project",
-                    "demo",
-                    "--prompt",
-                    "Build recording flow.",
-                    "--phase",
-                    "implementation",
-                    "--root",
-                    str(repo),
-                ],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+            result = self.run_init_task(repo)
 
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
@@ -62,24 +66,7 @@ class InitTaskTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp) / "repo"
             repo.mkdir()
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(INIT_TASK),
-                    "recording-flow",
-                    "--project",
-                    "demo",
-                    "--prompt",
-                    "Build recording flow.",
-                    "--phase",
-                    "implementation",
-                    "--root",
-                    str(repo),
-                ],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+            result = self.run_init_task(repo)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
             task_path = repo / "tasks" / "0-recording-flow"
@@ -112,24 +99,7 @@ class InitTaskTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             repo = Path(raw_tmp) / "repo"
             repo.mkdir()
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(INIT_TASK),
-                    "recording-flow",
-                    "--project",
-                    "demo",
-                    "--prompt",
-                    "Build recording flow.",
-                    "--phase",
-                    "implementation",
-                    "--root",
-                    str(repo),
-                ],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+            result = self.run_init_task(repo)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
             task_path = repo / "tasks" / "0-recording-flow"
@@ -158,6 +128,48 @@ class InitTaskTest(unittest.TestCase):
 
             self.assertNotEqual(verify.returncode, 0)
             self.assertIn("implementation design review", verify.stdout + verify.stderr)
+
+    def test_parallel_task_creation_allocates_unique_top_index_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp) / "repo"
+            repo.mkdir()
+            results: list[subprocess.CompletedProcess[str] | None] = [None] * 4
+
+            def worker(index: int) -> None:
+                results[index] = self.run_init_task(repo)
+
+            threads = [threading.Thread(target=worker, args=(index,)) for index in range(len(results))]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            completed = [result for result in results if result is not None]
+            self.assertEqual(len(completed), len(results))
+            for result in completed:
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+            top_index = json.loads((repo / "tasks" / "index.json").read_text(encoding="utf-8"))
+            ids = [task["id"] for task in top_index["tasks"]]
+            dirs = [task["dir"] for task in top_index["tasks"]]
+            self.assertEqual(sorted(ids), [0, 1, 2, 3])
+            self.assertEqual(len(set(dirs)), 4)
+            for task_dir in dirs:
+                self.assertTrue((repo / "tasks" / task_dir / "index.json").exists())
+
+    def test_task_creation_adopts_unregistered_orphan_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            repo = Path(raw_tmp) / "repo"
+            repo.mkdir()
+            (repo / "tasks" / "0-recording-flow").mkdir(parents=True)
+
+            result = self.run_init_task(repo)
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertTrue((repo / "tasks" / "0-recording-flow" / "index.json").exists())
+            top_index = json.loads((repo / "tasks" / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(top_index["tasks"][0]["id"], 0)
+            self.assertEqual(top_index["tasks"][0]["dir"], "0-recording-flow")
 
 
 if __name__ == "__main__":

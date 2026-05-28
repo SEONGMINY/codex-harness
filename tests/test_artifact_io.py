@@ -61,6 +61,29 @@ class ArtifactIOTest(unittest.TestCase):
 
             self.assertFalse((outside / "phase0-result.json").exists())
 
+    def test_atomic_write_text_rejects_symlink_parent_outside_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            outside = root / "outside"
+            outside.mkdir()
+            repo = root / "repo"
+            repo.mkdir()
+            linked_tasks = repo / "tasks"
+            linked_tasks.symlink_to(outside, target_is_directory=True)
+            task_index = linked_tasks / "index.json"
+            task_index.write_text('{"outside":true}\n', encoding="utf-8")
+
+            with tempfile.TemporaryDirectory() as cwd:
+                old_cwd = Path.cwd()
+                try:
+                    ARTIFACT_IO.os.chdir(cwd)
+                    with self.assertRaises(ARTIFACT_IO.SymlinkPathError):
+                        ARTIFACT_IO.atomic_write_text(task_index, '{"safe":true}\n', boundary=repo)
+                finally:
+                    ARTIFACT_IO.os.chdir(old_cwd)
+
+            self.assertEqual(task_index.read_text(encoding="utf-8"), '{"outside":true}\n')
+
     def test_atomic_write_text_rejects_symlink_target(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp)

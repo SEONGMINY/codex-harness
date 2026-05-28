@@ -23,20 +23,25 @@ def _is_relative_to(path: Path, base: Path) -> bool:
     return True
 
 
-def ensure_no_symlink_path(path: Path) -> None:
+def ensure_no_symlink_path(path: Path, boundary: Path | None = None) -> None:
     """Reject symlinks in runner-owned path components."""
 
     absolute_path = path if path.is_absolute() else Path.cwd() / path
-    cwd = Path.cwd()
-    boundary = cwd if _is_relative_to(absolute_path, cwd) else None
+    if boundary is not None:
+        absolute_boundary = boundary if boundary.is_absolute() else Path.cwd() / boundary
+        if not _is_relative_to(absolute_path, absolute_boundary):
+            raise SymlinkPathError(f"runner-owned artifact path is outside boundary: {absolute_path}")
+    else:
+        cwd = Path.cwd()
+        absolute_boundary = cwd if _is_relative_to(absolute_path, cwd) else None
 
     current = absolute_path
     candidates: list[Path] = []
     while True:
         candidates.append(current)
-        if boundary is not None and current == boundary:
+        if absolute_boundary is not None and current == absolute_boundary:
             break
-        if boundary is None and current.exists() and not current.is_symlink():
+        if absolute_boundary is None and current.exists() and not current.is_symlink():
             break
         parent = current.parent
         if parent == current:
@@ -53,15 +58,15 @@ def ensure_no_symlink_path(path: Path) -> None:
             ) from exc
 
 
-def ensure_artifact_parent(path: Path) -> None:
-    ensure_no_symlink_path(path.parent)
+def ensure_artifact_parent(path: Path, boundary: Path | None = None) -> None:
+    ensure_no_symlink_path(path.parent, boundary=boundary)
     path.parent.mkdir(parents=True, exist_ok=True)
-    ensure_no_symlink_path(path.parent)
+    ensure_no_symlink_path(path.parent, boundary=boundary)
 
 
-def atomic_write_text(path: Path, content: str) -> None:
-    ensure_no_symlink_path(path)
-    ensure_artifact_parent(path)
+def atomic_write_text(path: Path, content: str, boundary: Path | None = None) -> None:
+    ensure_no_symlink_path(path, boundary=boundary)
+    ensure_artifact_parent(path, boundary=boundary)
     tmp_name: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -86,14 +91,14 @@ def atomic_write_text(path: Path, content: str) -> None:
                 pass
 
 
-def atomic_write_json(path: Path, data: Any) -> None:
-    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+def atomic_write_json(path: Path, data: Any, boundary: Path | None = None) -> None:
+    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n", boundary=boundary)
 
 
 @contextmanager
-def open_append_text(path: Path) -> Iterator[TextIO]:
-    ensure_no_symlink_path(path)
-    ensure_artifact_parent(path)
+def open_append_text(path: Path, boundary: Path | None = None) -> Iterator[TextIO]:
+    ensure_no_symlink_path(path, boundary=boundary)
+    ensure_artifact_parent(path, boundary=boundary)
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
