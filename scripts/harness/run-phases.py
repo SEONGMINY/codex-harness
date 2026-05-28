@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Iterable
 
 from codex_exec import CODEX_IDLE_EXIT_CODE, add_output_schema, run_codex_exec
+from artifact_io import atomic_write_json, atomic_write_text
 from decision_registry import (
     load_decision_registry,
     validate_decision_files,
@@ -91,10 +92,7 @@ def read_json(path: Path) -> dict:
 
 
 def write_json(path: Path, data: dict) -> None:
-    path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(path, data)
 
 
 def append_progress(task_path: Path, message: str) -> None:
@@ -1000,9 +998,9 @@ def update_top_index(root: Path, task_dir: str, status: str) -> None:
 def write_last_error(task_path: Path, phase_number: int, message: str) -> None:
     runtime_dir = task_path / "context-pack" / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    (runtime_dir / f"phase{phase_number}-last-error.md").write_text(
+    atomic_write_text(
+        runtime_dir / f"phase{phase_number}-last-error.md",
         f"# Phase {phase_number} Last Error\n\n{message.rstrip()}\n",
-        encoding="utf-8",
     )
 
 
@@ -1027,6 +1025,31 @@ def lock_is_stale(path: Path) -> bool:
     return not process_is_alive(pid)
 
 
+def file_identity(path: Path) -> tuple[int, int, int, int]:
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+
+
+def remove_stale_lock(path: Path) -> bool:
+    try:
+        observed_identity = file_identity(path)
+    except FileNotFoundError:
+        return True
+    if not lock_is_stale(path):
+        return False
+    try:
+        current_identity = file_identity(path)
+    except FileNotFoundError:
+        return True
+    if current_identity != observed_identity:
+        return False
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return True
+
+
 def acquire_runner_lock(task_path: Path, dry_run: bool) -> Path | None:
     if dry_run:
         return None
@@ -1037,8 +1060,7 @@ def acquire_runner_lock(task_path: Path, dry_run: bool) -> Path | None:
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError as exc:
-            if lock_is_stale(path):
-                path.unlink(missing_ok=True)
+            if remove_stale_lock(path):
                 continue
             raise RuntimeError(f"Another run-phases process is active: {path}") from exc
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -1566,6 +1588,24 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
                 phase["error_message"] = "Phase result exists without a valid attempt commit."
     if changes and not dry_run:
         write_json(index_path, task_index)
+    return changes
+
+
+def reconcile_before_execution(root: Path, task_path: Path, args: argparse.Namespace) -> list[dict[str, object]]:
+    if getattr(args, "dry_run", False):
+        return []
+    if getattr(args, "from_phase", None) is not None or getattr(args, "resume_repair", False):
+        return []
+    changes = reconcile_runtime_projection(root, task_path, dry_run=False)
+    if changes:
+        append_progress(
+            task_path,
+            "runtime projection reconciled before execution: "
+            + ", ".join(
+                f"phase {item.get('phase')} {item.get('from_status')} -> {item.get('to_status')}"
+                for item in changes
+            ),
+        )
     return changes
 
 
@@ -2528,8 +2568,10 @@ def apply_phase_reset(
         write_json(index_path, task_index)
         update_top_index(root, task_path.name, "pending")
         for item in reset_results:
-            write_phase_reset_marker(task_path, int(item["phase"]), reset_at, from_phase)
-            clear_repair_packet(task_path, int(item["phase"]))
+            phase_number = int(item["phase"])
+            write_phase_reset_marker(task_path, phase_number, reset_at, from_phase)
+            phase_baseline_path(task_path, phase_number).unlink(missing_ok=True)
+            clear_repair_packet(task_path, phase_number)
     return None
 
 
@@ -2559,6 +2601,8 @@ def apply_repair_resume(root: Path, task_path: Path, dry_run: bool) -> dict | No
     if reset_results:
         write_json(index_path, task_index)
         update_top_index(root, task_path.name, "pending")
+        for item in reset_results:
+            phase_baseline_path(task_path, int(item["phase"])).unlink(missing_ok=True)
     return None
 
 
@@ -2683,12 +2727,19 @@ def execute_phase(
             attempts=attempt,
         )
         write_json(index_path, task_index)
+        phase_baseline = load_or_create_phase_baseline(
+            root,
+            task_path,
+            phase_number,
+            contract_repo_outputs(initial_contract or {}),
+        )
+        phase_start_snapshot = baseline_snapshot(phase_baseline)
+        phase_start_repo_outputs = baseline_required_repo_outputs(phase_baseline)
 
         output_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-output-attempt{attempt}.jsonl"
         stderr_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-stderr-attempt{attempt}.txt"
         clear_attempt_artifacts(task_path, phase_number)
         prompt_path.write_text(prompt, encoding="utf-8")
-        attempt_start_snapshot = worktree_snapshot(root)
         returncode = run_codex(
             root,
             task_path,
@@ -2713,7 +2764,7 @@ def execute_phase(
                 required_outputs = []
                 required_repo_outputs = []
             failed_snapshot = worktree_snapshot(root)
-            changed_files = phase_changed_paths(task_path, attempt_start_snapshot, failed_snapshot)
+            changed_files = phase_changed_paths(task_path, phase_start_snapshot, failed_snapshot)
             contaminating_changes = attempt_scope_violations(
                 contract,
                 task_path,
@@ -2811,7 +2862,7 @@ def execute_phase(
                 append_progress(task_path, f"phase {phase_number}: attempt {attempt} acceptance command failed")
                 write_ac_results(task_path, phase_number, attempt, command_results)
                 failed_snapshot = worktree_snapshot(root)
-                changed_files = phase_changed_paths(task_path, attempt_start_snapshot, failed_snapshot)
+                changed_files = phase_changed_paths(task_path, phase_start_snapshot, failed_snapshot)
                 contaminating_changes = attempt_scope_violations(
                     contract,
                     task_path,
@@ -2861,7 +2912,7 @@ def execute_phase(
                 message = "Missing required outputs: " + ", ".join(missing_outputs)
                 append_progress(task_path, f"phase {phase_number}: attempt {attempt} required outputs missing")
                 failed_snapshot = worktree_snapshot(root)
-                changed_files = phase_changed_paths(task_path, attempt_start_snapshot, failed_snapshot)
+                changed_files = phase_changed_paths(task_path, phase_start_snapshot, failed_snapshot)
                 contaminating_changes = attempt_scope_violations(
                     contract,
                     task_path,
@@ -2911,7 +2962,7 @@ def execute_phase(
                 message = "Missing required repo outputs: " + ", ".join(missing_repo_outputs)
                 append_progress(task_path, f"phase {phase_number}: attempt {attempt} required repo outputs missing")
                 failed_snapshot = worktree_snapshot(root)
-                changed_files = phase_changed_paths(task_path, attempt_start_snapshot, failed_snapshot)
+                changed_files = phase_changed_paths(task_path, phase_start_snapshot, failed_snapshot)
                 contaminating_changes = attempt_scope_violations(
                     contract,
                     task_path,
@@ -2957,7 +3008,7 @@ def execute_phase(
                 return False
 
             final_snapshot = worktree_snapshot(root)
-            changed_files = phase_changed_paths(task_path, attempt_start_snapshot, final_snapshot)
+            changed_files = phase_changed_paths(task_path, phase_start_snapshot, final_snapshot)
             quality_result = run_quality_checks(root, task_path, phase_number, changed_files)
             evidence = build_evidence(
                 root,
@@ -3036,7 +3087,7 @@ def execute_phase(
                 args.failed = True
                 return False
 
-            write_phase_result(
+            result_path = write_phase_result(
                 root=root,
                 task_path=task_path,
                 phase_number=phase_number,
@@ -3050,7 +3101,11 @@ def execute_phase(
                 output_path=output_path,
                 stderr_path=stderr_path,
                 ac_results=ac_results,
+                before_repo_outputs=phase_start_repo_outputs,
+                before_snapshot=phase_start_snapshot,
+                after_snapshot=final_snapshot,
             )
+            write_phase_attempt_commit(task_path, phase_number, attempt, result_path)
             append_progress(task_path, f"phase {phase_number}: attempt {attempt} completed")
 
             task_index = read_json(index_path)
@@ -3140,6 +3195,7 @@ def main() -> int:
             if args.resume_repair
             else apply_phase_reset(root, task_path, args.from_phase, args.dry_run)
         )
+        reconcile_before_execution(root, task_path, args)
 
         while True:
             progressed = execute_phase(root, task_path, args, task_index_override)

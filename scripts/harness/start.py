@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from codex_exec import add_output_schema, run_codex_exec
+from artifact_io import atomic_write_json
 from policy_pack import policy_pack_metadata
 from policy_lineage import design_approval_scope_sha256, policy_pack_lineage_sha256, stable_json_sha256
 
@@ -608,7 +609,7 @@ def generate_relationship_graph(root: Path, task_path: Path | None) -> dict[str,
 
 
 def write_json(path: Path, data: dict[str, object]) -> None:
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(path, data)
 
 
 def skill_version(skill_path: Path) -> str | None:

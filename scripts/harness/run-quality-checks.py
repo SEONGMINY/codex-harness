@@ -13,6 +13,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
+from artifact_io import atomic_write_json
 from command_policy import run_command
 from redaction import redact_text
 
@@ -55,8 +56,7 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def write_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(path, data)
 
 
 def run_capture(command: list[str], cwd: Path, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> tuple[int, str]:

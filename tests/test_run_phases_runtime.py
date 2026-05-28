@@ -70,6 +70,38 @@ class RunCodexRuntimeTest(unittest.TestCase):
 
         self.assertTrue(any("artifact_io.py" in error for error in errors), errors)
 
+    def test_write_json_uses_atomic_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            path = Path(raw_tmp) / "runtime" / "phase0-result.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"status":"old"}\n', encoding="utf-8")
+
+            with mock.patch.object(RUN_PHASES, "atomic_write_json", side_effect=OSError("replace failed")):
+                with self.assertRaises(OSError):
+                    RUN_PHASES.write_json(path, {"status": "new"})
+
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"status": "old"})
+
+    def test_stale_lock_reclaim_does_not_delete_replaced_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            lock_path = Path(raw_tmp) / "tasks" / "demo" / "context-pack" / "runtime" / "run-phases.lock"
+            lock_path.parent.mkdir(parents=True)
+            lock_path.write_text('{"pid":123,"started_at":"old"}\n', encoding="utf-8")
+
+            def replace_lock_before_unlink(_path: Path) -> bool:
+                lock_path.unlink()
+                lock_path.write_text(
+                    json.dumps({"pid": os.getpid(), "started_at": "fresh"}) + "\n",
+                    encoding="utf-8",
+                )
+                return True
+
+            with mock.patch.object(RUN_PHASES, "lock_is_stale", side_effect=replace_lock_before_unlink):
+                removed = RUN_PHASES.remove_stale_lock(lock_path)
+
+            self.assertFalse(removed)
+            self.assertEqual(json.loads(lock_path.read_text(encoding="utf-8"))["started_at"], "fresh")
+
     def test_run_shell_records_timeout_instead_of_raising(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             script = Path(raw_tmp) / "sleep.py"
@@ -524,6 +556,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed", "attempts": 1}]}) + "\n",
                 encoding="utf-8",
             )
+            RUN_PHASES.phase_baseline_path(task_path, 0).write_text('{"schema_version":1}\n', encoding="utf-8")
 
             RUN_PHASES.apply_phase_reset(root, task_path, from_phase=0, dry_run=False)
 
@@ -533,6 +566,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(marker["from_phase"], 0)
             self.assertEqual(task_index["phases"][0]["status"], "pending")
             self.assertEqual(task_index["phases"][0]["reset_at"], marker["reset_at"])
+            self.assertFalse(RUN_PHASES.phase_baseline_path(task_path, 0).exists())
 
     def test_runtime_projection_marks_completed_phase_without_commit_as_error(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -553,6 +587,23 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(changes[0]["reason"], "missing_attempt_commit")
             self.assertEqual(task_index["phases"][0]["status"], "error")
             self.assertIn("attempt commit", task_index["phases"][0]["error_message"])
+
+    def test_reconcile_before_execution_repairs_stale_running_state(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(dry_run=False, from_phase=None, resume_repair=False)
+
+            changes = RUN_PHASES.reconcile_before_execution(root, task_path, args)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            progress = (task_path / "context-pack" / "runtime" / "progress.md").read_text(encoding="utf-8")
+            self.assertEqual(changes[0]["reason"], "missing_attempt_commit")
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertIn("runtime projection reconciled before execution", progress)
 
     def static_content(self, filename: str) -> str:
         values = {
@@ -1640,6 +1691,121 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 task_path / "context-pack" / "runtime" / "phase0-last-error.md"
             ).read_text(encoding="utf-8")
             self.assertIn("outside.txt", last_error)
+
+    def test_execute_phase_success_writes_attempt_commit_and_uses_phase_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (task_path / "phases").mkdir(parents=True)
+            (task_path / "context-pack" / "handoffs").mkdir(parents=True)
+            subprocess.run(["git", "init"], cwd=root, text=True, capture_output=True, check=False)
+            contract = {
+                "phase": 0,
+                "name": "demo",
+                "read_first": {"docs": [], "previous_outputs": []},
+                "scope": {"layer": "app", "allowed_paths": ["src/**"]},
+                "interfaces": [],
+                "decision_refs": [],
+                "architecture_refs": [],
+                "dependency_policy": {
+                    "new_dependencies": "forbidden",
+                    "approved_new_dependencies": [],
+                    "approved_dependency_manifest_changes": [],
+                },
+                "instructions": [
+                    {
+                        "id": "P0-001",
+                        "task": "Create app output.",
+                        "expected_evidence": ["src/app.py"],
+                    }
+                ],
+                "success_criteria": ["The app output exists."],
+                "stop_rules": ["Stop if required context is missing."],
+                "fallback_behavior": {
+                    "if_blocked": "Write the blocker to the handoff.",
+                    "if_tests_fail": "Fix failures inside allowed_paths.",
+                },
+                "validation_budget": {
+                    "max_attempts": 2,
+                    "command_timeout_seconds": 600,
+                },
+                "missing_evidence_behavior": "Treat missing evidence as unresolved.",
+                "acceptance_commands": ["true"],
+                "required_outputs": ["context-pack/handoffs/phase0.md"],
+                "required_repo_outputs": ["src/app.py"],
+                "forbidden": [
+                    {
+                        "rule": "Do not update task status.",
+                        "reason": "The runner owns status.",
+                    }
+                ],
+            }
+            (task_path / "phases" / "phase0.md").write_text(
+                "# Phase 0: demo\n\n## Contract\n\n```json\n"
+                + json.dumps(contract, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "docs": [],
+                        "common_docs": [],
+                        "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    sys.stdin.read()
+                    from pathlib import Path
+                    Path.cwd().joinpath("src/app.py").parent.mkdir(parents=True, exist_ok=True)
+                    Path.cwd().joinpath("src/app.py").write_text("ok\\n", encoding="utf-8")
+                    Path.cwd().joinpath("tasks/demo/context-pack/handoffs/phase0.md").write_text(
+                        "# Handoff\\n\\n## Change Trace\\n\\n- `src/app.py`: `P0-001`\\n",
+                        encoding="utf-8",
+                    )
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=3,
+                ac_timeout=600,
+                codex_bin=str(fake),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(
+                    RUN_PHASES,
+                    "run_quality_checks",
+                    return_value={"status": "passed", "checks": [], "blocking_reasons": []},
+                ),
+            ):
+                self.assertTrue(RUN_PHASES.execute_phase(root, task_path, args))
+
+            result = json.loads(RUN_PHASES.phase_result_path(task_path, 0).read_text(encoding="utf-8"))
+            commit_path = task_path / result["artifacts"]["attempt_commit"]
+            commit = json.loads(commit_path.read_text(encoding="utf-8"))
+            baseline = json.loads(RUN_PHASES.phase_baseline_path(task_path, 0).read_text(encoding="utf-8"))
+            self.assertEqual(result["repo_content"]["required_repo_outputs"][0]["before"]["exists"], False)
+            self.assertEqual(commit["result"]["sha256"], RUN_PHASES.file_sha256(RUN_PHASES.phase_result_path(task_path, 0)))
+            self.assertIn("src/app.py", result["changed_files"])
+            self.assertEqual(baseline["required_repo_outputs"][0]["path"], "src/app.py")
 
     def test_execute_phase_stops_retry_when_scope_cleanup_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

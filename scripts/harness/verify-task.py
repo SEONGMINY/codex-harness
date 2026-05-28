@@ -1148,6 +1148,8 @@ def validate_phase_result(
     expected_commands: list[str],
     expected_outputs: list[str],
     expected_repo_outputs: list[str],
+    *,
+    strict_current_harness: bool = False,
 ) -> list[str]:
     result_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-result.json"
     if not result_path.exists():
@@ -1202,6 +1204,29 @@ def validate_phase_result(
         errors.append("Phase result artifacts must include attempt_commit.")
     elif isinstance(attempt, int):
         errors.extend(validate_phase_attempt_commit(root, task_path, phase_number, attempt, result_path, result, artifacts))
+    if isinstance(attempt, int):
+        try:
+            contract = json.loads(
+                (task_path / "context-pack" / "runtime" / f"phase{phase_number}-contract.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (OSError, json.JSONDecodeError):
+            contract = {}
+        if isinstance(contract, dict) and contract.get("closes_obligations"):
+            if "obligation_closure" not in artifacts:
+                errors.append("Phase result artifacts must include obligation_closure for closed design obligations.")
+            else:
+                errors.extend(
+                    validate_obligation_closure_ledger(
+                        root,
+                        task_path,
+                        phase_number,
+                        attempt,
+                        artifacts,
+                        strict_current_harness=strict_current_harness,
+                    )
+                )
     return errors
 
 
@@ -1533,6 +1558,7 @@ def verify(
                     expected_commands,
                     expected_outputs,
                     expected_repo_outputs,
+                    strict_current_harness=strict_current_harness,
                 )
             )
             errors.extend(require_file(root, runtime_dir / f"phase{phase_number}-prompt.md", "runtime prompt"))

@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from artifact_io import atomic_write_json, atomic_write_text
+
 from decision_registry import load_decision_registry
 from phase_contract import (
     contract_acceptance_commands,
@@ -96,11 +98,8 @@ def write_relationship_graph_outputs(root: Path, task_path: Path) -> dict[str, A
     try:
         paths["json"].parent.mkdir(parents=True, exist_ok=True)
         graph = graph_from_task(root, task_path)
-        paths["json"].write_text(
-            json.dumps(graph, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        paths["mermaid"].write_text(to_mermaid(graph), encoding="utf-8")
+        atomic_write_json(paths["json"], graph)
+        atomic_write_text(paths["mermaid"], to_mermaid(graph))
         paths["warning"].unlink(missing_ok=True)
         return {
             "status": "generated",
@@ -122,10 +121,7 @@ def write_relationship_graph_outputs(root: Path, task_path: Path) -> dict[str, A
         warning_path: str | None = None
         try:
             paths["warning"].parent.mkdir(parents=True, exist_ok=True)
-            paths["warning"].write_text(
-                json.dumps(warning, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            atomic_write_json(paths["warning"], warning)
             warning_path = output_rel(root, paths["warning"])
         except OSError as warning_exc:
             warning["warning_error"] = str(warning_exc)
