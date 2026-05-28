@@ -12,10 +12,42 @@ from pathlib import Path
 from typing import Iterable
 
 from codex_exec import add_output_schema, run_codex_exec
+from command_policy import run_command
+from harness_attestation import harness_attestation
+from policy_pack import policy_pack_metadata
+from policy_lineage import policy_pack_fingerprint, validate_current_policy_lineage
 
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
+
+
+def runtime_policy_pack() -> dict[str, str]:
+    return policy_pack_metadata()
+
+
+def current_policy_lineage_errors(task_path: Path) -> list[str]:
+    approval_path = task_path / "context-pack" / "static" / "design-approval.json"
+    if not approval_path.exists():
+        return []
+    try:
+        approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"Invalid design approval JSON before evaluation: {exc}"]
+    current = policy_pack_fingerprint(runtime_policy_pack())
+    return validate_current_policy_lineage(approval, current, action_label="evaluation")
+
+
+def design_approval_scope_sha(task_path: Path) -> str | None:
+    approval_path = task_path / "context-pack" / "static" / "design-approval.json"
+    if not approval_path.exists():
+        return None
+    try:
+        approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    value = approval.get("design_approval_scope_sha256") if isinstance(approval, dict) else None
+    return value if isinstance(value, str) and value else None
 
 
 def now() -> str:
@@ -53,20 +85,12 @@ def run_capture(args: list[str], cwd: Path, max_chars: int = 120_000) -> str:
 
 
 def run_shell(command: str, cwd: Path, timeout: int) -> dict:
-    result = subprocess.run(
-        command,
-        cwd=cwd,
-        shell=True,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
-    output = (result.stdout + result.stderr).strip()
+    code, output, timed_out, _argv = run_command(command, cwd, timeout)
     return {
         "command": command,
-        "returncode": result.returncode,
+        "returncode": code,
         "output": output,
+        "timed_out": timed_out,
     }
 
 
@@ -76,6 +100,8 @@ def collect_files(root: Path, paths: Iterable[Path], max_bytes: int) -> str:
         if not path.exists() or not path.is_file() or path.suffix not in TEXT_EXTENSIONS:
             continue
         rel = path.relative_to(root)
+        if rel.as_posix().endswith("context-pack/static/design-approval.json"):
+            continue
         data = path.read_text(encoding="utf-8", errors="replace")
         if len(data.encode("utf-8")) > max_bytes:
             data = data[:max_bytes] + "\n\n[truncated]\n"
@@ -253,8 +279,15 @@ def main() -> int:
     command_results = [run_shell(command, root, args.timeout) for command in commands]
 
     results_path = runtime_dir / "evaluation-command-results.json"
+    metadata = {
+        "schema_version": 1,
+        "policy_pack": runtime_policy_pack(),
+        "harness_attestation": harness_attestation(),
+        "design_approval_scope_sha256": design_approval_scope_sha(task_path),
+        "commands": command_results,
+    }
     results_path.write_text(
-        json.dumps(command_results, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 

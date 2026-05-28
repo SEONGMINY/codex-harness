@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -64,6 +66,103 @@ class EvaluateTaskTest(unittest.TestCase):
 
             self.assertEqual(returncode, 0, stderr_path.read_text(encoding="utf-8"))
             self.assertIn('{"event":"done"}', output_path.read_text(encoding="utf-8"))
+
+    def test_dry_run_writes_metadata_object_without_prompting_on_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            static_dir = task_path / "context-pack" / "static"
+            static_dir.mkdir(parents=True)
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "docs": [],
+                        "common_docs": [],
+                        "evaluation_commands": ["true"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            active_policy_pack = {
+                key: value
+                for key, value in EVALUATE_TASK.runtime_policy_pack().items()
+                if key in {"id", "schema_version", "sha256"}
+            }
+            (static_dir / "design-approval.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "active_policy_pack": active_policy_pack,
+                        "approved_policy_packs": [active_policy_pack],
+                        "approved_bundle_sha256": "bundle-sha",
+                        "design_approval_scope_sha256": "scope-sha",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(HARNESS_DIR / "evaluate-task.py"),
+                    "demo",
+                    "--root",
+                    str(root),
+                    "--dry-run",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            command_results = json.loads(
+                (task_path / "context-pack" / "runtime" / "evaluation-command-results.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(command_results["schema_version"], 1)
+            self.assertIn("policy_pack", command_results)
+            self.assertIn("harness_attestation", command_results)
+            self.assertEqual(command_results["design_approval_scope_sha256"], "scope-sha")
+            self.assertEqual(command_results["commands"][0]["command"], "true")
+            prompt = (task_path / "context-pack" / "runtime" / "evaluation-prompt.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("policy_pack", prompt)
+            self.assertIn('"command": "true"', prompt)
+
+    def test_current_policy_lineage_errors_rejects_unapproved_evaluation_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            task_path = Path(raw_tmp) / "tasks" / "demo"
+            static_dir = task_path / "context-pack" / "static"
+            static_dir.mkdir(parents=True)
+            current = {
+                key: value
+                for key, value in EVALUATE_TASK.runtime_policy_pack().items()
+                if key in {"id", "schema_version", "sha256"}
+            }
+            stale = dict(current)
+            stale["sha256"] = "stale"
+            (static_dir / "design-approval.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "active_policy_pack": stale,
+                        "approved_policy_packs": [stale],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            errors = EVALUATE_TASK.current_policy_lineage_errors(task_path)
+
+            self.assertTrue(any("active_policy_pack" in error for error in errors), errors)
 
 
 if __name__ == "__main__":

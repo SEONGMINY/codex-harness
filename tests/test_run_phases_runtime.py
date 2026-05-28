@@ -26,9 +26,534 @@ assert SPEC is not None
 RUN_PHASES = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(RUN_PHASES)
+import env_policy  # noqa: E402
 
 
 class RunCodexRuntimeTest(unittest.TestCase):
+    def test_runner_install_check_requires_runtime_helper_files(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            scripts = root / ".codex" / "harness" / "scripts"
+            (scripts / "schemas").mkdir(parents=True)
+            (scripts / "policy-packs").mkdir(parents=True)
+            (root / "codex-harness.json").write_text(
+                json.dumps({"name": "codex-harness", "version": RUN_PHASES.HARNESS_VERSION}) + "\n",
+                encoding="utf-8",
+            )
+            for raw_path in [
+                "artifact_io.py",
+                "codex_exec.py",
+                "command_policy.py",
+                "decision_registry.py",
+                "env_policy.py",
+                "evidence_obligations.py",
+                "evaluate-task.py",
+                "obligation_ledger.py",
+                "phase_contract.py",
+                "phase_semantics.py",
+                "policy_pack.py",
+                "reference_resolver.py",
+                "redaction.py",
+                "run-phases.py",
+                "verify-task.py",
+                "run-quality-checks.py",
+                "relationship_graph.py",
+                "policy-packs/default-security.json",
+                "schemas/phase-final.schema.json",
+                "schemas/evaluation-final.schema.json",
+            ]:
+                (scripts / raw_path).parent.mkdir(parents=True, exist_ok=True)
+                (scripts / raw_path).write_text("{}\n", encoding="utf-8")
+            (scripts / "artifact_io.py").unlink()
+
+            errors = RUN_PHASES.harness_install_errors(root)
+
+        self.assertTrue(any("artifact_io.py" in error for error in errors), errors)
+
+    def test_run_shell_records_timeout_instead_of_raising(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            script = Path(raw_tmp) / "sleep.py"
+            script.write_text("import time\ntime.sleep(2)\n", encoding="utf-8")
+            returncode, output, timed_out = RUN_PHASES.run_shell(
+                f"{sys.executable} {script}",
+                Path(raw_tmp),
+                1,
+            )
+
+            self.assertEqual(returncode, 124)
+            self.assertTrue(timed_out)
+            self.assertIn("timeout", output)
+
+    def test_run_shell_rejects_shell_control_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            returncode, output, timed_out = RUN_PHASES.run_shell(
+                "echo ok && echo unsafe",
+                Path(raw_tmp),
+                10,
+            )
+
+            self.assertEqual(returncode, 126)
+            self.assertFalse(timed_out)
+            self.assertIn("command-policy", output)
+
+    def test_run_shell_redacts_secret_output(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            script = Path(raw_tmp) / "print_secret.py"
+            script.write_text('print("API_KEY=sk-1234567890abcdefghijklmnop")\n', encoding="utf-8")
+            returncode, output, timed_out = RUN_PHASES.run_shell(
+                f"{sys.executable} {script}",
+                Path(raw_tmp),
+                10,
+            )
+
+            self.assertEqual(returncode, 0)
+            self.assertFalse(timed_out)
+            self.assertIn("[REDACTED]", output)
+            self.assertNotIn("sk-1234567890abcdefghijklmnop", output)
+
+    def test_env_policy_drops_sensitive_env_and_preserves_known_harness_env(self) -> None:
+        env = env_policy.sanitized_env(
+            {
+                "PATH": "/bin",
+                "HARNESS_SECRET_TOKEN": "secret",
+                "OPENAI_API_KEY": "secret",
+                "CODEX_HARNESS_ACTIVE": "1",
+                "CODEX_HARNESS_UNKNOWN_CONTROL": "unsafe",
+            }
+        )
+
+        self.assertEqual(env["PATH"], "/bin")
+        self.assertEqual(env["CODEX_HARNESS_ACTIVE"], "1")
+        self.assertNotIn("CODEX_HARNESS_UNKNOWN_CONTROL", env)
+        self.assertNotIn("HARNESS_SECRET_TOKEN", env)
+        self.assertNotIn("OPENAI_API_KEY", env)
+
+    def test_run_shell_does_not_inherit_sensitive_env(self) -> None:
+        old_value = os.environ.get("HARNESS_MARKER")
+        os.environ["HARNESS_MARKER"] = "secret"
+        try:
+            with tempfile.TemporaryDirectory() as raw_tmp:
+                script = Path(raw_tmp) / "print_env.py"
+                script.write_text(
+                    'import os\nprint(os.environ.get("HARNESS_MARKER", "missing"))\n',
+                    encoding="utf-8",
+                )
+                returncode, output, timed_out = RUN_PHASES.run_shell(
+                    f"{sys.executable} {script}",
+                    Path(raw_tmp),
+                    10,
+                )
+        finally:
+            if old_value is None:
+                os.environ.pop("HARNESS_MARKER", None)
+            else:
+                os.environ["HARNESS_MARKER"] = old_value
+
+        self.assertEqual(returncode, 0)
+        self.assertFalse(timed_out)
+        self.assertEqual(output, "missing")
+
+    def test_phase_codex_child_does_not_inherit_sensitive_env(self) -> None:
+        old_value = os.environ.get("HARNESS_MARKER")
+        os.environ["HARNESS_MARKER"] = "secret"
+        try:
+            with tempfile.TemporaryDirectory() as raw_tmp:
+                tmp = Path(raw_tmp)
+                root, task_path = self.make_task(tmp)
+                fake = self.make_fake_codex(
+                    tmp,
+                    textwrap.dedent(
+                        """
+                        import os
+                        assert os.environ.get("CODEX_HARNESS_ACTIVE") == "1"
+                        assert "HARNESS_MARKER" not in os.environ
+                        sys.stdin.read()
+                        raise SystemExit(0)
+                        """
+                    ),
+                )
+                output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+                stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+                returncode = RUN_PHASES.run_codex(
+                    root,
+                    task_path,
+                    1,
+                    "prompt",
+                    output_path,
+                    stderr_path,
+                    str(fake),
+                    False,
+                    False,
+                    10,
+                )
+                stderr_text = stderr_path.read_text(encoding="utf-8")
+        finally:
+            if old_value is None:
+                os.environ.pop("HARNESS_MARKER", None)
+            else:
+                os.environ["HARNESS_MARKER"] = old_value
+
+        self.assertEqual(returncode, 0, stderr_text)
+
+    def test_phase_attempt_commit_records_result_and_artifact_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            paths = {
+                "contract": RUN_PHASES.phase_contract_path(task_path, 0),
+                "checklist": RUN_PHASES.phase_checklist_path(task_path, 0),
+                "prompt": runtime / "phase0-prompt.md",
+                "stdout": runtime / "phase0-output-attempt1.jsonl",
+                "stderr": runtime / "phase0-stderr-attempt1.txt",
+                "ac": RUN_PHASES.ac_results_path(task_path, 0, 1),
+                "quality": RUN_PHASES.phase_quality_path(task_path, 0),
+                "handoff": RUN_PHASES.phase_handoff_path(task_path, 0),
+                "evidence": RUN_PHASES.phase_evidence_path(task_path, 0),
+                "gate": RUN_PHASES.phase_gate_path(task_path, 0),
+                "reconciliation": RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                "reconciliation_summary": RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+            }
+            for name, path in paths.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"{name}\n", encoding="utf-8")
+            (task_path / "context-pack" / "static").mkdir(parents=True, exist_ok=True)
+            (task_path / "context-pack" / "static" / "design-approval.json").write_text(
+                '{"approved_bundle_sha256":"approved-bundle"}\n',
+                encoding="utf-8",
+            )
+            repo_output = root / "src" / "generated.py"
+            repo_output.parent.mkdir(parents=True, exist_ok=True)
+            repo_output.write_text("before\n", encoding="utf-8")
+            before_repo_outputs = RUN_PHASES.required_repo_output_content_results(
+                root,
+                ["src/generated.py"],
+            )
+            before_snapshot = {"src/generated.py": RUN_PHASES.file_digest(repo_output)}
+            repo_output.write_text("after\n", encoding="utf-8")
+            after_snapshot = {"src/generated.py": RUN_PHASES.file_digest(repo_output)}
+
+            result_path = RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                1,
+                0,
+                [],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                ["src/generated.py"],
+                paths["prompt"],
+                paths["stdout"],
+                paths["stderr"],
+                paths["ac"],
+                before_repo_outputs,
+                before_snapshot,
+                after_snapshot,
+            )
+            commit_path = RUN_PHASES.write_phase_attempt_commit(task_path, 0, 1, result_path)
+
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            commit = json.loads(commit_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["artifacts"]["attempt_commit"], "context-pack/runtime/phase0-attempt1-commit.json")
+            self.assertEqual(commit["schema_version"], 1)
+            self.assertEqual(commit["commit_scope"], "runtime_attempt_bundle")
+            self.assertEqual(commit["status"], "committed")
+            self.assertEqual(result["design_approval_bundle_sha256"], "approved-bundle")
+            self.assertEqual(commit["design_approval_bundle_sha256"], "approved-bundle")
+            self.assertEqual(commit["result"]["path"], "context-pack/runtime/phase0-result.json")
+            self.assertEqual(commit["result"]["sha256"], RUN_PHASES.file_sha256(result_path))
+            self.assertEqual(commit["artifact_count"], len(commit["artifacts"]))
+            by_name = {item["name"]: item for item in commit["artifacts"]}
+            self.assertEqual(by_name["gate"]["sha256"], RUN_PHASES.file_sha256(paths["gate"]))
+            self.assertEqual(commit["repo_content"], result["repo_content"])
+            self.assertEqual(
+                commit["repo_content"]["required_repo_outputs"][0]["before"]["sha256"],
+                before_repo_outputs[0]["sha256"],
+            )
+            self.assertEqual(
+                commit["repo_content"]["required_repo_outputs"][0]["after"]["sha256"],
+                RUN_PHASES.file_sha256(repo_output),
+            )
+            self.assertEqual(
+                commit["repo_content"]["changed_files_digest"],
+                RUN_PHASES.stable_json_sha256(commit["repo_content"]["changed_files"]),
+            )
+
+    def test_phase_result_records_runner_owned_obligation_assertion_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            static = task_path / "context-pack" / "static"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            static.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            paths = {
+                "contract": RUN_PHASES.phase_contract_path(task_path, 0),
+                "checklist": RUN_PHASES.phase_checklist_path(task_path, 0),
+                "prompt": runtime / "phase0-prompt.md",
+                "stdout": runtime / "phase0-output-attempt1.jsonl",
+                "stderr": runtime / "phase0-stderr-attempt1.txt",
+                "ac": RUN_PHASES.ac_results_path(task_path, 0, 1),
+                "quality": RUN_PHASES.phase_quality_path(task_path, 0),
+                "handoff": RUN_PHASES.phase_handoff_path(task_path, 0),
+                "evidence": RUN_PHASES.phase_evidence_path(task_path, 0),
+                "gate": RUN_PHASES.phase_gate_path(task_path, 0),
+                "reconciliation": RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                "reconciliation_summary": RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+            }
+            for name, path in paths.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"{name}\n", encoding="utf-8")
+            paths["contract"].write_text(
+                json.dumps(
+                    {
+                        "phase": 0,
+                        "closes_obligations": ["obl.acceptance"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (static / "design-contract.json").write_text(
+                json.dumps(
+                    {
+                        "obligations": [
+                            {
+                                "id": "obl.acceptance",
+                                "class": "acceptance_validity",
+                                "trigger": "Acceptance command required.",
+                                "closure_condition": "Boundary command emits exact proof line.",
+                                "required_command_roles": ["acceptance"],
+                                "closure_command_refs": ["unit-tests"],
+                                "closure_output_assertions": [
+                                    {"type": "exact_line", "value": "BOUNDARY_OK"}
+                                ],
+                            }
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result_path = RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                1,
+                0,
+                [],
+                [
+                    {
+                        "id": "unit-tests",
+                        "role": "acceptance",
+                        "command": "python3 -m unittest",
+                        "exit_code": 0,
+                        "output": "setup\nBOUNDARY_OK\nteardown",
+                    }
+                ],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                paths["prompt"],
+                paths["stdout"],
+                paths["stderr"],
+                paths["ac"],
+            )
+
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["schema_version"], 1)
+            self.assertEqual(result["runner_version"], RUN_PHASES.HARNESS_VERSION)
+            self.assertNotIn("obligation_closure_assertions", result)
+            self.assertEqual(
+                result["artifacts"]["obligation_closure"],
+                "context-pack/runtime/phase0-obligation-closure-attempt1.json",
+            )
+            ledger = json.loads(
+                (task_path / result["artifacts"]["obligation_closure"]).read_text(encoding="utf-8")
+            )
+            assertion = ledger["assertions"][0]
+            self.assertEqual(ledger["phase"], 0)
+            self.assertEqual(ledger["attempt"], 1)
+            self.assertEqual(assertion["obligation_id"], "obl.acceptance")
+            self.assertEqual(assertion["command_ref"], "unit-tests")
+            self.assertEqual(assertion["attempt"], 1)
+            self.assertEqual(assertion["runner_version"], RUN_PHASES.HARNESS_VERSION)
+            self.assertEqual(
+                assertion["phase_contract_sha256"],
+                RUN_PHASES.file_sha256(paths["contract"]),
+            )
+            self.assertEqual(
+                assertion["design_contract_sha256"],
+                RUN_PHASES.file_sha256(static / "design-contract.json"),
+            )
+            self.assertIn("command_output_sha256", assertion)
+            self.assertTrue(assertion["passed"])
+            self.assertNotIn("BOUNDARY_OK", json.dumps(ledger))
+
+    def test_runtime_projection_reconciles_running_phase_with_valid_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            paths = {
+                "contract": RUN_PHASES.phase_contract_path(task_path, 0),
+                "checklist": RUN_PHASES.phase_checklist_path(task_path, 0),
+                "prompt": runtime / "phase0-prompt.md",
+                "stdout": runtime / "phase0-output-attempt1.jsonl",
+                "stderr": runtime / "phase0-stderr-attempt1.txt",
+                "ac": RUN_PHASES.ac_results_path(task_path, 0, 1),
+                "quality": RUN_PHASES.phase_quality_path(task_path, 0),
+                "handoff": RUN_PHASES.phase_handoff_path(task_path, 0),
+                "evidence": RUN_PHASES.phase_evidence_path(task_path, 0),
+                "gate": RUN_PHASES.phase_gate_path(task_path, 0),
+                "reconciliation": RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                "reconciliation_summary": RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+            }
+            for name, path in paths.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"{name}\n", encoding="utf-8")
+            result_path = RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                1,
+                0,
+                [],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                paths["prompt"],
+                paths["stdout"],
+                paths["stderr"],
+                paths["ac"],
+            )
+            RUN_PHASES.write_phase_attempt_commit(task_path, 0, 1, result_path)
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "running", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(changes[0]["reason"], "valid_attempt_commit")
+            self.assertEqual(task_index["phases"][0]["status"], "completed")
+            self.assertEqual(task_index["phases"][0]["attempts"], 1)
+
+    def test_runtime_projection_ignores_attempt_commit_before_reset_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            paths = {
+                "contract": RUN_PHASES.phase_contract_path(task_path, 0),
+                "checklist": RUN_PHASES.phase_checklist_path(task_path, 0),
+                "prompt": runtime / "phase0-prompt.md",
+                "stdout": runtime / "phase0-output-attempt1.jsonl",
+                "stderr": runtime / "phase0-stderr-attempt1.txt",
+                "ac": RUN_PHASES.ac_results_path(task_path, 0, 1),
+                "quality": RUN_PHASES.phase_quality_path(task_path, 0),
+                "handoff": RUN_PHASES.phase_handoff_path(task_path, 0),
+                "evidence": RUN_PHASES.phase_evidence_path(task_path, 0),
+                "gate": RUN_PHASES.phase_gate_path(task_path, 0),
+                "reconciliation": RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                "reconciliation_summary": RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+            }
+            for name, path in paths.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"{name}\n", encoding="utf-8")
+            result_path = RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                1,
+                0,
+                [],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                paths["prompt"],
+                paths["stdout"],
+                paths["stderr"],
+                paths["ac"],
+            )
+            RUN_PHASES.write_phase_attempt_commit(task_path, 0, 1, result_path)
+            RUN_PHASES.write_phase_reset_marker(task_path, 0, "9999-01-01T00:00:00+00:00", 0)
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "phases": [
+                            {
+                                "phase": 0,
+                                "name": "demo",
+                                "status": "pending",
+                                "attempts": 0,
+                                "reset_at": "9999-01-01T00:00:00+00:00",
+                            }
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(changes, [])
+            self.assertEqual(task_index["phases"][0]["status"], "pending")
+            self.assertEqual(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 0), None)
+
+    def test_phase_reset_writes_marker_to_invalidate_previous_attempt_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (root / "tasks").mkdir(parents=True, exist_ok=True)
+            (root / "tasks" / "index.json").write_text(
+                json.dumps({"tasks": [{"dir": "demo", "status": "completed"}]}) + "\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            RUN_PHASES.apply_phase_reset(root, task_path, from_phase=0, dry_run=False)
+
+            marker = json.loads(RUN_PHASES.phase_reset_marker_path(task_path, 0).read_text(encoding="utf-8"))
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(marker["phase"], 0)
+            self.assertEqual(marker["from_phase"], 0)
+            self.assertEqual(task_index["phases"][0]["status"], "pending")
+            self.assertEqual(task_index["phases"][0]["reset_at"], marker["reset_at"])
+
+    def test_runtime_projection_marks_completed_phase_without_commit_as_error(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (root / "tasks").mkdir(parents=True, exist_ok=True)
+            (root / "tasks" / "index.json").write_text(
+                json.dumps({"tasks": [{"dir": "demo", "status": "running"}]}) + "\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(changes[0]["reason"], "missing_attempt_commit")
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertIn("attempt commit", task_index["phases"][0]["error_message"])
+
     def static_content(self, filename: str) -> str:
         values = {
             "decisions.json": {"decisions": [{"id": "D-001", "status": "approved", "summary": "Approved."}]},
@@ -241,6 +766,107 @@ class RunCodexRuntimeTest(unittest.TestCase):
             quality_check = [item for item in gate["checks"] if item["name"] == "quality"][0]
             self.assertEqual(quality_check["status"], "failed")
 
+    def test_phase_gate_fails_on_missing_expected_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            contract = {
+                "scope": {"allowed_paths": ["src/**"]},
+                "dependency_policy": {"new_dependencies": "forbidden"},
+                "instructions": [
+                    {
+                        "id": "I-1",
+                        "task": "Create implementation file",
+                        "expected_evidence": ["src/created.py"],
+                    }
+                ],
+            }
+            evidence = RUN_PHASES.build_evidence(
+                root=root,
+                phase_number=0,
+                attempt=1,
+                changed_files=[],
+                command_results=[{"command": "true", "exit_code": 0}],
+                required_outputs=[],
+                required_repo_outputs=[],
+                task_path=task_path,
+            )
+
+            gate = RUN_PHASES.build_gate(
+                root=root,
+                task_path=task_path,
+                phase_number=0,
+                contract=contract,
+                changed_files=[],
+                command_results=[{"command": "true", "exit_code": 0}],
+                required_outputs=[],
+                required_repo_outputs=[],
+                handoff_reasons=[],
+                handoff_trace_errors=[],
+                evidence=evidence,
+            )
+            reconciliation = RUN_PHASES.build_reconciliation(contract, evidence, gate)
+
+            self.assertEqual(gate["status"], "failed")
+            self.assertIn(
+                "One or more instruction expected_evidence entries were not observed.",
+                gate["blocking_reasons"],
+            )
+            evidence_check = [item for item in gate["checks"] if item["name"] == "expected_evidence"][0]
+            self.assertEqual(evidence_check["status"], "failed")
+            self.assertEqual(evidence_check["failures"][0]["missing_expected_evidence"], ["src/created.py"])
+            self.assertEqual(reconciliation["status"], "blocked")
+
+    def test_expected_evidence_matches_command_id_and_required_repo_output(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            repo_output = root / "src" / "existing.py"
+            repo_output.parent.mkdir(parents=True)
+            repo_output.write_text("ok\n", encoding="utf-8")
+            contract = {
+                "scope": {"allowed_paths": ["src/**"]},
+                "dependency_policy": {"new_dependencies": "forbidden"},
+                "instructions": [
+                    {
+                        "id": "I-1",
+                        "task": "Validate with named command and required output",
+                        "expected_evidence": ["unit-tests", "src/existing.py"],
+                    }
+                ],
+            }
+            evidence = RUN_PHASES.build_evidence(
+                root=root,
+                phase_number=0,
+                attempt=1,
+                changed_files=[],
+                command_results=[{"command": "python3 -m unittest", "id": "unit-tests", "exit_code": 0}],
+                required_outputs=[],
+                required_repo_outputs=["src/existing.py"],
+                task_path=task_path,
+            )
+
+            gate = RUN_PHASES.build_gate(
+                root=root,
+                task_path=task_path,
+                phase_number=0,
+                contract=contract,
+                changed_files=[],
+                command_results=[{"command": "python3 -m unittest", "id": "unit-tests", "exit_code": 0}],
+                required_outputs=[],
+                required_repo_outputs=["src/existing.py"],
+                handoff_reasons=[],
+                handoff_trace_errors=[],
+                evidence=evidence,
+            )
+            reconciliation = RUN_PHASES.build_reconciliation(contract, evidence, gate)
+
+            self.assertEqual(gate["status"], "passed")
+            evidence_check = [item for item in gate["checks"] if item["name"] == "expected_evidence"][0]
+            self.assertEqual(evidence_check["status"], "passed")
+            self.assertEqual(reconciliation["status"], "satisfied")
+            self.assertEqual(reconciliation["instruction_results"][0]["status"], "satisfied")
+
     def test_execute_phase_blocks_when_task_verification_fails(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -276,7 +902,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             ):
                 self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
 
-            verify_task.assert_called_once_with(root, task_path)
+            verify_task.assert_called_once_with(root, task_path, strict_current_harness=False)
             self.assertTrue(args.failed)
             last_error = (
                 task_path / "context-pack" / "runtime" / "phase0-last-error.md"
@@ -354,6 +980,10 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 with mock.patch.object(RUN_PHASES.subprocess, "run", side_effect=fake_run):
                     self.assertEqual(RUN_PHASES.verify_task(root, task_path), 0)
                     self.assertEqual(RUN_PHASES.verify_task(root, task_path, require_evaluation=True), 0)
+                    self.assertEqual(
+                        RUN_PHASES.verify_task(root, task_path, strict_current_harness=True),
+                        0,
+                    )
                     self.assertEqual(RUN_PHASES.run_evaluation(root, task_path, args), 0)
             finally:
                 RUN_PHASES.SCRIPT_DIR = original_script_dir
@@ -363,11 +993,97 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertIn("--require-design-approval", calls[0])
             self.assertIn("--require-design-approval", calls[1])
             self.assertIn("--require-evaluation", calls[1])
-            self.assertEqual(calls[2][1], str(installed_scripts / "evaluate-task.py"))
-            self.assertIn("--command", calls[2])
-            self.assertIn("npm test", calls[2])
-            self.assertIn("--full-auto", calls[2])
-            self.assertIn("--yolo", calls[2])
+            self.assertIn("--require-design-approval", calls[2])
+            self.assertIn("--strict-current-harness", calls[2])
+            self.assertEqual(calls[3][1], str(installed_scripts / "evaluate-task.py"))
+            self.assertIn("--command", calls[3])
+            self.assertIn("npm test", calls[3])
+            self.assertIn("--full-auto", calls[3])
+            self.assertIn("--yolo", calls[3])
+
+    def test_current_policy_lineage_errors_rejects_unapproved_current_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            _, task_path = self.make_task(Path(raw_tmp))
+            static_dir = task_path / "context-pack" / "static"
+            static_dir.mkdir(parents=True, exist_ok=True)
+            current = RUN_PHASES.policy_pack_fingerprint(RUN_PHASES.runtime_policy_pack())
+            self.assertIsNotNone(current)
+            assert current is not None
+            stale = dict(current)
+            stale["sha256"] = "stale"
+            (static_dir / "design-approval.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "active_policy_pack": stale,
+                        "approved_policy_packs": [stale],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            errors = RUN_PHASES.current_policy_lineage_errors(task_path)
+
+            self.assertTrue(any("active_policy_pack" in error for error in errors), errors)
+
+    def test_runtime_projection_does_not_recover_revoked_policy_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            static_dir = task_path / "context-pack" / "static"
+            runtime_dir = task_path / "context-pack" / "runtime"
+            static_dir.mkdir(parents=True, exist_ok=True)
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            current = RUN_PHASES.policy_pack_fingerprint(RUN_PHASES.runtime_policy_pack())
+            self.assertIsNotNone(current)
+            assert current is not None
+            (static_dir / "design-approval.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "active_policy_pack": current,
+                        "approved_policy_packs": [
+                            {**current, "status": "revoked", "revocation_reason": "policy withdrawn"}
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "task": "demo",
+                        "phases": [{"phase": 0, "name": "demo", "status": "running", "attempts": 1}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result_path = runtime_dir / "phase0-result.json"
+            result = {
+                "phase": 0,
+                "status": "completed",
+                "attempt": 1,
+                "policy_pack": RUN_PHASES.runtime_policy_pack(),
+                "repo_content": {
+                    "changed_files": [],
+                    "changed_files_digest": RUN_PHASES.stable_json_sha256([]),
+                    "required_repo_outputs": [],
+                    "required_repo_outputs_digest": RUN_PHASES.stable_json_sha256([]),
+                },
+                "artifacts": {"attempt_commit": "context-pack/runtime/phase0-attempt1-commit.json"},
+            }
+            result["repo_content"]["digest"] = RUN_PHASES.stable_json_sha256(result["repo_content"])
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            RUN_PHASES.write_phase_attempt_commit(task_path, 0, 1, result_path)
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            self.assertEqual(changes[0]["to_status"], "error")
+            self.assertEqual(changes[0]["reason"], "interrupted_running_phase")
 
     def test_evaluation_review_loop_improves_until_approved(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -411,6 +1127,68 @@ class RunCodexRuntimeTest(unittest.TestCase):
 
             improve.assert_called_once()
             self.assertTrue(args.failed)
+
+    def test_evaluation_improvement_records_repo_content_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+            source = root / "src" / "app.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("before\n", encoding="utf-8")
+            (task_path / "phases").mkdir(parents=True)
+            (task_path / "phases" / "phase0.md").write_text(
+                "# Phase 0\n\n## Contract\n\n```json\n"
+                + json.dumps(
+                    {
+                        "phase": 0,
+                        "scope": {"layer": "app", "allowed_paths": ["src/**"]},
+                        "required_repo_outputs": ["src/app.py"],
+                    }
+                )
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"task": "demo", "phases": [{"phase": 0, "name": "app"}]}) + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                codex_bin="codex",
+                yolo=False,
+                full_auto=False,
+                codex_idle_timeout=30,
+            )
+
+            def fake_run_codex_exec(*_items: object, **_kwargs: object) -> int:
+                source.write_text("after\n", encoding="utf-8")
+                handoff = RUN_PHASES.evaluation_repair_handoff_path(task_path, 1)
+                handoff.parent.mkdir(parents=True, exist_ok=True)
+                handoff.write_text(
+                    "# Evaluation Repair\n\nUpdated app.\n",
+                    encoding="utf-8",
+                )
+                return 0
+
+            with mock.patch.object(RUN_PHASES, "run_codex_exec", side_effect=fake_run_codex_exec):
+                self.assertEqual(
+                    RUN_PHASES.run_evaluation_improvement(
+                        root,
+                        task_path,
+                        args,
+                        1,
+                        {"verdict": "rejected", "required_followups": ["Update app."], "blockers": []},
+                    ),
+                    0,
+                )
+
+            result = json.loads(RUN_PHASES.evaluation_repair_result_path(task_path, 1).read_text(encoding="utf-8"))
+            repo_content = result["repo_content"]
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(repo_content["changed_files"][0]["path"], "src/app.py")
+            self.assertEqual(repo_content["changed_files"][0]["after_digest"], RUN_PHASES.file_sha256(source))
+            self.assertEqual(repo_content["required_repo_outputs"], [])
+            self.assertEqual(result["policy_pack"], RUN_PHASES.runtime_policy_pack())
+            self.assertEqual(result["harness_attestation"], RUN_PHASES.RUNTIME_HARNESS_ATTESTATION)
 
     def test_codex_idle_timeout_covers_blocked_stdin_write(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -538,6 +1316,29 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(
                 RUN_PHASES.phase_changed_paths(task_path, before, after),
                 ["tasks/demo/context-pack/handoffs/phase0.md"],
+            )
+
+    def test_phase_baseline_is_reused_across_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+            src = root / "src" / "demo.py"
+            src.parent.mkdir(parents=True)
+            baseline = RUN_PHASES.load_or_create_phase_baseline(root, task_path, 0, ["src/demo.py"])
+
+            src.write_text("print('attempt one')\n", encoding="utf-8")
+            reused = RUN_PHASES.load_or_create_phase_baseline(root, task_path, 0, ["src/demo.py"])
+            final_snapshot = RUN_PHASES.worktree_snapshot(root)
+
+            self.assertEqual(reused["created_at"], baseline["created_at"])
+            self.assertEqual(
+                RUN_PHASES.phase_changed_paths(task_path, RUN_PHASES.baseline_snapshot(reused), final_snapshot),
+                ["src/demo.py"],
+            )
+            self.assertEqual(
+                RUN_PHASES.baseline_required_repo_outputs(reused)[0]["exists"],
+                False,
             )
 
     def test_repair_packet_records_cleanup_required_changes(self) -> None:

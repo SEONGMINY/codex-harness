@@ -37,13 +37,25 @@ from phase_contract import (
     validate_phase_contract,
 )
 from phase_semantics import analyze_phase
+from command_policy import run_command
+from harness_attestation import harness_attestation
+from obligation_ledger import build_phase_obligation_assertion_outcomes, design_obligations_by_id
+from policy_pack import policy_pack_metadata
+from policy_lineage import (
+    allowed_policy_fingerprints,
+    normalize_policy_pack_lineage_entries,
+    policy_pack_fingerprint,
+    stable_json_sha256,
+    validate_current_policy_lineage,
+)
 
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
 RUNNABLE_PHASE_STATUSES = {"pending", "running"}
-HARNESS_VERSION = "0.1.4"
+HARNESS_VERSION = "0.1.5"
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 SCRIPT_DIR = Path(__file__).resolve().parent
+RUNTIME_HARNESS_ATTESTATION = harness_attestation()
 MANDATORY_STATIC_FILES = [
     "original-prompt.md",
     "product.md",
@@ -97,6 +109,15 @@ def harness_install_errors(root: Path) -> list[str]:
     if not manifest_path.exists():
         return ["Missing codex-harness.json. Reinstall codex-harness in this project."]
     required_paths = [
+        root / ".codex" / "harness" / "scripts" / "artifact_io.py",
+        root / ".codex" / "harness" / "scripts" / "command_policy.py",
+        root / ".codex" / "harness" / "scripts" / "env_policy.py",
+        root / ".codex" / "harness" / "scripts" / "harness_attestation.py",
+        root / ".codex" / "harness" / "scripts" / "obligation_ledger.py",
+        root / ".codex" / "harness" / "scripts" / "policy-packs" / "default-security.json",
+        root / ".codex" / "harness" / "scripts" / "policy_lineage.py",
+        root / ".codex" / "harness" / "scripts" / "policy_pack.py",
+        root / ".codex" / "harness" / "scripts" / "redaction.py",
         root / ".codex" / "harness" / "scripts" / "run-phases.py",
         root / ".codex" / "harness" / "scripts" / "verify-task.py",
         root / ".codex" / "harness" / "scripts" / "run-quality-checks.py",
@@ -376,6 +397,22 @@ def phase_handoff_path(task_path: Path, phase_number: int) -> Path:
 
 def ac_results_path(task_path: Path, phase_number: int, attempt: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-ac-attempt{attempt}.json"
+
+
+def phase_attempt_commit_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-attempt{attempt}-commit.json"
+
+
+def phase_reset_marker_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-reset-marker.json"
+
+
+def phase_baseline_path(task_path: Path, phase_number: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-baseline.json"
+
+
+def phase_obligation_closure_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-obligation-closure-attempt{attempt}.json"
 
 
 def task_doc_files(root: Path, task_index: dict) -> list[Path]:
@@ -762,18 +799,9 @@ def preflight_phase(root: Path, task_path: Path, task_index: dict, phase: dict) 
     return errors
 
 
-def run_shell(command: str, cwd: Path, timeout: int) -> tuple[int, str]:
-    result = subprocess.run(
-        command,
-        cwd=cwd,
-        shell=True,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
-    output = (result.stdout + result.stderr).strip()
-    return result.returncode, output
+def run_shell(command: str, cwd: Path, timeout: int) -> tuple[int, str, bool]:
+    code, output, timed_out, _argv = run_command(command, cwd, timeout)
+    return code, output, timed_out
 
 
 def git_lines(args: list[str], root: Path) -> list[str]:
@@ -799,6 +827,46 @@ def file_digest(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def file_sha256(path: Path) -> str:
+    return file_digest(path)
+
+
+def runtime_policy_pack() -> dict[str, str]:
+    return policy_pack_metadata()
+
+
+def current_policy_lineage_errors(task_path: Path) -> list[str]:
+    approval_path = task_path / "context-pack" / "static" / "design-approval.json"
+    if not approval_path.exists():
+        return []
+    try:
+        approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"Invalid design approval JSON before phase execution: {exc}"]
+    return validate_current_policy_lineage(
+        approval,
+        policy_pack_fingerprint(runtime_policy_pack()),
+        action_label="phase execution",
+    )
+
+
+def approved_policy_pack_lineage(task_path: Path) -> tuple[list[dict[str, str]], list[str]]:
+    approval_path = task_path / "context-pack" / "static" / "design-approval.json"
+    if not approval_path.exists():
+        return [], []
+    try:
+        approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [], [f"Invalid design approval JSON: {exc}"]
+    active = policy_pack_fingerprint(approval.get("active_policy_pack"))
+    entries, errors = normalize_policy_pack_lineage_entries(
+        approval.get("approved_policy_packs"),
+        "Design approval approved_policy_packs",
+        active,
+    )
+    return allowed_policy_fingerprints(entries), errors
 
 
 def worktree_snapshot(root: Path) -> dict[str, str]:
@@ -1093,6 +1161,59 @@ def required_repo_output_results(root: Path, required_outputs: list[str]) -> lis
     ]
 
 
+def required_repo_output_content_results(root: Path, required_outputs: list[str]) -> list[dict[str, object]]:
+    results: list[dict[str, object]] = []
+    for raw_path in required_outputs:
+        path = root / raw_path
+        exists = path.exists() and path.is_file()
+        item: dict[str, object] = {"path": raw_path, "exists": exists}
+        if exists:
+            item["sha256"] = file_sha256(path)
+        results.append(item)
+    return results
+
+
+def repo_content_attestation(
+    root: Path,
+    changed_files: list[str],
+    required_repo_outputs: list[str],
+    before_repo_outputs: list[dict[str, object]] | None = None,
+    before_snapshot: dict[str, str] | None = None,
+    after_snapshot: dict[str, str] | None = None,
+) -> dict[str, object]:
+    before_snapshot = before_snapshot or {}
+    after_snapshot = after_snapshot or worktree_snapshot(root)
+    before_by_path = {
+        str(item.get("path")): item
+        for item in (before_repo_outputs or [])
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    changed_entries = [
+        {
+            "path": path,
+            "before_digest": before_snapshot.get(path, "<missing>"),
+            "after_digest": after_snapshot.get(path, file_digest(root / path)),
+        }
+        for path in sorted(changed_files)
+    ]
+    required_entries = []
+    for raw_path in required_repo_outputs:
+        before = before_by_path.get(raw_path, {"path": raw_path, "exists": False})
+        after_path = root / raw_path
+        after = {"path": raw_path, "exists": after_path.exists() and after_path.is_file()}
+        if after["exists"]:
+            after["sha256"] = file_sha256(after_path)
+        required_entries.append({"path": raw_path, "before": before, "after": after})
+    content: dict[str, object] = {
+        "changed_files": changed_entries,
+        "changed_files_digest": stable_json_sha256(changed_entries),
+        "required_repo_outputs": required_entries,
+        "required_repo_outputs_digest": stable_json_sha256(required_entries),
+    }
+    content["digest"] = stable_json_sha256(content)
+    return content
+
+
 def run_quality_checks(
     root: Path,
     task_path: Path,
@@ -1117,7 +1238,7 @@ def run_quality_checks(
     for changed_file in changed_files:
         command.extend(["--changed-file", changed_file])
 
-    exit_code, output = run_shell(" ".join(shlex.quote(item) for item in command), root, 180)
+    exit_code, output, _timed_out = run_shell(" ".join(shlex.quote(item) for item in command), root, 180)
     if output_path.exists():
         try:
             result = read_json(output_path)
@@ -1206,23 +1327,48 @@ def write_phase_result(
     output_path: Path,
     stderr_path: Path,
     ac_results: Path,
-) -> None:
+    before_repo_outputs: list[dict[str, object]] | None = None,
+    before_snapshot: dict[str, str] | None = None,
+    after_snapshot: dict[str, str] | None = None,
+) -> Path:
+    contract = {}
+    try:
+        contract = read_json(phase_contract_path(task_path, phase_number))
+    except (OSError, json.JSONDecodeError):
+        contract = {}
+    commands_run = []
+    for item in command_results:
+        command = {
+            "command": item.get("command"),
+            "exit_code": item.get("exit_code"),
+        }
+        for key in ["id", "role", "target", "repo_scan", "output", "output_tail", "timed_out"]:
+            if key in item:
+                command[key] = item[key]
+        commands_run.append(command)
+    repo_content = repo_content_attestation(
+        root,
+        changed_files,
+        required_repo_outputs,
+        before_repo_outputs,
+        before_snapshot,
+        after_snapshot,
+    )
     result = {
+        "schema_version": 1,
+        "runner_version": HARNESS_VERSION,
         "phase": phase_number,
         "status": "completed",
         "attempt": attempt,
         "codex_exit_code": codex_exit_code,
         "changed_files": changed_files,
-        "commands_run": [
-            {
-                "command": item["command"],
-                "exit_code": item["exit_code"],
-            }
-            for item in command_results
-        ],
+        "commands_run": commands_run,
         "tests_passed": all(item["exit_code"] == 0 for item in command_results),
         "required_outputs": required_output_results(task_path, required_outputs),
         "required_repo_outputs": required_repo_output_results(root, required_repo_outputs),
+        "repo_content": repo_content,
+        "policy_pack": runtime_policy_pack(),
+        "harness_attestation": RUNTIME_HARNESS_ATTESTATION,
         "artifacts": {
             "contract": task_relative(phase_contract_path(task_path, phase_number), task_path),
             "checklist": task_relative(phase_checklist_path(task_path, phase_number), task_path),
@@ -1238,17 +1384,215 @@ def write_phase_result(
             "gate": task_relative(phase_gate_path(task_path, phase_number), task_path),
         },
     }
+    approval_path = task_path / "context-pack" / "static" / "design-approval.json"
+    if approval_path.exists():
+        try:
+            approval = read_json(approval_path)
+            if isinstance(approval.get("approved_bundle_sha256"), str):
+                result["design_approval_bundle_sha256"] = approval["approved_bundle_sha256"]
+        except (OSError, json.JSONDecodeError):
+            pass
+    if contract.get("closes_obligations"):
+        design_contract_path = task_path / "context-pack" / "static" / "design-contract.json"
+        try:
+            design_contract = read_json(design_contract_path)
+        except (OSError, json.JSONDecodeError):
+            design_contract = {}
+        outcomes = build_phase_obligation_assertion_outcomes(
+            contract=contract,
+            phase_result=result,
+            obligations=design_obligations_by_id(design_contract),
+        )
+        commands_by_ref: dict[str, dict[str, object]] = {}
+        for command in commands_run:
+            if command.get("exit_code") != 0:
+                continue
+            for key in ["id", "command"]:
+                value = command.get(key)
+                if isinstance(value, str) and value:
+                    commands_by_ref[value] = command
+        contract_sha = file_sha256(phase_contract_path(task_path, phase_number)) if phase_contract_path(task_path, phase_number).exists() else ""
+        design_sha = file_sha256(design_contract_path) if design_contract_path.exists() else ""
+        assertion_entries = []
+        for outcome in outcomes:
+            assertion = {**outcome, "attempt": attempt, "runner_version": HARNESS_VERSION}
+            assertion["phase_contract_sha256"] = contract_sha
+            assertion["design_contract_sha256"] = design_sha
+            command_ref = assertion.get("command_ref")
+            command = commands_by_ref.get(command_ref) if isinstance(command_ref, str) else None
+            if command is not None:
+                output = command.get("output") if isinstance(command.get("output"), str) else str(command.get("output_tail") or "")
+                assertion["command_output_sha256"] = hashlib.sha256(output.encode("utf-8")).hexdigest()
+            if "value" in assertion:
+                assertion["value"] = "[redacted]"
+            assertion_entries.append(assertion)
+        ledger_path = phase_obligation_closure_path(task_path, phase_number, attempt)
+        ledger = {
+            "schema_version": 1,
+            "phase": phase_number,
+            "attempt": attempt,
+            "runner_version": HARNESS_VERSION,
+            "assertions": assertion_entries,
+        }
+        write_json(ledger_path, ledger)
+        result["artifacts"]["obligation_closure"] = task_relative(ledger_path, task_path)
     repair_packet = phase_repair_packet_path(task_path, phase_number)
     repair_packet_summary = phase_repair_packet_summary_path(task_path, phase_number)
     if repair_packet.exists():
         result["artifacts"]["repair_packet"] = task_relative(repair_packet, task_path)
     if repair_packet_summary.exists():
         result["artifacts"]["repair_packet_summary"] = task_relative(repair_packet_summary, task_path)
-    write_json(phase_result_path(task_path, phase_number), result)
+    result_path = phase_result_path(task_path, phase_number)
+    write_json(result_path, result)
+    result["artifacts"]["attempt_commit"] = task_relative(phase_attempt_commit_path(task_path, phase_number, attempt), task_path)
+    write_json(result_path, result)
+    return result_path
 
 
 def required_output_repo_paths(task_path: Path, required_outputs: list[str]) -> list[str]:
     return [f"tasks/{task_path.name}/{raw_path.strip('/')}" for raw_path in required_outputs]
+
+
+def _artifact_entry(name: str, task_path: Path, raw_path: object) -> dict[str, object] | None:
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    path = task_path / raw_path
+    entry: dict[str, object] = {"name": name, "path": raw_path, "exists": path.exists()}
+    if path.exists() and path.is_file():
+        entry["sha256"] = file_sha256(path)
+    return entry
+
+
+def write_phase_attempt_commit(task_path: Path, phase_number: int, attempt: int, result_path: Path) -> Path:
+    result = read_json(result_path)
+    artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+    artifact_entries = [
+        entry
+        for name, raw_path in artifacts.items()
+        if name != "attempt_commit"
+        for entry in [_artifact_entry(str(name), task_path, raw_path)]
+        if entry is not None
+    ]
+    commit = {
+        "schema_version": 1,
+        "runner_version": HARNESS_VERSION,
+        "commit_scope": "runtime_attempt_bundle",
+        "phase": phase_number,
+        "attempt": attempt,
+        "status": "committed",
+        "policy_pack": result.get("policy_pack", runtime_policy_pack()),
+        "harness_attestation": result.get("harness_attestation", RUNTIME_HARNESS_ATTESTATION),
+        "design_approval_bundle_sha256": result.get("design_approval_bundle_sha256"),
+        "result": {
+            "path": task_relative(result_path, task_path),
+            "sha256": file_sha256(result_path),
+        },
+        "repo_content": result.get("repo_content", {}),
+        "artifacts": artifact_entries,
+        "artifact_count": len(artifact_entries),
+        "committed_at": now(),
+    }
+    path = phase_attempt_commit_path(task_path, phase_number, attempt)
+    write_json(path, commit)
+    return path
+
+
+def write_phase_reset_marker(task_path: Path, phase_number: int, reset_at: str, from_phase: int) -> Path:
+    path = phase_reset_marker_path(task_path, phase_number)
+    write_json(path, {"schema_version": 1, "phase": phase_number, "from_phase": from_phase, "reset_at": reset_at})
+    return path
+
+
+def latest_valid_phase_attempt_commit(task_path: Path, phase_number: int) -> dict[str, object] | None:
+    marker_path = phase_reset_marker_path(task_path, phase_number)
+    reset_at = ""
+    if marker_path.exists():
+        try:
+            marker = read_json(marker_path)
+            reset_at = str(marker.get("reset_at") or "")
+        except (OSError, json.JSONDecodeError):
+            reset_at = ""
+    commits = sorted((task_path / "context-pack" / "runtime").glob(f"phase{phase_number}-attempt*-commit.json"))
+    valid: dict[str, object] | None = None
+    for path in commits:
+        try:
+            data = read_json(path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if reset_at and str(data.get("committed_at") or "") < reset_at:
+            continue
+        result_ref = data.get("result") if isinstance(data.get("result"), dict) else {}
+        result_path = task_path / str(result_ref.get("path") or "")
+        if not result_path.exists() or result_ref.get("sha256") != file_sha256(result_path):
+            continue
+        lineage, lineage_errors = approved_policy_pack_lineage(task_path)
+        if lineage_errors:
+            continue
+        fingerprint = policy_pack_fingerprint(data.get("policy_pack") if isinstance(data.get("policy_pack"), dict) else None)
+        if lineage and fingerprint not in lineage:
+            continue
+        data["_path"] = str(path)
+        valid = data
+    return valid
+
+
+def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> list[dict[str, object]]:
+    index_path = task_path / "index.json"
+    task_index = read_json(index_path)
+    changes: list[dict[str, object]] = []
+    for phase in task_index.get("phases") or []:
+        if not isinstance(phase, dict) or "phase" not in phase:
+            continue
+        phase_number = int(phase["phase"])
+        status = phase.get("status")
+        commit = latest_valid_phase_attempt_commit(task_path, phase_number)
+        if status == "running" and commit:
+            changes.append({"phase": phase_number, "from_status": status, "to_status": "completed", "reason": "valid_attempt_commit"})
+            if not dry_run:
+                phase["status"] = "completed"
+                phase["completed_at"] = now()
+                phase["attempts"] = commit.get("attempt")
+        elif status == "completed" and not commit:
+            changes.append({"phase": phase_number, "from_status": status, "to_status": "error", "reason": "missing_attempt_commit"})
+            if not dry_run:
+                phase["status"] = "error"
+                phase["error_message"] = "Completed phase is missing a valid attempt commit."
+        elif status == "running" and not commit and phase_result_path(task_path, phase_number).exists():
+            has_commit = bool(list((task_path / "context-pack" / "runtime").glob(f"phase{phase_number}-attempt*-commit.json")))
+            reason = "interrupted_running_phase" if has_commit else "invalid_attempt_commit"
+            changes.append({"phase": phase_number, "from_status": status, "to_status": "error", "reason": reason})
+            if not dry_run:
+                phase["status"] = "error"
+                phase["error_message"] = "Phase result exists without a valid attempt commit."
+    if changes and not dry_run:
+        write_json(index_path, task_index)
+    return changes
+
+
+def load_or_create_phase_baseline(root: Path, task_path: Path, phase_number: int, required_repo_outputs: list[str]) -> dict[str, object]:
+    path = phase_baseline_path(task_path, phase_number)
+    if path.exists():
+        return read_json(path)
+    snapshot = worktree_snapshot(root)
+    baseline = {
+        "schema_version": 1,
+        "phase": phase_number,
+        "created_at": now(),
+        "snapshot": snapshot,
+        "required_repo_outputs": required_repo_output_content_results(root, required_repo_outputs),
+    }
+    write_json(path, baseline)
+    return baseline
+
+
+def baseline_snapshot(baseline: dict[str, object]) -> dict[str, str]:
+    snapshot = baseline.get("snapshot")
+    return {str(key): str(value) for key, value in snapshot.items()} if isinstance(snapshot, dict) else {}
+
+
+def baseline_required_repo_outputs(baseline: dict[str, object]) -> list[dict[str, object]]:
+    outputs = baseline.get("required_repo_outputs")
+    return outputs if isinstance(outputs, list) else []
 
 
 def build_gate(
@@ -1263,7 +1607,20 @@ def build_gate(
     handoff_reasons: list[str],
     handoff_trace_errors: list[str],
     quality_result: dict[str, object] | None = None,
+    evidence: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    if evidence is None:
+        evidence = build_evidence(
+            root,
+            phase_number,
+            0,
+            changed_files,
+            command_results,
+            required_outputs,
+            required_repo_outputs,
+            task_path,
+            quality_result,
+        )
     failed_commands = [item for item in command_results if item.get("exit_code") != 0]
     missing_outputs = verify_required_outputs(task_path, required_outputs)
     missing_repo_outputs = verify_required_repo_outputs(root, required_repo_outputs)
@@ -1297,6 +1654,24 @@ def build_gate(
     if quality_status == "failed":
         quality_blockers = [str(item) for item in quality_reasons if str(item).strip()]
         blocking_reasons.extend(quality_blockers or ["Quality checks failed."])
+    expected_failures = []
+    for instruction in contract.get("instructions") or []:
+        if not isinstance(instruction, dict):
+            continue
+        missing = [
+            item
+            for item in instruction.get("expected_evidence") or []
+            if not expected_evidence_matched(item, evidence)
+        ]
+        if missing:
+            expected_failures.append(
+                {
+                    "instruction_id": instruction.get("id"),
+                    "missing_expected_evidence": missing,
+                }
+            )
+    if expected_failures:
+        blocking_reasons.append("One or more instruction expected_evidence entries were not observed.")
 
     checks = [
         {
@@ -1341,6 +1716,11 @@ def build_gate(
             "source": quality_result.get("source") if isinstance(quality_result, dict) else None,
             "blocking_reasons": quality_reasons,
             "artifact": task_relative(phase_quality_path(task_path, phase_number), task_path),
+        },
+        {
+            "name": "expected_evidence",
+            "status": "passed" if not expected_failures else "failed",
+            "failures": expected_failures,
         },
     ]
     return {
@@ -1394,7 +1774,7 @@ def expected_evidence_matched(expected: object, evidence: dict[str, object]) -> 
     for item in evidence.get("commands", []) or []:
         if (
             isinstance(item, dict)
-            and item.get("command") == expected_text
+            and (item.get("command") == expected_text or item.get("id") == expected_text)
             and item.get("exit_code") == 0
         ):
             return True
@@ -2031,6 +2411,9 @@ def run_evaluation_improvement(
         "status": "completed" if returncode == 0 and not violations and handoff_exists else "failed",
         "codex_exit_code": returncode,
         "changed_files": changed_files,
+        "repo_content": repo_content_attestation(root, changed_files, [], [], before, after),
+        "policy_pack": runtime_policy_pack(),
+        "harness_attestation": RUNTIME_HARNESS_ATTESTATION,
         "allowed_paths": allowed_paths,
         "scope_violations": violations,
         "handoff": str(evaluation_repair_handoff_path(task_path, iteration).relative_to(task_path)),
@@ -2105,6 +2488,7 @@ def verify_task(
     task_path: Path,
     require_evaluation: bool = False,
     require_design_approval: bool = True,
+    strict_current_harness: bool = False,
 ) -> int:
     command = [
         sys.executable,
@@ -2117,6 +2501,8 @@ def verify_task(
         command.append("--require-design-approval")
     if require_evaluation:
         command.append("--require-evaluation")
+    if strict_current_harness:
+        command.append("--strict-current-harness")
     return subprocess.run(command, cwd=root, check=False).returncode
 
 
@@ -2131,7 +2517,8 @@ def apply_phase_reset(
 
     index_path = task_path / "index.json"
     task_index = read_json(index_path)
-    reset_results = reset_phase_statuses(task_index, from_phase, now())
+    reset_at = now()
+    reset_results = reset_phase_statuses(task_index, from_phase, reset_at)
     print_reset_summary(from_phase, reset_results, dry_run)
 
     if dry_run:
@@ -2141,6 +2528,7 @@ def apply_phase_reset(
         write_json(index_path, task_index)
         update_top_index(root, task_path.name, "pending")
         for item in reset_results:
+            write_phase_reset_marker(task_path, int(item["phase"]), reset_at, from_phase)
             clear_repair_packet(task_path, int(item["phase"]))
     return None
 
@@ -2201,7 +2589,7 @@ def execute_phase(
         clear_repair_packet(task_path, phase_number)
 
     preflight_errors = []
-    if verify_task(root, task_path) != 0:
+    if verify_task(root, task_path, strict_current_harness=False) != 0:
         preflight_errors.append("Task verification failed before phase execution.")
     preflight_errors.extend(nested_codex_preflight_errors(args))
     preflight_errors.extend(preflight_phase(root, task_path, task_index, phase))
@@ -2409,12 +2797,13 @@ def execute_phase(
         required_repo_outputs = contract_repo_outputs(contract)
         command_results: list[dict[str, object]] = []
         for command in contract_ac_commands(phase, contract):
-            ac_returncode, ac_output = run_shell(command, root, ac_timeout)
+            ac_returncode, ac_output, ac_timed_out = run_shell(command, root, ac_timeout)
             command_results.append(
                 {
                     "command": command,
                     "exit_code": ac_returncode,
                     "output": ac_output,
+                    "timed_out": ac_timed_out,
                 }
             )
             if ac_returncode != 0:
@@ -2718,6 +3107,7 @@ def main() -> int:
     parser.add_argument("--skip-install", action="store_true", help="Skip package-manager install preflight.")
     parser.add_argument("--install-timeout", type=non_negative_int, default=600)
     parser.add_argument("--full-auto", action="store_true", help="Pass --full-auto to codex exec.")
+    parser.add_argument("--strict-current-harness", action="store_true", help="Require current harness runtime metadata.")
     parser.add_argument(
         "--yolo",
         action="store_true",

@@ -14,8 +14,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+HARNESS_DIR = ROOT / "scripts" / "harness"
 START = ROOT / "scripts" / "harness" / "start.py"
-HARNESS_VERSION = "0.1.4"
+HARNESS_VERSION = "0.1.5"
+sys.path.insert(0, str(HARNESS_DIR))
+
+import policy_lineage  # noqa: E402
 
 
 class StartLauncherTest(unittest.TestCase):
@@ -46,6 +50,75 @@ class StartLauncherTest(unittest.TestCase):
             "#!/usr/bin/env python3\nraise SystemExit(0)\n",
             encoding="utf-8",
         )
+        (repo / ".codex" / "harness" / "scripts" / "artifact_io.py").write_text(
+            "# artifact io helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "codex_exec.py").write_text(
+            "# codex exec helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "command_policy.py").write_text(
+            "# command policy helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "decision_registry.py").write_text(
+            "# decision registry helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "env_policy.py").write_text(
+            "# env policy helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "evaluate-task.py").write_text(
+            "#!/usr/bin/env python3\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "evidence_obligations.py").write_text(
+            "# evidence obligations helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "harness_attestation.py").write_text(
+            "# harness attestation helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "phase_contract.py").write_text(
+            "# phase contract helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "policy_pack.py").write_text(
+            "# policy pack helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "policy-packs").mkdir(parents=True)
+        (repo / ".codex" / "harness" / "scripts" / "policy-packs" / "default-security.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "design_contract.py").write_text(
+            "# design contract helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "reference_resolver.py").write_text(
+            "# reference resolver helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "obligation_ledger.py").write_text(
+            "# obligation ledger helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "redaction.py").write_text(
+            "# redaction helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "phase_semantics.py").write_text(
+            "# phase semantics helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "policy_lineage.py").write_text(
+            "# policy lineage helper\n",
+            encoding="utf-8",
+        )
         (repo / ".codex" / "harness" / "scripts" / "relationship_graph.py").write_text(
             "# relationship graph helper\n",
             encoding="utf-8",
@@ -54,6 +127,18 @@ class StartLauncherTest(unittest.TestCase):
             "#!/usr/bin/env python3\n",
             encoding="utf-8",
         )
+        (repo / ".codex" / "harness" / "scripts" / "run-quality-checks.py").write_text(
+            "#!/usr/bin/env python3\n",
+            encoding="utf-8",
+        )
+        schemas = repo / ".codex" / "harness" / "scripts" / "schemas"
+        schemas.mkdir(parents=True)
+        for name in [
+            "launcher-final.schema.json",
+            "phase-final.schema.json",
+            "evaluation-final.schema.json",
+        ]:
+            (schemas / name).write_text("{}\n", encoding="utf-8")
         return repo
 
     def make_fake_codex(self, tmp: Path, body: str) -> Path:
@@ -68,6 +153,62 @@ class StartLauncherTest(unittest.TestCase):
         )
         path.chmod(path.stat().st_mode | 0o111)
         return path
+
+    def task_artifact_setup_code(self) -> str:
+        return textwrap.dedent(
+            """
+            common_docs = [
+                "docs/harness/runner-contract.md",
+                "docs/harness/testing.md",
+                "docs/harness/document-scope.md",
+                "docs/harness/implementation-quality.md",
+            ]
+            task_docs = [
+                "tasks/demo/docs/prd.md",
+                "tasks/demo/docs/flow.md",
+                "tasks/demo/docs/data-schema.md",
+                "tasks/demo/docs/code-architecture.md",
+                "tasks/demo/docs/adr.md",
+                "tasks/demo/docs/implementation-design-review.md",
+            ]
+            for raw in common_docs + task_docs:
+                path = root / raw
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# Doc\\n", encoding="utf-8")
+            static_files = [
+                "original-prompt.md",
+                "product.md",
+                "decisions.md",
+                "decisions.json",
+                "open-decisions.json",
+                "architecture.json",
+                "dependency-policy.json",
+                "design-contract.json",
+                "review-taxonomy.json",
+                "review-findings.json",
+                "review-coverage.json",
+                "traceability-matrix.json",
+                "context-gathering-budget.json",
+                "rejected-options.md",
+                "constraints.md",
+                "test-policy.md",
+                "clarify-review.md",
+                "docs-approval.md",
+                "context-gathering.md",
+                "docs-index.md",
+            ]
+            for name in static_files:
+                path = task / "context-pack" / "static" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}\\n" if name.endswith(".json") else "# Static\\n", encoding="utf-8")
+            (root / "tasks").mkdir(parents=True, exist_ok=True)
+            (root / "tasks" / "index.json").write_text('{"tasks":[{"dir":"demo"}]}\\n', encoding="utf-8")
+            (task / "index.json").write_text(
+                '{"project":"demo","task":"demo","common_docs":["docs/harness/runner-contract.md","docs/harness/testing.md","docs/harness/document-scope.md","docs/harness/implementation-quality.md"],"docs":["tasks/demo/docs/prd.md","tasks/demo/docs/flow.md","tasks/demo/docs/data-schema.md","tasks/demo/docs/code-architecture.md","tasks/demo/docs/adr.md","tasks/demo/docs/implementation-design-review.md"],"totalPhases":0,"phases":[]}\\n',
+                encoding="utf-8",
+            )
+            """
+        )
 
     def latest_launcher_result(self, repo: Path) -> dict[str, object]:
         result_paths = sorted((repo / ".codex" / "harness" / "sessions").glob("*/launcher-result.json"))
@@ -98,6 +239,31 @@ class StartLauncherTest(unittest.TestCase):
 
             self.assertEqual(result.returncode, 1)
             self.assertIn(".codex/harness/scripts/verify-task.py", result.stderr)
+
+    def test_missing_artifact_io_fails_install_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            (repo / ".codex" / "harness" / "scripts" / "artifact_io.py").unlink()
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "invalid install",
+                    "--codex-bin",
+                    str(tmp / "unused-codex"),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(".codex/harness/scripts/artifact_io.py", result.stderr)
 
     def test_missing_phase_plan_review_script_fails_install_validation(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -209,6 +375,48 @@ class StartLauncherTest(unittest.TestCase):
                     }
                 ],
             )
+
+    def test_launcher_documents_exclude_sensitive_files_to_read_next(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            (repo / ".env").write_text("OPENAI_API_KEY=sk-testsecretsecretsecret\n", encoding="utf-8")
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    args = sys.argv
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    last_message.write_text(
+                        '{"status":"blocked","task_path":null,"files_to_read_next":[".env","tasks/demo/docs/../../.env"],"blockers":["blocked"],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "blocked",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["documents"], [])
 
     def test_docs_approval_artifact_in_final_output_sets_docs_approval_needed_status(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -400,6 +608,7 @@ class StartLauncherTest(unittest.TestCase):
                     "--design-approved",
                     "--run-phases",
                     "--evaluate",
+                    "--strict-current-harness",
                     "--full-auto",
                     "--codex-bin",
                     str(fake),
@@ -412,6 +621,7 @@ class StartLauncherTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["status"], "generated")
+            self.assertEqual(launcher_result["dry_run_returncode"], 0)
             self.assertEqual(launcher_result["runner_returncode"], 0)
             graph = launcher_result["relationship_graph"]
             self.assertEqual(graph["status"], "generated")
@@ -429,6 +639,7 @@ class StartLauncherTest(unittest.TestCase):
             self.assertEqual(Path(argv[argv.index("--codex-bin") + 1]).resolve(), fake.resolve())
             self.assertIn("--full-auto", argv)
             self.assertIn("--evaluate", argv)
+            self.assertIn("--strict-current-harness", argv)
             self.assertNotIn("--yolo", argv)
 
     def test_planned_with_design_approval_requires_verify_task_success(self) -> None:
@@ -538,10 +749,68 @@ class StartLauncherTest(unittest.TestCase):
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["status"], "blocked")
             self.assertEqual(launcher_result["phase_plan_review_returncode"], 8)
+            self.assertIsNone(launcher_result["dry_run_returncode"])
             violation_path = Path(repo, launcher_result["orchestration_violation"])
             self.assertTrue(violation_path.exists())
             review_output = Path(repo, launcher_result["phase_plan_review_output"])
             self.assertIn("phase plan failed", review_output.read_text(encoding="utf-8"))
+
+    def test_planned_with_design_approval_requires_phase_runner_dry_run_success(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            (repo / ".codex" / "harness" / "scripts" / "run-phases.py").write_text(
+                "import sys\nprint('dry-run failed')\nraise SystemExit(6)\n",
+                encoding="utf-8",
+            )
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    root = Path.cwd()
+                    task = root / "tasks" / "demo"
+                    task.mkdir(parents=True, exist_ok=True)
+                    args = sys.argv
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    last_message.write_text(
+                        '{"status":"planned","task_path":"tasks/demo","files_to_read_next":[],"blockers":[],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "planned with bad dry-run",
+                    "--docs-approved",
+                    "--design-approved",
+                    "--full-auto",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "blocked")
+            self.assertEqual(launcher_result["dry_run_returncode"], 6)
+            self.assertIsNone(launcher_result["runner_returncode"])
+            violation_path = Path(repo, launcher_result["orchestration_violation"])
+            self.assertTrue(violation_path.exists())
+            dry_run_output = Path(repo, launcher_result["run_phases_dry_run_output"])
+            self.assertIn("dry-run failed", dry_run_output.read_text(encoding="utf-8"))
 
     def test_planned_generates_relationship_graph_without_option(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -589,17 +858,103 @@ class StartLauncherTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["status"], "planned")
+            self.assertEqual(launcher_result["dry_run_returncode"], 0)
             graph = launcher_result["relationship_graph"]
             self.assertEqual(graph["status"], "generated")
             self.assertTrue((repo / graph["json"]).exists())
             self.assertTrue((repo / graph["mermaid"]).exists())
+
+    def test_launcher_overwrites_design_approval_after_planned(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    root = Path.cwd()
+                    task = root / "tasks" / "demo"
+                    task.mkdir(parents=True, exist_ok=True)
+                    """
+                )
+                + self.task_artifact_setup_code()
+                + textwrap.dedent(
+                    """
+                    approval_path = task / "context-pack" / "static" / "design-approval.json"
+                    approval_path.write_text('{"schema_version":3,"approved":false,"approval_source":"agent"}\\n', encoding="utf-8")
+                    args = sys.argv
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    last_message.write_text(
+                        '{"status":"planned","task_path":"tasks/demo","files_to_read_next":[],"blockers":[],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "planned approval seal",
+                    "--docs-approved",
+                    "--design-approved",
+                    "--full-auto",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "planned")
+            approval = json.loads(
+                (repo / "tasks" / "demo" / "context-pack" / "static" / "design-approval.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertTrue(approval["approved"])
+            self.assertEqual(approval["approval_source"], "launcher --design-approved")
+            self.assertEqual(approval["approved_doc"], "tasks/demo/docs/implementation-design-review.md")
+            self.assertIn("approved_bundle_sha256", approval)
+            self.assertIn("design_approval_scope_sha256", approval)
+            active_policy = approval["active_policy_pack"]
+            approved_policies = approval["approved_policy_packs"]
+            approved_policy_entries = [{**active_policy, "status": "active"}]
+            self.assertEqual(
+                approval["approved_policy_packs_sha256"],
+                policy_lineage.policy_pack_lineage_sha256(approved_policies),
+            )
+            self.assertEqual(
+                approval["design_approval_scope_sha256"],
+                policy_lineage.design_approval_scope_sha256(
+                    approval["approved_bundle"],
+                    approved_policies,
+                    active_policy,
+                    approved_policy_entries,
+                ),
+            )
 
     def test_run_phases_failure_blocks_launcher_result(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             repo = self.make_repo(tmp)
             (repo / ".codex" / "harness" / "scripts" / "run-phases.py").write_text(
-                "import sys\nprint('phase failed')\nraise SystemExit(7)\n",
+                "import sys\n"
+                "if '--dry-run' in sys.argv:\n"
+                "    print('dry-run ok')\n"
+                "    raise SystemExit(0)\n"
+                "print('phase failed')\n"
+                "raise SystemExit(7)\n",
                 encoding="utf-8",
             )
             fake = self.make_fake_codex(
@@ -645,6 +1000,7 @@ class StartLauncherTest(unittest.TestCase):
             self.assertEqual(result.returncode, 7, result.stderr + result.stdout)
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["status"], "blocked")
+            self.assertEqual(launcher_result["dry_run_returncode"], 0)
             self.assertEqual(launcher_result["runner_returncode"], 7)
 
     def test_generated_from_orchestrator_is_blocked(self) -> None:
@@ -739,6 +1095,11 @@ class StartLauncherTest(unittest.TestCase):
                         "open-decisions.json",
                         "architecture.json",
                         "dependency-policy.json",
+                        "design-contract.json",
+                        "review-taxonomy.json",
+                        "review-findings.json",
+                        "review-coverage.json",
+                        "traceability-matrix.json",
                         "context-gathering-budget.json",
                         "rejected-options.md",
                         "constraints.md",

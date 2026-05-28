@@ -7,10 +7,14 @@ import argparse
 import hashlib
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from decision_registry import (
+    approved_decision_ids,
+    architecture_ref_ids,
     load_decision_registry,
     validate_decision_files,
     validate_dependency_changes,
@@ -32,8 +36,31 @@ from phase_contract import (
     validate_phase_contract,
 )
 from phase_semantics import analyze_phase
+from design_contract import (
+    DEFAULT_REVIEW_TAXONOMY_IDS,
+    validate_design_contract,
+    validate_review_coverage,
+    validate_review_findings,
+    validate_review_taxonomy,
+    validate_traceability_matrix,
+)
+from harness_attestation import harness_attestation, attestation_fingerprint
+from reference_resolver import ReferenceUniverse
+from policy_pack import policy_pack_metadata
+from policy_lineage import (
+    allowed_policy_fingerprints,
+    design_approval_scope_sha256,
+    normalize_policy_pack_fingerprints,
+    normalize_policy_pack_lineage_entries,
+    policy_pack_fingerprint,
+    policy_pack_lineage_sha256,
+    sort_policy_pack_fingerprints,
+    stable_json_sha256,
+    validate_current_policy_lineage,
+)
 
 
+HARNESS_VERSION = "0.1.5"
 MANDATORY_STATIC_FILES = [
     "original-prompt.md",
     "product.md",
@@ -50,6 +77,11 @@ MANDATORY_STATIC_FILES = [
     "docs-approval.md",
     "context-gathering.md",
     "docs-index.md",
+    "design-contract.json",
+    "review-taxonomy.json",
+    "review-findings.json",
+    "review-coverage.json",
+    "traceability-matrix.json",
 ]
 MANDATORY_TASK_DOCS = [
     "prd.md",
@@ -199,6 +231,219 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def current_policy_pack_fingerprint() -> dict[str, str]:
+    fingerprint = policy_pack_fingerprint(policy_pack_metadata())
+    if fingerprint is None:
+        raise ValueError("Current policy pack metadata is invalid.")
+    return fingerprint
+
+
+def validate_runner_version(value: object, label: str, *, strict_current: bool = False) -> list[str]:
+    if not isinstance(value, str) or not value.strip():
+        return [f"{label} runner_version is missing."]
+    if strict_current and value != HARNESS_VERSION:
+        return [f"{label} runner_version must match current harness version {HARNESS_VERSION}: {value}"]
+    return []
+
+
+def validate_policy_pack_metadata(
+    value: object,
+    label: str,
+    *,
+    strict_current: bool = False,
+    approved_fingerprints: list[dict[str, str]] | None = None,
+) -> list[str]:
+    fingerprint = policy_pack_fingerprint(value if isinstance(value, dict) else None)
+    if fingerprint is None:
+        return [f"{label} policy_pack must include id, schema_version, and sha256."]
+    if strict_current and fingerprint != current_policy_pack_fingerprint():
+        return [f"{label} policy_pack does not match current harness policy pack."]
+    if approved_fingerprints is not None and fingerprint not in approved_fingerprints:
+        return [f"{label} policy_pack is outside the design-approved policy pack lineage."]
+    return []
+
+
+def validate_harness_attestation_metadata(
+    value: object,
+    label: str,
+    *,
+    strict_current: bool = False,
+) -> list[str]:
+    fingerprint = attestation_fingerprint(value if isinstance(value, dict) else None)
+    if fingerprint is None:
+        return [f"{label} harness_attestation is invalid."]
+    if strict_current and fingerprint != attestation_fingerprint(harness_attestation()):
+        return [f"{label} harness_attestation does not match current harness script fingerprint."]
+    return []
+
+
+def _bundle_entry(root: Path, path: Path) -> dict[str, str]:
+    return {"path": rel(root, path), "sha256": file_sha256(path)}
+
+
+def design_approval_bundle_entries(root: Path, task_path: Path, design_rel_path: str) -> tuple[list[dict[str, str]], list[str]]:
+    errors: list[str] = []
+    paths = [root / design_rel_path]
+    static_dir = task_path / "context-pack" / "static"
+    for name in ["design-contract.json", "traceability-matrix.json", "risk-ledger.json"]:
+        candidate = static_dir / name
+        if candidate.exists():
+            paths.append(candidate)
+    entries: list[dict[str, str]] = []
+    for path in paths:
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(root.resolve())
+        except ValueError:
+            errors.append(f"Design approval bundle path must be repo-relative: {path}")
+            continue
+        if not path.exists() or not path.is_file():
+            errors.append(f"Missing design approval bundle file: {rel(root, path)}")
+            continue
+        entries.append(_bundle_entry(root, path))
+    return sorted(entries, key=lambda item: item["path"]), errors
+
+
+def design_approval_bundle_sha256(entries: list[dict[str, str]]) -> str:
+    return stable_json_sha256(sorted(entries, key=lambda item: item.get("path", "")))
+
+
+def approved_policy_pack_lineage(root: Path, task_path: Path) -> tuple[list[dict[str, str]], list[str]]:
+    approval_path = task_path / "context-pack" / "static" / DESIGN_APPROVAL_FILE
+    if not approval_path.exists():
+        return [], []
+    try:
+        approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [], [f"Invalid design approval JSON: {rel(root, approval_path)}: {exc}"]
+    if not isinstance(approval, dict):
+        return [], [f"Design approval must be a JSON object: {rel(root, approval_path)}"]
+    active = policy_pack_fingerprint(approval.get("active_policy_pack"))
+    entries, errors = normalize_policy_pack_lineage_entries(
+        approval.get("approved_policy_packs"),
+        "Design approval approved_policy_packs",
+        active,
+    )
+    return allowed_policy_fingerprints(entries), errors
+
+
+def validate_ac_results_metadata(
+    root: Path,
+    task_path: Path,
+    phase_number: int,
+    attempt: int,
+    artifacts: dict[str, object],
+    expected_policy_pack: dict[str, str] | None = None,
+    *,
+    approved_policy_packs: list[dict[str, str]] | None = None,
+) -> list[str]:
+    raw_path = artifacts.get("ac_results") if isinstance(artifacts, dict) else None
+    if not isinstance(raw_path, str):
+        return []
+    path = task_path / raw_path
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"Invalid AC results metadata: {rel(root, path)}: {exc}"]
+    if not isinstance(data, dict):
+        return [f"AC results must be a metadata object: {rel(root, path)}"]
+    errors: list[str] = []
+    if data.get("phase") != phase_number:
+        errors.append("AC results metadata phase does not match result phase.")
+    if data.get("attempt") not in (None, attempt):
+        errors.append("AC results metadata attempt does not match result attempt.")
+    policy = data.get("policy_pack")
+    if expected_policy_pack is not None and policy != expected_policy_pack:
+        errors.append("AC results metadata policy_pack does not match phase result policy_pack.")
+    errors.extend(
+        validate_policy_pack_metadata(
+            policy,
+            "AC results",
+            approved_fingerprints=approved_policy_packs,
+        )
+    )
+    return errors
+
+
+def validate_evaluation_command_results(
+    root: Path,
+    task_path: Path,
+    path: Path,
+    *,
+    approved_policy_packs: list[dict[str, str]] | None = None,
+) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"Invalid evaluation command results JSON: {rel(root, path)}: {exc}"]
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        return [f"Evaluation command results must be a schema_version 1 metadata object: {rel(root, path)}"]
+    errors = validate_policy_pack_metadata(
+        data.get("policy_pack"),
+        "Evaluation command results",
+        approved_fingerprints=approved_policy_packs,
+    )
+    errors.extend(validate_harness_attestation_metadata(data.get("harness_attestation"), "Evaluation command results"))
+    return errors
+
+
+def validate_command_expectation_metadata(commands_run: object, contract: dict[str, object]) -> list[str]:
+    commands = commands_run if isinstance(commands_run, list) else []
+    expectations = contract.get("command_expectations")
+    if not isinstance(expectations, list) or not expectations:
+        return ["Contract.command_expectations is empty but runtime command metadata was provided."] if commands else []
+    by_id = {item.get("id"): item for item in expectations if isinstance(item, dict) and isinstance(item.get("id"), str)}
+    by_command = {
+        item.get("command"): item
+        for item in expectations
+        if isinstance(item, dict) and isinstance(item.get("command"), str)
+    }
+    errors: list[str] = []
+    for index, command in enumerate(commands):
+        if not isinstance(command, dict):
+            continue
+        expectation = by_id.get(command.get("id")) or by_command.get(command.get("command"))
+        if expectation is None:
+            if command.get("role") is not None:
+                errors.append(f"commands_run[{index}] runtime role is not declared in Contract.command_expectations.")
+            continue
+        for key in ["role", "target", "repo_scan"]:
+            if key in command and key in expectation and command.get(key) != expectation.get(key):
+                errors.append(f"commands_run[{index}].{key} does not match Contract.command_expectations.")
+    return errors
+
+
+def validate_runtime_risk_evidence(root: Path, task_path: Path, phase_number: int, contract: dict[str, object]) -> list[str]:
+    required_ids: set[str] = set()
+    for risk in contract.get("risk_ledger") or []:
+        if not isinstance(risk, dict):
+            continue
+        for ref in risk.get("required_evidence") or []:
+            if isinstance(ref, str):
+                required_ids.add(ref)
+    if not required_ids:
+        return []
+    result_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-result.json"
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return [f"Phase {phase_number} risk required_evidence was not closed by passed runtime commands."]
+    passed: set[str] = set()
+    for command in result.get("commands_run") or []:
+        if isinstance(command, dict) and command.get("exit_code") == 0 and isinstance(command.get("id"), str):
+            passed.add(command["id"])
+    missing = sorted(required_ids - passed)
+    return [
+        f"Phase {phase_number} risk required_evidence was not closed by passed runtime commands: {', '.join(missing)}"
+    ] if missing else []
+
+
 def design_doc_info(root: Path, task_path: Path) -> tuple[Path, str, str] | None:
     review_path = task_path / "docs" / DESIGN_REVIEW_DOC
     if review_path.exists():
@@ -289,7 +534,7 @@ def validate_design_review(
     return errors
 
 
-def validate_design_approval(root: Path, task_path: Path) -> list[str]:
+def validate_design_approval(root: Path, task_path: Path, *, strict_current_harness: bool = False) -> list[str]:
     info = design_doc_info(root, task_path)
     if info is None:
         return []
@@ -316,6 +561,50 @@ def validate_design_approval(root: Path, task_path: Path) -> list[str]:
         errors.append("Design approval must include non-empty `approved_at`.")
     if not isinstance(approval.get("approval_source"), str) or not approval.get("approval_source", "").strip():
         errors.append("Design approval must include non-empty `approval_source`.")
+    schema_version = approval.get("schema_version")
+    if strict_current_harness and schema_version != 3:
+        errors.append("Design approval `schema_version` 3 is required by current harness.")
+    bundle = approval.get("approved_bundle")
+    if schema_version == 3 or strict_current_harness or approval.get("approved") is True:
+        if not isinstance(bundle, list) or not bundle:
+            errors.append("Design approval must include non-empty `approved_bundle`.")
+        elif schema_version == 3 or strict_current_harness:
+            current_bundle, bundle_errors = design_approval_bundle_entries(root, task_path, design_rel_path)
+            errors.extend(bundle_errors)
+            if bundle != current_bundle or approval.get("approved_bundle_sha256") != design_approval_bundle_sha256(current_bundle):
+                errors.append("Design approval approved static evidence bundle does not match current files.")
+            for entry in bundle:
+                raw_path = entry.get("path") if isinstance(entry, dict) else None
+                if not isinstance(raw_path, str) or raw_path.startswith("../") or Path(raw_path).is_absolute():
+                    errors.append("Design approval approved_bundle entries must use safe repo-relative paths.")
+    if schema_version == 3 or strict_current_harness:
+        active = policy_pack_fingerprint(approval.get("active_policy_pack"))
+        fingerprints, fingerprint_errors = normalize_policy_pack_fingerprints(
+            approval.get("approved_policy_packs"),
+            "Design approval approved_policy_packs",
+        )
+        errors.extend(fingerprint_errors)
+        if active is None:
+            errors.append("Design approval active_policy_pack must include id, schema_version, and sha256.")
+        elif active != current_policy_pack_fingerprint():
+            errors.append("Design approval active_policy_pack does not match current policy pack.")
+        if active is not None and fingerprints:
+            entries, entry_errors = normalize_policy_pack_lineage_entries(
+                approval.get("approved_policy_packs"),
+                "Design approval approved_policy_packs",
+                active,
+            )
+            errors.extend(entry_errors)
+            if approval.get("approved_policy_packs_sha256") != policy_pack_lineage_sha256(fingerprints):
+                errors.append("Design approval approved_policy_packs_sha256 does not match approved_policy_packs.")
+            expected_scope = design_approval_scope_sha256(
+                approval.get("approved_bundle") if isinstance(approval.get("approved_bundle"), list) else [],
+                fingerprints,
+                active,
+                entries,
+            )
+            if approval.get("design_approval_scope_sha256") != expected_scope:
+                errors.append("Design approval design_approval_scope_sha256 does not match approved scope.")
     return errors
 
 
@@ -347,6 +636,7 @@ def validate_contract_against_design(
     contract: dict[str, object],
     design_kind: str | None,
     approved_paths: list[str],
+    design_refs: set[str] | None = None,
 ) -> list[str]:
     if not is_implementation_contract(contract):
         return []
@@ -356,6 +646,13 @@ def validate_contract_against_design(
             f"Phase {phase_number} uses an implementation layer, so design-review-waiver.md is not allowed."
         )
         return errors
+    if design_refs is not None:
+        refs = {item for item in contract.get("design_refs") or [] if isinstance(item, str)}
+        if not refs:
+            errors.append(f"Phase {phase_number} implementation contract must include design_refs.")
+        missing = sorted(refs - design_refs)
+        if missing:
+            errors.append(f"Phase {phase_number} design_refs are not covered by traceability-matrix.json: {missing}")
     if not approved_paths:
         errors.append(
             f"Phase {phase_number} requires approved repository paths in design review `Files To Add/Change`."
@@ -647,6 +944,10 @@ def validate_evaluation_final(root: Path, path: Path) -> list[str]:
         return [f"Evaluation final output must be a JSON object: {rel(root, path)}"]
     if data.get("verdict") != "approved":
         return [f'Evaluation verdict must be "approved": {rel(root, path)}']
+    if data.get("required_followups"):
+        return [f"Evaluation approved verdict must not include required_followups: {rel(root, path)}"]
+    if data.get("blockers"):
+        return [f"Evaluation approved verdict must not include blockers: {rel(root, path)}"]
     return []
 
 
@@ -663,6 +964,8 @@ def validate_phase_reconciliation(root: Path, path: Path) -> list[str]:
         return [f'Phase reconciliation status must be "satisfied": {rel(root, path)}']
     if not isinstance(reconciliation.get("instruction_results"), list):
         return [f"Phase reconciliation must include instruction_results: {rel(root, path)}"]
+    if any(item.get("status") == "unverified" for item in reconciliation.get("instruction_results") if isinstance(item, dict)):
+        return [f"Phase reconciliation instruction_results must not be unverified: {rel(root, path)}"]
     return []
 
 
@@ -826,6 +1129,8 @@ def validate_runtime_contract_bundle(
         )
     if any(item.get("status") == "blocked" for item in reconciliation_items or [] if isinstance(item, dict)):
         errors.append("Reconciliation instruction results must not be blocked for a completed phase.")
+    if any(item.get("status") == "unverified" for item in reconciliation_items or [] if isinstance(item, dict)):
+        errors.append("Reconciliation instruction_results must not be unverified for a completed phase.")
 
     gate_checks = gate.get("checks") if isinstance(gate, dict) else []
     if not isinstance(gate_checks, list) or not gate_checks:
@@ -893,6 +1198,148 @@ def validate_phase_result(
     artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
     if artifacts.get("handoff") != f"context-pack/handoffs/phase{phase_number}.md":
         errors.append(f"`artifacts.handoff` must be context-pack/handoffs/phase{phase_number}.md.")
+    if "attempt_commit" not in artifacts:
+        errors.append("Phase result artifacts must include attempt_commit.")
+    elif isinstance(attempt, int):
+        errors.extend(validate_phase_attempt_commit(root, task_path, phase_number, attempt, result_path, result, artifacts))
+    return errors
+
+
+def validate_phase_attempt_commit(
+    root: Path,
+    task_path: Path,
+    phase_number: int,
+    attempt: int,
+    result_path: Path,
+    result_data: dict[str, Any],
+    artifacts: dict[str, Any],
+) -> list[str]:
+    raw_path = artifacts.get("attempt_commit")
+    if not isinstance(raw_path, str):
+        return ["Phase result artifacts attempt_commit must be a path."]
+    commit_path = task_path / raw_path
+    try:
+        commit = json.loads(commit_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"Invalid attempt_commit JSON: {rel(root, commit_path)}: {exc}"]
+    errors: list[str] = []
+    if commit.get("phase") != phase_number or commit.get("attempt") != attempt:
+        errors.append("attempt_commit phase/attempt does not match phase result.")
+    result_ref = commit.get("result") if isinstance(commit.get("result"), dict) else {}
+    if result_ref.get("sha256") != file_sha256(result_path):
+        errors.append("attempt_commit result sha256 does not match phase result.")
+    artifact_entries = commit.get("artifacts") if isinstance(commit.get("artifacts"), list) else []
+    by_name = {item.get("name"): item for item in artifact_entries if isinstance(item, dict)}
+    for name, path_value in artifacts.items():
+        if name == "attempt_commit" or not isinstance(path_value, str):
+            continue
+        entry = by_name.get(name)
+        if not isinstance(entry, dict):
+            continue
+        artifact_path = task_path / path_value
+        if artifact_path.exists() and entry.get("sha256") != file_sha256(artifact_path):
+            errors.append(f"{name} sha256 does not match attempt_commit.")
+    return errors
+
+
+def validate_latest_repo_content_matches_current(root: Path, phase_results: list[tuple[int, dict[str, Any]]]) -> list[str]:
+    latest: dict[str, tuple[int, str]] = {}
+    for phase_number, result in phase_results:
+        repo_content = result.get("repo_content") if isinstance(result, dict) else {}
+        for section in ["changed_files", "required_repo_outputs"]:
+            for item in repo_content.get(section) or [] if isinstance(repo_content, dict) else []:
+                if not isinstance(item, dict):
+                    continue
+                path = item.get("path")
+                digest = item.get("after_digest")
+                if digest is None and isinstance(item.get("after"), dict):
+                    digest = item["after"].get("sha256") if item["after"].get("exists") else "<deleted>"
+                if isinstance(path, str) and isinstance(digest, str):
+                    latest[path] = (phase_number, digest)
+    errors: list[str] = []
+    for raw_path, (_phase, digest) in latest.items():
+        current = file_sha256(root / raw_path) if (root / raw_path).exists() and (root / raw_path).is_file() else "<deleted>"
+        if current != digest:
+            errors.append(f"Repo content attestation for {raw_path} does not match current file digest.")
+    return errors
+
+
+def validate_evaluation_repair_results(root: Path, task_path: Path, runtime_dir: Path) -> list[str]:
+    phase_results: list[tuple[int, dict[str, Any]]] = []
+    for path in sorted(runtime_dir.glob("evaluation-repair*-result.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return [f"Invalid evaluation repair result JSON: {rel(root, path)}: {exc}"]
+        if isinstance(data, dict):
+            phase_results.append((int(data.get("iteration") or 0), data))
+    return validate_latest_repo_content_matches_current(root, phase_results)
+
+
+def validate_obligation_closure_ledger(
+    root: Path,
+    task_path: Path,
+    phase_number: int,
+    attempt: int,
+    artifacts: dict[str, Any],
+    *,
+    strict_current_harness: bool = False,
+) -> list[str]:
+    raw_path = artifacts.get("obligation_closure") if isinstance(artifacts, dict) else None
+    if not isinstance(raw_path, str):
+        return []
+    path = task_path / raw_path
+    try:
+        ledger = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"Invalid obligation closure ledger JSON: {rel(root, path)}: {exc}"]
+    errors: list[str] = []
+    if ledger.get("phase") != phase_number or ledger.get("attempt") != attempt:
+        errors.append("obligation_closure phase/attempt does not match phase result.")
+    approval_path = task_path / "context-pack" / "static" / "design-approval.json"
+    approved_bundle_sha = None
+    if approval_path.exists():
+        try:
+            approval = json.loads(approval_path.read_text(encoding="utf-8"))
+            approved_bundle_sha = approval.get("approved_bundle_sha256") if isinstance(approval, dict) else None
+        except json.JSONDecodeError:
+            approved_bundle_sha = None
+    if approved_bundle_sha and ledger.get("design_approval_bundle_sha256") not in {None, approved_bundle_sha}:
+        errors.append("obligation_closure design_approval_bundle_sha256 does not match design approval.")
+    ac_commands: dict[str, dict[str, Any]] = {}
+    raw_ac = artifacts.get("ac_results") if isinstance(artifacts, dict) else None
+    if isinstance(raw_ac, str):
+        try:
+            ac_results = json.loads((task_path / raw_ac).read_text(encoding="utf-8"))
+            for command in ac_results.get("commands") or []:
+                if isinstance(command, dict):
+                    for key in ["id", "command"]:
+                        value = command.get(key)
+                        if isinstance(value, str):
+                            ac_commands[value] = command
+        except (OSError, json.JSONDecodeError):
+            ac_commands = {}
+    for assertion in ledger.get("assertions") or []:
+        if not isinstance(assertion, dict):
+            continue
+        errors.extend(validate_runner_version(assertion.get("runner_version"), "obligation_closure assertion", strict_current=strict_current_harness))
+        contract_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-contract.json"
+        design_path = task_path / "context-pack" / "static" / "design-contract.json"
+        if contract_path.exists() and assertion.get("phase_contract_sha256") != file_sha256(contract_path):
+            errors.append("obligation_closure phase_contract_sha256 does not match current phase contract.")
+        if design_path.exists() and assertion.get("design_contract_sha256") != file_sha256(design_path):
+            errors.append("obligation_closure design_contract_sha256 does not match current design contract.")
+        if approved_bundle_sha and assertion.get("design_approval_bundle_sha256") not in {None, approved_bundle_sha}:
+            errors.append("obligation_closure assertion design_approval_bundle_sha256 does not match design approval.")
+        command_ref = assertion.get("command_ref")
+        command = ac_commands.get(command_ref) if isinstance(command_ref, str) else None
+        if command is not None and assertion.get("command_output_sha256"):
+            expected = command.get("command_output_sha256")
+            if not expected:
+                output = command.get("output") if isinstance(command.get("output"), str) else str(command.get("output_tail") or "")
+                expected = text_sha256(output)
+            if assertion.get("command_output_sha256") != expected:
+                errors.append("obligation_closure command_output_sha256 does not match AC command output digest.")
     return errors
 
 
@@ -901,6 +1348,7 @@ def verify(
     task_path: Path,
     require_evaluation: bool,
     require_design_approval: bool,
+    strict_current_harness: bool = False,
 ) -> list[str]:
     errors: list[str] = []
     task_index_path = task_path / "index.json"
@@ -943,14 +1391,64 @@ def verify(
     for filename in MANDATORY_STATIC_FILES:
         errors.extend(require_file(root, static_dir / filename, "static context"))
     if require_design_approval:
-        errors.extend(validate_design_approval(root, task_path))
+        errors.extend(validate_design_approval(root, task_path, strict_current_harness=strict_current_harness))
     design_info = design_doc_info(root, task_path)
     design_kind = design_info[2] if design_info else None
     approved_design_paths: list[str] = []
+    design_ref_ids: set[str] = set()
     if design_info and design_kind == "review":
-        approved_design_paths = extract_design_repo_paths(
-            design_info[0].read_text(encoding="utf-8", errors="replace")
+        design_text = design_info[0].read_text(encoding="utf-8", errors="replace")
+        approved_design_paths = extract_design_repo_paths(design_text)
+        design_contract_path = static_dir / "design-contract.json"
+        design_ref_ids, obligation_ids, design_contract_errors = validate_design_contract(
+            root,
+            design_contract_path,
+            design_text,
+            approved_design_paths,
         )
+        errors.extend(design_contract_errors)
+        try:
+            design_contract = json.loads(design_contract_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            design_contract = {}
+        artifact = design_contract.get("artifact_persistence") if isinstance(design_contract, dict) else None
+        for item in artifact.get("required_paths") or [] if isinstance(artifact, dict) else []:
+            raw_path = item.get("path") if isinstance(item, dict) else None
+            if not isinstance(raw_path, str):
+                continue
+            result = subprocess.run(
+                ["git", "check-ignore", "-q", "--", raw_path],
+                cwd=root,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                errors.append(f"design-contract.json artifact_persistence path is ignored by git: {raw_path}")
+        taxonomy_ids, taxonomy_errors = validate_review_taxonomy(root, static_dir / "review-taxonomy.json")
+        errors.extend(taxonomy_errors)
+        universe = ReferenceUniverse()
+        for raw_path in approved_design_paths:
+            universe.add_path(raw_path)
+        for item in design_ref_ids:
+            prefix = item.split(".", 1)[0] if "." in item else item
+            source = {
+                "txn": "transaction_boundaries",
+                "transaction": "transaction_boundaries",
+                "retry": "retry_triggers",
+                "artifact": "artifact_persistence",
+            }.get(prefix, prefix)
+            universe.add("design", item, source=source)
+        for item in obligation_ids:
+            universe.add("obligation", item)
+        for item in approved_decision_ids(decision_registry):
+            universe.add("decision", item)
+        for item in architecture_ref_ids(decision_registry):
+            universe.add("architecture", item)
+        errors.extend(validate_review_findings(root, static_dir / "review-findings.json", taxonomy_ids, universe))
+        errors.extend(validate_review_coverage(root, static_dir / "review-coverage.json", taxonomy_ids, obligation_ids, universe))
+    else:
+        obligation_ids = set()
 
     phase_count = int(task_index.get("totalPhases") or len(task_index.get("phases") or []))
     phases = task_index.get("phases") or []
@@ -959,6 +1457,8 @@ def verify(
 
     runtime_dir = task_path / "context-pack" / "runtime"
     handoff_dir = task_path / "context-pack" / "handoffs"
+    phase_design_refs: list[tuple[int, str]] = []
+    phase_closes_obligations: set[str] = set()
     for phase in phases:
         phase_number = int(phase["phase"])
         phase_path = task_path / "phases" / f"phase{phase_number}.md"
@@ -979,6 +1479,14 @@ def verify(
             )
             errors.extend([f"Phase {phase_number} contract: {error}" for error in contract_errors])
             if contract is not None:
+                phase_design_refs.extend(
+                    (phase_number, item)
+                    for item in contract.get("design_refs") or []
+                    if isinstance(item, str)
+                )
+                phase_closes_obligations.update(
+                    item for item in contract.get("closes_obligations") or [] if isinstance(item, str)
+                )
                 errors.extend(
                     validate_contract_against_design(
                         root,
@@ -987,6 +1495,7 @@ def verify(
                         contract,
                         design_kind,
                         approved_design_paths,
+                        design_ref_ids,
                     )
                 )
             expected_commands = expected_ac_commands(phase, markdown)
@@ -1072,6 +1581,15 @@ def verify(
             if phase_number == 0:
                 errors.extend(require_file(root, runtime_dir / "docs-diff.md", "docs diff", check_placeholder=False))
 
+    if design_info and design_kind == "review":
+        errors.extend(validate_traceability_matrix(root, static_dir / "traceability-matrix.json", design_ref_ids, phase_design_refs))
+        missing_obligations = sorted(obligation_ids - phase_closes_obligations)
+        if missing_obligations:
+            errors.append(f"design-contract.json obligations must be closed by at least one phase: {missing_obligations}")
+        unknown_closed = sorted(phase_closes_obligations - obligation_ids)
+        if unknown_closed:
+            errors.append(f"Phase closes_obligations entry is not in design-contract.json obligations: {unknown_closed}")
+
     if require_evaluation:
         errors.extend(
             require_file(root, runtime_dir / "evaluation-command-results.json", "evaluation command results", False)
@@ -1113,6 +1631,7 @@ def main() -> int:
     parser.add_argument("--root", default=".", help="Repository root.")
     parser.add_argument("--require-evaluation", action="store_true")
     parser.add_argument("--require-design-approval", action="store_true")
+    parser.add_argument("--strict-current-harness", action="store_true")
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
@@ -1122,6 +1641,7 @@ def main() -> int:
         task_path,
         args.require_evaluation,
         args.require_design_approval,
+        args.strict_current_harness,
     )
     if errors:
         print("Task verification failed:", file=sys.stderr)

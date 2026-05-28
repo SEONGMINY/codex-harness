@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 
 from codex_exec import add_output_schema, run_codex_exec
+from policy_pack import policy_pack_metadata
+from policy_lineage import design_approval_scope_sha256, policy_pack_lineage_sha256, stable_json_sha256
 
 
 SKIP_SNAPSHOT_DIRS = {
@@ -33,7 +35,7 @@ SKIP_SNAPSHOT_PATHS = {
     ".codex-harness",
     ".codex/harness/sessions",
 }
-HARNESS_VERSION = "0.1.4"
+HARNESS_VERSION = "0.1.5"
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MANDATORY_COMMON_DOCS = [
     "docs/harness/runner-contract.md",
@@ -64,6 +66,11 @@ MANDATORY_STATIC_FILES = [
     "docs-approval.md",
     "context-gathering.md",
     "docs-index.md",
+    "design-contract.json",
+    "review-taxonomy.json",
+    "review-findings.json",
+    "review-coverage.json",
+    "traceability-matrix.json",
 ]
 DESIGN_REVIEW_DOC = "implementation-design-review.md"
 DESIGN_REVIEW_WAIVER_DOC = "design-review-waiver.md"
@@ -409,6 +416,71 @@ def read_json_object(path: Path) -> dict[str, object] | None:
     return data if isinstance(data, dict) else None
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def design_doc_info(root: Path, task_path: Path) -> tuple[Path, str] | None:
+    for filename in [DESIGN_REVIEW_DOC, DESIGN_REVIEW_WAIVER_DOC]:
+        path = task_path / "docs" / filename
+        if path.exists():
+            return path, rel(path, root)
+    return None
+
+
+def design_approval_bundle(root: Path, task_path: Path, design_rel_path: str) -> list[dict[str, str]]:
+    paths = [root / design_rel_path]
+    for filename in ["design-contract.json", "traceability-matrix.json", "review-findings.json", "review-coverage.json"]:
+        path = task_path / "context-pack" / "static" / filename
+        if path.exists():
+            paths.append(path)
+    return sorted(
+        [{"path": rel(path, root), "sha256": file_sha256(path)} for path in paths if path.exists() and path.is_file()],
+        key=lambda item: item["path"],
+    )
+
+
+def write_design_approval(root: Path, task_path: Path) -> None:
+    info = design_doc_info(root, task_path)
+    if info is None:
+        return
+    design_path, design_rel_path = info
+    bundle = design_approval_bundle(root, task_path, design_rel_path)
+    active_policy = {
+        key: value
+        for key, value in policy_pack_metadata().items()
+        if key in {"id", "schema_version", "sha256"}
+    }
+    approved_policies = [active_policy]
+    approved_policy_entries = [{**active_policy, "status": "active"}]
+    approval = {
+        "schema_version": 3,
+        "approved": True,
+        "approved_doc": design_rel_path,
+        "approved_doc_sha256": file_sha256(design_path),
+        "approved_bundle": bundle,
+        "approved_bundle_sha256": stable_json_sha256(bundle),
+        "active_policy_pack": active_policy,
+        "approved_policy_packs": approved_policies,
+        "approved_policy_packs_sha256": policy_pack_lineage_sha256(approved_policies),
+        "design_approval_scope_sha256": design_approval_scope_sha256(
+            bundle,
+            approved_policies,
+            active_policy,
+            approved_policy_entries,
+        ),
+        "approved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "approval_source": "launcher --design-approved",
+    }
+    path = task_path / "context-pack" / "static" / DESIGN_APPROVAL_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(path, approval)
+
+
 def design_approval_artifacts_exist(root: Path, task_path: Path) -> bool:
     if not (root / "tasks" / "index.json").is_file():
         return False
@@ -468,13 +540,33 @@ def run_phases(root: Path, task_path: Path, run_dir: Path, args: argparse.Namesp
         command.append("--evaluate")
     if args.yolo:
         command.append("--yolo")
+    if getattr(args, "strict_current_harness", False):
+        command.append("--strict-current-harness")
 
     with output_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
         result = subprocess.run(command, cwd=root, text=True, stdout=stdout, stderr=stderr, check=False)
     return int(result.returncode)
 
 
-def verify_task(root: Path, task_path: Path, run_dir: Path) -> int:
+def run_phases_dry_run(root: Path, task_path: Path, run_dir: Path, args: argparse.Namespace) -> int:
+    output_path = run_dir / "run-phases-dry-run-output.txt"
+    stderr_path = run_dir / "run-phases-dry-run-stderr.txt"
+    command = [
+        sys.executable,
+        str(installed_harness_script(root, "run-phases.py")),
+        rel(task_path, root),
+        "--root",
+        str(root),
+        "--dry-run",
+    ]
+    if getattr(args, "strict_current_harness", False):
+        command.append("--strict-current-harness")
+    with output_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+        result = subprocess.run(command, cwd=root, text=True, stdout=stdout, stderr=stderr, check=False)
+    return int(result.returncode)
+
+
+def verify_task(root: Path, task_path: Path, run_dir: Path, strict_current_harness: bool = False) -> int:
     output_path = run_dir / "verify-task-output.txt"
     stderr_path = run_dir / "verify-task-stderr.txt"
     command = [
@@ -485,6 +577,8 @@ def verify_task(root: Path, task_path: Path, run_dir: Path) -> int:
         str(root),
         "--require-design-approval",
     ]
+    if strict_current_harness:
+        command.append("--strict-current-harness")
     with output_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
         result = subprocess.run(command, cwd=root, text=True, stdout=stdout, stderr=stderr, check=False)
     return int(result.returncode)
@@ -546,6 +640,18 @@ def harness_skill_path(root: Path) -> Path | None:
 def harness_install_errors(root: Path) -> list[str]:
     required_paths = [
         root / "codex-harness.json",
+        root / ".codex" / "harness" / "scripts" / "artifact_io.py",
+        root / ".codex" / "harness" / "scripts" / "codex_exec.py",
+        root / ".codex" / "harness" / "scripts" / "command_policy.py",
+        root / ".codex" / "harness" / "scripts" / "design_contract.py",
+        root / ".codex" / "harness" / "scripts" / "env_policy.py",
+        root / ".codex" / "harness" / "scripts" / "evidence_obligations.py",
+        root / ".codex" / "harness" / "scripts" / "harness_attestation.py",
+        root / ".codex" / "harness" / "scripts" / "obligation_ledger.py",
+        root / ".codex" / "harness" / "scripts" / "policy_lineage.py",
+        root / ".codex" / "harness" / "scripts" / "policy_pack.py",
+        root / ".codex" / "harness" / "scripts" / "redaction.py",
+        root / ".codex" / "harness" / "scripts" / "reference_resolver.py",
         root / ".codex" / "harness" / "scripts" / "start.py",
         root / ".codex" / "harness" / "scripts" / "run-phases.py",
         root / ".codex" / "harness" / "scripts" / "verify-task.py",
@@ -637,6 +743,9 @@ def materialize_preapproval_artifact(run_dir: Path, final: dict[str, object] | N
 
 def resolve_document_path(root: Path, raw_path: object) -> Path | None:
     if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    lowered = raw_path.lower()
+    if any(marker in lowered for marker in [".env", ".ssh", "secret", "password", "token", "private_key"]):
         return None
     candidate = Path(raw_path)
     if not candidate.is_absolute():
@@ -774,6 +883,7 @@ def main() -> int:
         help="Pass --dangerously-bypass-approvals-and-sandbox to codex exec.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Write launcher files without running Codex.")
+    parser.add_argument("--strict-current-harness", action="store_true", help="Require current harness runtime metadata.")
     args = parser.parse_args()
 
     root = Path(args.root).expanduser().resolve()
@@ -885,7 +995,8 @@ def main() -> int:
         if task_path is None:
             final_status = "blocked"
         else:
-            verifier_returncode = verify_task(root, task_path, run_dir)
+            write_design_approval(root, task_path)
+            verifier_returncode = verify_task(root, task_path, run_dir, args.strict_current_harness)
             if verifier_returncode != 0:
                 final_status = "blocked"
                 write_json(
@@ -898,6 +1009,7 @@ def main() -> int:
                 )
 
     phase_plan_review_returncode: int | None = None
+    dry_run_returncode: int | None = None
     if (
         args.docs_approved
         and args.design_approved
@@ -919,6 +1031,30 @@ def main() -> int:
                         "status": "orchestration_violation",
                         "reason": "Phase plan semantic review must pass before the launcher can accept planned state.",
                         "phase_plan_review_returncode": phase_plan_review_returncode,
+                    },
+                )
+
+    if (
+        args.docs_approved
+        and args.design_approved
+        and not args.dry_run
+        and not protocol_violations
+        and returncode == 0
+        and final_status == "planned"
+    ):
+        task_path = resolve_task_path(root, final_output)
+        if task_path is None:
+            final_status = "blocked"
+        else:
+            dry_run_returncode = run_phases_dry_run(root, task_path, run_dir, args)
+            if dry_run_returncode != 0:
+                final_status = "blocked"
+                write_json(
+                    run_dir / "orchestration-violation.json",
+                    {
+                        "status": "orchestration_violation",
+                        "reason": "Phase runner dry-run must pass before the launcher can accept planned state.",
+                        "dry_run_returncode": dry_run_returncode,
                     },
                 )
 
@@ -948,6 +1084,7 @@ def main() -> int:
         "returncode": returncode,
         "verifier_returncode": verifier_returncode,
         "phase_plan_review_returncode": phase_plan_review_returncode,
+        "dry_run_returncode": dry_run_returncode,
         "runner_returncode": runner_returncode,
         "run_dir": rel(run_dir, root),
         "request": rel(request_path, root),
@@ -957,6 +1094,8 @@ def main() -> int:
         "stderr": rel(run_dir / "harness-stderr.txt", root),
         "run_phases_output": rel(run_dir / "run-phases-output.txt", root),
         "run_phases_stderr": rel(run_dir / "run-phases-stderr.txt", root),
+        "run_phases_dry_run_output": rel(run_dir / "run-phases-dry-run-output.txt", root),
+        "run_phases_dry_run_stderr": rel(run_dir / "run-phases-dry-run-stderr.txt", root),
         "verify_task_output": rel(run_dir / "verify-task-output.txt", root),
         "verify_task_stderr": rel(run_dir / "verify-task-stderr.txt", root),
         "phase_plan_review_output": rel(run_dir / "phase-plan-review-output.txt", root),
