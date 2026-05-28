@@ -7,12 +7,14 @@ import argparse
 import json
 import os
 import shutil
-import subprocess
 import sys
+import shlex
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
+from command_policy import run_command
+from redaction import redact_text
 
 CODE_EXTENSIONS = {
     ".c",
@@ -58,24 +60,12 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def run_capture(command: list[str], cwd: Path, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> tuple[int, str]:
-    try:
-        result = subprocess.run(
-            command,
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-        return result.returncode, (result.stdout + result.stderr).strip()
-    except FileNotFoundError:
-        return 127, f"Command not found: {command[0]}"
-    except subprocess.TimeoutExpired as exc:
-        output = ((exc.stdout or "") + (exc.stderr or "")).strip()
-        return 124, (output + f"\nTimed out after {timeout} seconds.").strip()
+    code, output, _timed_out, _argv = run_command(shlex.join(command), cwd, timeout)
+    return code, output.strip()
 
 
 def truncate_text(value: str, limit: int = 4000) -> str:
+    value = redact_text(value)
     if len(value) <= limit:
         return value
     return value[-limit:]

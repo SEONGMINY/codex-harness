@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS_DIR = ROOT / "scripts" / "harness"
+sys.path.insert(0, str(HARNESS_DIR))
 SPEC = importlib.util.spec_from_file_location("quality_checks", HARNESS_DIR / "run-quality-checks.py")
 assert SPEC is not None
 QUALITY = importlib.util.module_from_spec(SPEC)
@@ -126,6 +128,33 @@ class QualityChecksTest(unittest.TestCase):
             self.assertEqual(result["source"], "mixed")
             self.assertEqual(result["status"], "failed")
             self.assertIn("Quality check failed: project-command:npm", result["blocking_reasons"])
+
+    def test_command_check_redacts_secret_output(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            script = root / "print_secret.py"
+            script.write_text('print("API_KEY=sk-1234567890abcdefghijklmnop")\n', encoding="utf-8")
+
+            check = QUALITY.command_check([sys.executable, str(script)], root, "block")
+
+            self.assertEqual(check["exit_code"], 0)
+            self.assertIn("[REDACTED]", check["output_tail"])
+            self.assertNotIn("sk-1234567890abcdefghijklmnop", check["output_tail"])
+
+    def test_command_check_uses_sanitized_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            script = root / "print_env.py"
+            script.write_text(
+                "import os\nprint(os.environ.get('OPENAI_API_KEY', 'missing'))\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "sk-1234567890abcdefghijklmnop"}, clear=False):
+                check = QUALITY.command_check([sys.executable, str(script)], root, "block")
+
+            self.assertEqual(check["exit_code"], 0)
+            self.assertEqual(check["output_tail"], "missing")
 
 
 if __name__ == "__main__":

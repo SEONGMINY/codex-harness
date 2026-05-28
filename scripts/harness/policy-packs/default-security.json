@@ -1,0 +1,73 @@
+{
+  "schema_version": "1",
+  "id": "default-security",
+  "command": {
+    "shell_control_tokens": ["&", "&&", "|", "||", ";", "<", ">", ">>", "2>", "2>>"],
+    "forbidden_executables": [
+      "chmod",
+      "chown",
+      "curl",
+      "bash",
+      "dash",
+      "dd",
+      "env",
+      "fish",
+      "ksh",
+      "mkfs",
+      "nc",
+      "netcat",
+      "printenv",
+      "rm",
+      "rsync",
+      "scp",
+      "sh",
+      "ssh",
+      "sudo",
+      "wget",
+      "zsh"
+    ],
+    "sensitive_path_markers": [".env", ".ssh", "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"]
+  },
+  "environment": {
+    "allowed_names": [
+      "CI",
+      "CODEX_HOME",
+      "HOME",
+      "LANG",
+      "LC_ALL",
+      "LC_CTYPE",
+      "LOGNAME",
+      "PATH",
+      "PWD",
+      "SHELL",
+      "TEMP",
+      "TERM",
+      "TMP",
+      "TMPDIR",
+      "USER",
+      "XDG_CACHE_HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME"
+    ],
+    "sensitive_name_patterns": [
+      "(^|_)(AUTH|COOKIE|CREDENTIAL|PASSWORD|PASSWD|SECRET|SESSION|TOKEN)(_|$)",
+      "(^|_)[A-Z0-9]*KEY$",
+      "^AWS_",
+      "^GITHUB_TOKEN$",
+      "^OPENAI_API_KEY$",
+      "^SUPABASE_"
+    ]
+  },
+  "redaction": {
+    "replacement": "[REDACTED]",
+    "secret_patterns": [
+      "(?i)\\b(api[_-]?key|auth[_-]?token|access[_-]?token|refresh[_-]?token|service[_-]?role[_-]?key|secret|password|passwd|pwd)\\b\\s*[:=]\\s*([\\\"']?)[^\\s\\\"']{8,}\\2",
+      "\\bsk-[A-Za-z0-9_-]{20,}\\b",
+      "\\bghp_[A-Za-z0-9_]{20,}\\b",
+      "\\bgithub_pat_[A-Za-z0-9_]{20,}\\b",
+      "\\bAKIA[0-9A-Z]{16}\\b",
+      "\\beyJ[A-Za-z0-9_-]{20,}\\.[A-Za-z0-9_-]{20,}\\.[A-Za-z0-9_-]{10,}\\b",
+      "-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----.*?-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"
+    ]
+  }
+}

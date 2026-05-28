@@ -11,6 +11,9 @@ import time
 from pathlib import Path
 from typing import Iterable
 
+from env_policy import sanitized_env
+from redaction import redact_text
+
 
 CODEX_IDLE_EXIT_CODE = 124
 SKIP_ACTIVITY_DIRS = {
@@ -41,7 +44,7 @@ def stream_pipe_to_file(pipe, output_path: Path, activity_queue: queue.Queue[flo
                 chunk = pipe.readline()
                 if chunk == "":
                     break
-                handle.write(chunk)
+                handle.write(redact_text(chunk))
                 handle.flush()
                 activity_queue.put(time.monotonic())
     finally:
@@ -158,10 +161,15 @@ def run_codex_exec(
 
     activity_queue: queue.Queue[float] = queue.Queue()
     last_activity = time.monotonic()
+    process_env = sanitized_env(
+        env,
+        allow_harness_policy_controls=True,
+        allow_additional_env_names=False,
+    ) if env is not None else sanitized_env(allow_harness_policy_controls=True)
     process = subprocess.Popen(
         command,
         cwd=cwd,
-        env=env,
+        env=process_env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
