@@ -1210,6 +1210,52 @@ def validate_evaluation_commit(
                 f"Evaluation commit phase {phase_number}",
             )
         )
+    repair_proofs = commit.get("repair_proofs")
+    if not isinstance(repair_proofs, list):
+        errors.append("Evaluation commit repair_proofs must be a list.")
+        repair_proofs = []
+    by_iteration = {
+        item.get("iteration"): item
+        for item in repair_proofs
+        if isinstance(item, dict) and isinstance(item.get("iteration"), int)
+    }
+    repair_paths = sorted(
+        (task_path / "context-pack" / "runtime").glob("evaluation-repair*-result.json"),
+        key=lambda item: (
+            evaluation_repair_result_iteration(item)
+            if evaluation_repair_result_iteration(item) is not None
+            else 10**9
+        ),
+    )
+    expected_iterations = {
+        iteration
+        for path_item in repair_paths
+        if (iteration := evaluation_repair_result_iteration(path_item)) is not None
+    }
+    actual_iterations = {iteration for iteration in by_iteration if isinstance(iteration, int)}
+    if actual_iterations != expected_iterations:
+        errors.append(
+            "Evaluation commit repair_proofs must match evaluation repair results. "
+            f"expected={sorted(expected_iterations)!r} actual={sorted(actual_iterations)!r}"
+        )
+    for repair_path in repair_paths:
+        iteration = evaluation_repair_result_iteration(repair_path)
+        if iteration is None:
+            continue
+        proof = by_iteration.get(iteration)
+        if not isinstance(proof, dict):
+            continue
+        expected_path = f"context-pack/runtime/evaluation-repair{iteration}-result.json"
+        errors.extend(
+            validate_commit_artifact_ref(
+                root,
+                task_path,
+                proof.get("result"),
+                "result",
+                expected_path,
+                f"Evaluation commit repair {iteration}",
+            )
+        )
     return errors
 
 

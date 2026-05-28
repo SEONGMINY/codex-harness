@@ -350,6 +350,7 @@ class VerifyTaskHelperTest(unittest.TestCase):
                         "sha256": VERIFY_TASK.file_sha256(task_path / "index.json"),
                     },
                     "phase_proofs": [],
+                    "repair_proofs": [],
                     "evaluation_artifacts": evaluation_artifacts,
                 }
             )
@@ -1156,6 +1157,77 @@ classDiagram
             )
 
             self.assertTrue(any("phase_proofs must match completed phases" in error for error in errors), errors)
+
+    def test_evaluation_commit_repair_proofs_seal_repair_result(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+            self.write_design_approval(root, task_path)
+            self.write_evaluation_artifacts(task_path)
+            runtime_dir = task_path / "context-pack" / "runtime"
+            repo_content = {
+                "changed_files": [],
+                "changed_files_digest": VERIFY_TASK.stable_json_sha256([]),
+                "required_repo_outputs": [],
+                "required_repo_outputs_digest": VERIFY_TASK.stable_json_sha256([]),
+            }
+            repo_content["digest"] = VERIFY_TASK.stable_json_sha256(repo_content)
+            self.write_evaluation_repair_result(root, task_path, repo_content=repo_content)
+            repair_path = runtime_dir / "evaluation-repair1-result.json"
+            commit_path = runtime_dir / "evaluation-commit.json"
+            commit = json.loads(commit_path.read_text(encoding="utf-8"))
+            commit["repair_proofs"] = [
+                {
+                    "iteration": 1,
+                    "result": {
+                        "name": "result",
+                        "path": "context-pack/runtime/evaluation-repair1-result.json",
+                        "exists": True,
+                        "sha256": VERIFY_TASK.file_sha256(repair_path),
+                    },
+                }
+            ]
+            commit_path.write_text(json.dumps(commit) + "\n", encoding="utf-8")
+            tampered = json.loads(repair_path.read_text(encoding="utf-8"))
+            tampered["status"] = "failed"
+            repair_path.write_text(json.dumps(tampered) + "\n", encoding="utf-8")
+
+            errors = VERIFY_TASK.validate_evaluation_commit(
+                root,
+                task_path,
+                commit_path,
+                [],
+                approved_policy_packs=[VERIFY_TASK.current_policy_pack_fingerprint()],
+            )
+
+            self.assertTrue(any("repair 1 result sha256 does not match" in error for error in errors), errors)
+
+    def test_evaluation_commit_repair_proofs_must_match_repair_results(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+            self.write_design_approval(root, task_path)
+            self.write_evaluation_artifacts(task_path)
+            repo_content = {
+                "changed_files": [],
+                "changed_files_digest": VERIFY_TASK.stable_json_sha256([]),
+                "required_repo_outputs": [],
+                "required_repo_outputs_digest": VERIFY_TASK.stable_json_sha256([]),
+            }
+            repo_content["digest"] = VERIFY_TASK.stable_json_sha256(repo_content)
+            self.write_evaluation_repair_result(root, task_path, repo_content=repo_content)
+
+            errors = VERIFY_TASK.validate_evaluation_commit(
+                root,
+                task_path,
+                task_path / "context-pack" / "runtime" / "evaluation-commit.json",
+                [],
+                approved_policy_packs=[VERIFY_TASK.current_policy_pack_fingerprint()],
+            )
+
+            self.assertTrue(any("repair_proofs must match evaluation repair results" in error for error in errors), errors)
 
     def test_verify_with_evaluation_requirement_rejects_repair_result_drift(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -130,6 +131,36 @@ def completed_phase_proofs(task_path: Path, task_index: dict) -> list[dict[str, 
     return proofs
 
 
+def evaluation_repair_result_iteration(path: Path) -> int | None:
+    match = re.fullmatch(r"evaluation-repair(\d+)-result\.json", path.name)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def evaluation_repair_proofs(task_path: Path) -> list[dict[str, object]]:
+    runtime_dir = task_path / "context-pack" / "runtime"
+    proofs: list[dict[str, object]] = []
+    for path in sorted(
+        runtime_dir.glob("evaluation-repair*-result.json"),
+        key=lambda item: (
+            evaluation_repair_result_iteration(item)
+            if evaluation_repair_result_iteration(item) is not None
+            else 10**9
+        ),
+    ):
+        iteration = evaluation_repair_result_iteration(path)
+        if iteration is None:
+            continue
+        proofs.append(
+            {
+                "iteration": iteration,
+                "result": artifact_ref(task_path, "result", path),
+            }
+        )
+    return proofs
+
+
 def write_evaluation_commit(
     task_path: Path,
     task_index: dict,
@@ -152,6 +183,7 @@ def write_evaluation_commit(
         "design_approval_scope_sha256": design_approval_scope_sha(task_path),
         "task_index": artifact_ref(task_path, "task_index", task_path / "index.json"),
         "phase_proofs": completed_phase_proofs(task_path, task_index),
+        "repair_proofs": evaluation_repair_proofs(task_path),
         "evaluation_artifacts": [
             artifact_ref(task_path, name, path)
             for name, path in artifacts.items()
