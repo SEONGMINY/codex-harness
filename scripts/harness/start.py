@@ -29,6 +29,7 @@ from design_approval import design_approval_bundle_entries, design_approval_bund
 from harness_attestation import attestation_fingerprint, harness_attestation
 from policy_pack import policy_pack_metadata
 from policy_lineage import design_approval_scope_sha256, policy_pack_lineage_sha256
+from process_runner import run_process_to_files
 from task_paths import resolve_task_path as resolve_harness_task_path
 
 
@@ -607,21 +608,16 @@ def run_subprocess_to_files(
     timeout_seconds: int,
 ) -> int:
     timeout = timeout_seconds if timeout_seconds > 0 else None
-    with output_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        try:
-            result = subprocess.run(
-                command,
-                cwd=root,
-                text=True,
-                stdout=stdout,
-                stderr=stderr,
-                timeout=timeout,
-                check=False,
-            )
-            return int(result.returncode)
-        except subprocess.TimeoutExpired:
-            stderr.write(f"\nTimed out after {timeout_seconds} seconds.\n")
-            return LAUNCHER_SUBPROCESS_TIMEOUT_EXIT_CODE
+    result = run_process_to_files(
+        command,
+        cwd=root,
+        stdout_path=output_path,
+        stderr_path=stderr_path,
+        timeout=timeout,
+    )
+    if result.timed_out:
+        return LAUNCHER_SUBPROCESS_TIMEOUT_EXIT_CODE
+    return int(result.returncode)
 
 
 def generate_relationship_graph(root: Path, task_path: Path | None) -> dict[str, object] | None:
@@ -678,6 +674,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "obligation_ledger.py",
         root / ".codex" / "harness" / "scripts" / "policy_lineage.py",
         root / ".codex" / "harness" / "scripts" / "policy_pack.py",
+        root / ".codex" / "harness" / "scripts" / "process_runner.py",
         root / ".codex" / "harness" / "scripts" / "redaction.py",
         root / ".codex" / "harness" / "scripts" / "reference_resolver.py",
         root / ".codex" / "harness" / "scripts" / "start.py",

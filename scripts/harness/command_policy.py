@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import shlex
-import subprocess
 from pathlib import Path
 
 from env_policy import sanitized_env
 from policy_pack import command_policy
+from process_runner import PROCESS_TIMEOUT_EXIT_CODE, run_process
 from redaction import redact_text
 
 
@@ -71,26 +71,16 @@ def run_command(command: str, cwd: Path, timeout: int) -> tuple[int, str, bool, 
     if errors:
         return 126, "\n".join(f"[command-policy] {error}" for error in errors), False, argv
     try:
-        result = subprocess.run(
+        result = run_process(
             argv,
             cwd=cwd,
             env=sanitized_env(overrides={"PWD": str(cwd)}),
-            shell=False,
-            text=True,
-            capture_output=True,
             timeout=timeout,
-            check=False,
         )
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", errors="replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", errors="replace")
-        output = (str(stdout) + str(stderr)).strip()
-        timeout_message = f"[timeout] command exceeded {timeout} seconds"
-        return 124, redact_text("\n".join(item for item in [output, timeout_message] if item).strip()), True, argv
     except OSError as exc:
         return 127, f"[execution-error] {exc}", False, argv
+    if result.timed_out:
+        output = (result.stdout + result.stderr).strip()
+        timeout_message = f"[timeout] command exceeded {timeout} seconds"
+        return PROCESS_TIMEOUT_EXIT_CODE, redact_text("\n".join(item for item in [output, timeout_message] if item).strip()), True, argv
     return result.returncode, redact_text((result.stdout + result.stderr).strip()), False, argv

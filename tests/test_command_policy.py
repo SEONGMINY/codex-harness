@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
+import shlex
 import sys
+import tempfile
+import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -11,7 +15,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "harness"))
 
-from command_policy import parse_command  # noqa: E402
+from command_policy import parse_command, run_command  # noqa: E402
+from process_runner import PROCESS_TIMEOUT_EXIT_CODE  # noqa: E402
 
 
 class CommandPolicyTest(unittest.TestCase):
@@ -40,6 +45,66 @@ class CommandPolicyTest(unittest.TestCase):
             "perl -eprint 123",
         ]:
             self.assert_rejected(command)
+
+    @unittest.skipIf(sys.platform == "win32", "process group cleanup is POSIX-specific")
+    def test_timeout_kills_child_process_group(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            marker = tmp / "heartbeat.txt"
+            child = tmp / "child.py"
+            child.write_text(
+                textwrap.dedent(
+                    """
+                    import sys
+                    import time
+                    from pathlib import Path
+
+                    marker = Path(sys.argv[1])
+                    while True:
+                        with marker.open("a", encoding="utf-8") as handle:
+                            handle.write("tick\\n")
+                            handle.flush()
+                        time.sleep(0.1)
+                    """
+                ).lstrip(),
+                encoding="utf-8",
+            )
+            parent = tmp / "parent.py"
+            parent.write_text(
+                textwrap.dedent(
+                    """
+                    import subprocess
+                    import sys
+                    import time
+                    from pathlib import Path
+
+                    marker = Path(sys.argv[1])
+                    subprocess.Popen([sys.executable, sys.argv[2], str(marker)])
+                    deadline = time.monotonic() + 5
+                    while not marker.exists() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    print("child started", flush=True)
+                    time.sleep(30)
+                    """
+                ).lstrip(),
+                encoding="utf-8",
+            )
+            command = (
+                f"{shlex.quote(sys.executable)} "
+                f"{shlex.quote(str(parent))} "
+                f"{shlex.quote(str(marker))} "
+                f"{shlex.quote(str(child))}"
+            )
+
+            code, output, timed_out, _argv = run_command(command, tmp, timeout=1)
+
+            self.assertEqual(code, PROCESS_TIMEOUT_EXIT_CODE, output)
+            self.assertTrue(timed_out)
+            self.assertIn("[timeout]", output)
+            self.assertTrue(marker.exists())
+            before = marker.read_text(encoding="utf-8")
+            time.sleep(0.5)
+            self.assertEqual(marker.read_text(encoding="utf-8"), before)
 
 
 if __name__ == "__main__":

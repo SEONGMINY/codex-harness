@@ -56,6 +56,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 "phase_contract.py",
                 "phase_semantics.py",
                 "policy_pack.py",
+                "process_runner.py",
                 "reference_resolver.py",
                 "redaction.py",
                 "run-phases.py",
@@ -2902,6 +2903,75 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertIn("[REDACTED]", payload["output_tail"])
             self.assertNotIn("sk-timeout", payload["output_tail"])
             self.assertFalse(RUN_PHASES.install_preflight_lock_path(root).exists())
+
+    @unittest.skipIf(sys.platform == "win32", "process group cleanup is POSIX-specific")
+    def test_install_preflight_timeout_kills_child_process_group(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (root / "package.json").write_text('{"packageManager":"pnpm@9.0.0"}\n', encoding="utf-8")
+            (root / "pnpm-workspace.yaml").write_text("packages: []\n", encoding="utf-8")
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            marker = tmp / "install-heartbeat.txt"
+            child = tmp / "install_child.py"
+            child.write_text(
+                textwrap.dedent(
+                    """
+                    import sys
+                    import time
+                    from pathlib import Path
+
+                    marker = Path(sys.argv[1])
+                    while True:
+                        with marker.open("a", encoding="utf-8") as handle:
+                            handle.write("tick\\n")
+                            handle.flush()
+                        time.sleep(0.1)
+                    """
+                ).lstrip(),
+                encoding="utf-8",
+            )
+            pnpm = fake_bin / "pnpm"
+            pnpm.write_text(
+                textwrap.dedent(
+                    f"""
+                    #!{sys.executable}
+                    import subprocess
+                    import sys
+                    import time
+                    from pathlib import Path
+
+                    marker = Path({str(marker)!r})
+                    subprocess.Popen([sys.executable, {str(child)!r}, str(marker)])
+                    deadline = time.monotonic() + 5
+                    while not marker.exists() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    print('api_key=sk-timeoutabcdefghijklmnopqrstuvwxyz123456', flush=True)
+                    time.sleep(30)
+                    """
+                ).lstrip(),
+                encoding="utf-8",
+            )
+            pnpm.chmod(pnpm.stat().st_mode | 0o111)
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{fake_bin}:{old_path}"
+            try:
+                args = argparse.Namespace(skip_install=False, install_preflight_done=False, install_timeout=1)
+                errors = RUN_PHASES.run_install_preflight(root, task_path, args)
+            finally:
+                os.environ["PATH"] = old_path
+
+            self.assertTrue(any("exited 124" in error for error in errors), errors)
+            payload = json.loads(RUN_PHASES.install_preflight_path(task_path).read_text(encoding="utf-8"))
+            self.assertEqual(payload["exit_code"], 124)
+            self.assertIn("[REDACTED]", payload["output_tail"])
+            self.assertNotIn("sk-timeout", payload["output_tail"])
+            self.assertFalse(RUN_PHASES.install_preflight_lock_path(root).exists())
+            self.assertTrue(marker.exists())
+            before = marker.read_text(encoding="utf-8")
+            time.sleep(0.5)
+            self.assertEqual(marker.read_text(encoding="utf-8"), before)
 
     def test_install_preflight_sanitizes_env_and_redacts_output(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

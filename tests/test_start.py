@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -98,6 +99,10 @@ class StartLauncherTest(unittest.TestCase):
         )
         (repo / ".codex" / "harness" / "scripts" / "policy_pack.py").write_text(
             "# policy pack helper\n",
+            encoding="utf-8",
+        )
+        (repo / ".codex" / "harness" / "scripts" / "process_runner.py").write_text(
+            "# process runner helper\n",
             encoding="utf-8",
         )
         (repo / ".codex" / "harness" / "scripts" / "policy-packs").mkdir(parents=True)
@@ -818,8 +823,41 @@ class StartLauncherTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             repo = self.make_repo(tmp)
+            marker = tmp / "verify-heartbeat.txt"
+            child = tmp / "verify_child.py"
+            child.write_text(
+                textwrap.dedent(
+                    """
+                    import sys
+                    import time
+                    from pathlib import Path
+
+                    marker = Path(sys.argv[1])
+                    while True:
+                        with marker.open("a", encoding="utf-8") as handle:
+                            handle.write("tick\\n")
+                            handle.flush()
+                        time.sleep(0.1)
+                    """
+                ).lstrip(),
+                encoding="utf-8",
+            )
             (repo / ".codex" / "harness" / "scripts" / "verify-task.py").write_text(
-                "import time\ntime.sleep(10)\n",
+                textwrap.dedent(
+                    f"""
+                    import subprocess
+                    import sys
+                    import time
+                    from pathlib import Path
+
+                    marker = Path({str(marker)!r})
+                    subprocess.Popen([sys.executable, {str(child)!r}, str(marker)])
+                    deadline = time.monotonic() + 5
+                    while not marker.exists() and time.monotonic() < deadline:
+                        time.sleep(0.05)
+                    time.sleep(10)
+                    """
+                ).lstrip(),
                 encoding="utf-8",
             )
             self.refresh_install_manifest(repo)
@@ -870,6 +908,10 @@ class StartLauncherTest(unittest.TestCase):
             self.assertEqual(launcher_result["verifier_returncode"], 124)
             verify_stderr = Path(repo, launcher_result["verify_task_stderr"])
             self.assertIn("Timed out after 1 seconds.", verify_stderr.read_text(encoding="utf-8"))
+            self.assertTrue(marker.exists())
+            before = marker.read_text(encoding="utf-8")
+            time.sleep(0.5)
+            self.assertEqual(marker.read_text(encoding="utf-8"), before)
 
     def test_planned_with_design_approval_requires_phase_plan_review_success(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

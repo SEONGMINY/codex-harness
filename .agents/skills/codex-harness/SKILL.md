@@ -51,6 +51,7 @@ required = [
     root / ".codex" / "harness" / "scripts" / "gen-relationship-graph.py",
     root / ".codex" / "harness" / "scripts" / "review-phase-plan.py",
     root / ".codex" / "harness" / "scripts" / "phase_semantics.py",
+    root / ".codex" / "harness" / "scripts" / "process_runner.py",
     root / ".codex" / "harness" / "scripts" / "scope_policy.py",
     root / ".codex" / "harness" / "scripts" / "task_paths.py",
 ]

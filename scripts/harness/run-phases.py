@@ -51,6 +51,7 @@ from phase_contract import (
 from phase_semantics import analyze_phase
 from command_policy import run_command
 from env_policy import sanitized_env
+from process_runner import run_process
 from file_lock import (
     LockHandle,
     acquire_lock,
@@ -142,6 +143,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "policy-packs" / "default-security.json",
         root / ".codex" / "harness" / "scripts" / "policy_lineage.py",
         root / ".codex" / "harness" / "scripts" / "policy_pack.py",
+        root / ".codex" / "harness" / "scripts" / "process_runner.py",
         root / ".codex" / "harness" / "scripts" / "redaction.py",
         root / ".codex" / "harness" / "scripts" / "run-phases.py",
         root / ".codex" / "harness" / "scripts" / "verify-task.py",
@@ -282,23 +284,16 @@ def run_install_preflight(root: Path, task_path: Path, args: argparse.Namespace)
     install_path = install_preflight_path(task_path)
     try:
         lock_handle = acquire_lock(install_preflight_lock_path(root))
-        result = subprocess.run(
+        result = run_process(
             command,
             cwd=root,
             env=sanitized_env(allow_harness_policy_controls=True),
-            text=True,
-            capture_output=True,
             timeout=getattr(args, "install_timeout", 600),
-            check=False,
         )
         exit_code = result.returncode
-        output = redact_text(subprocess_output_text(result.stdout) + subprocess_output_text(result.stderr)).strip()
-        completed_at = now()
-        lock_error = None
-    except subprocess.TimeoutExpired as exc:
-        exit_code = 124
-        output = redact_text(subprocess_output_text(exc.stdout) + subprocess_output_text(exc.stderr)).strip()
-        output = (output + f"\nTimed out after {getattr(args, 'install_timeout', 600)} seconds.").strip()
+        output = redact_text(result.stdout + result.stderr).strip()
+        if result.timed_out:
+            output = (output + f"\nTimed out after {getattr(args, 'install_timeout', 600)} seconds.").strip()
         completed_at = now()
         lock_error = None
     except RuntimeError as exc:
@@ -330,14 +325,6 @@ def run_install_preflight(root: Path, task_path: Path, args: argparse.Namespace)
             f"See {install_preflight_path(task_path).relative_to(root)}"
         ]
     return []
-
-
-def subprocess_output_text(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
 
 
 def phase_file(task_path: Path, phase_number: int) -> Path:
