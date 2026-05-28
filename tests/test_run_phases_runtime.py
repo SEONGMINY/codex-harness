@@ -664,6 +664,86 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(packet["failure"]["type"], "interrupted_running_attempt")
             self.assertFalse(packet["failure"]["retryable"])
 
+    def test_pending_projection_recovers_valid_attempt_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            runtime = task_path / "context-pack" / "runtime"
+            handoffs = task_path / "context-pack" / "handoffs"
+            runtime.mkdir(parents=True, exist_ok=True)
+            handoffs.mkdir(parents=True, exist_ok=True)
+            shared_paths = [
+                RUN_PHASES.phase_contract_path(task_path, 0),
+                RUN_PHASES.phase_checklist_path(task_path, 0),
+                RUN_PHASES.phase_quality_path(task_path, 0),
+                RUN_PHASES.phase_evidence_path(task_path, 0),
+                RUN_PHASES.phase_gate_path(task_path, 0),
+                RUN_PHASES.phase_reconciliation_path(task_path, 0),
+                RUN_PHASES.phase_reconciliation_summary_path(task_path, 0),
+            ]
+            for path in shared_paths:
+                path.write_text("shared\n", encoding="utf-8")
+            handoff = handoffs / "phase0.md"
+            handoff.write_text("handoff\n", encoding="utf-8")
+            prompt = RUN_PHASES.phase_attempt_prompt_path(task_path, 0, 1)
+            stdout = runtime / "phase0-output-attempt1.jsonl"
+            stderr = runtime / "phase0-stderr-attempt1.txt"
+            ac = RUN_PHASES.ac_results_path(task_path, 0, 1)
+            for path in [prompt, stdout, stderr, ac]:
+                path.write_text("attempt 1\n", encoding="utf-8")
+            result_path = RUN_PHASES.write_phase_result(
+                root,
+                task_path,
+                0,
+                1,
+                0,
+                ["src/demo.py"],
+                [{"command": "true", "exit_code": 0}],
+                ["context-pack/handoffs/phase0.md"],
+                [],
+                prompt,
+                stdout,
+                stderr,
+                ac,
+            )
+            RUN_PHASES.write_phase_attempt_commit(task_path, 0, 1, result_path)
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "pending", "attempts": 0}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(changes[0]["reason"], "valid_attempt_commit")
+            self.assertEqual(task_index["phases"][0]["status"], "completed")
+            self.assertEqual(task_index["phases"][0]["attempts"], 1)
+
+    def test_pending_projection_marks_started_attempt_without_terminal_proof_interrupted(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            RUN_PHASES.append_attempt_manifest_record(
+                task_path,
+                0,
+                1,
+                "attempt_started",
+                status="running",
+                artifacts=[],
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "pending", "attempts": 0}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            manifest = self.read_attempt_manifest(task_path, 0)
+            self.assertEqual(changes[0]["reason"], "interrupted_pending_attempt")
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertEqual(task_index["phases"][0]["attempts"], 1)
+            self.assertEqual([item["record_type"] for item in manifest], ["attempt_started", "attempt_interrupted"])
+            self.assertTrue(RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).exists())
+
     def test_phase_result_records_runner_owned_obligation_assertion_outcomes(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
@@ -1464,6 +1544,42 @@ class RunCodexRuntimeTest(unittest.TestCase):
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             top_index = json.loads((root / "tasks" / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertEqual(top_index["tasks"][0]["status"], "error")
+
+    def test_main_fails_closed_after_interrupted_pending_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (root / "tasks").mkdir(parents=True, exist_ok=True)
+            (root / "tasks" / "index.json").write_text(
+                json.dumps({"tasks": [{"dir": "demo", "status": "running"}]}) + "\n",
+                encoding="utf-8",
+            )
+            RUN_PHASES.append_attempt_manifest_record(
+                task_path,
+                0,
+                1,
+                "attempt_started",
+                status="running",
+                artifacts=[],
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "pending", "attempts": 0}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(sys, "argv", ["run-phases.py", "demo", "--root", str(root)]),
+                mock.patch.object(RUN_PHASES, "harness_install_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "verify_task", side_effect=AssertionError("verify should not run")),
+                mock.patch.object(RUN_PHASES, "run_codex", side_effect=AssertionError("reused pending attempt")) as run_codex,
+            ):
+                self.assertEqual(RUN_PHASES.main(), 1)
+
+            run_codex.assert_not_called()
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            top_index = json.loads((root / "tasks" / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertEqual(task_index["phases"][0]["attempts"], 1)
             self.assertEqual(top_index["tasks"][0]["status"], "error")
 
     def static_content(self, filename: str) -> str:

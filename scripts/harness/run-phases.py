@@ -1827,6 +1827,27 @@ def attempt_terminal_manifest_record_type(
     return terminal_type
 
 
+def latest_nonterminal_started_attempt(
+    task_path: Path,
+    phase_number: int,
+    current_reset_generation: int,
+) -> int | None:
+    started_attempts: list[int] = []
+    for record in read_attempt_manifest_records(task_path, phase_number):
+        attempt = record.get("attempt")
+        if (
+            record.get("record_type") == "attempt_started"
+            and isinstance(attempt, int)
+            and attempt > 0
+            and manifest_record_matches_current_reset(record, current_reset_generation)
+        ):
+            started_attempts.append(attempt)
+    for attempt in sorted(started_attempts, reverse=True):
+        if attempt_terminal_manifest_record_type(task_path, phase_number, attempt, current_reset_generation) is None:
+            return attempt
+    return None
+
+
 def attempt_runtime_artifact_refs(task_path: Path, phase_number: int, attempt: int) -> list[dict[str, object]]:
     artifact_paths = [
         ("prompt", phase_attempt_prompt_path(task_path, phase_number, attempt)),
@@ -2061,7 +2082,7 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
         attempts = int(phase.get("attempts", 0) or 0)
         commit_attempt = commit.get("attempt") if commit else None
         commit_matches_phase_attempt = attempts <= 0 or commit_attempt == attempts
-        if status == "running" and commit and commit_matches_phase_attempt:
+        if status in RUNNABLE_PHASE_STATUSES and commit and commit_matches_phase_attempt:
             changes.append({"phase": phase_number, "from_status": status, "to_status": "completed", "reason": "valid_attempt_commit"})
             if not dry_run:
                 phase["status"] = "completed"
@@ -2074,12 +2095,16 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
                 phase["status"] = "error"
                 phase["error_message"] = "Completed phase is missing a valid attempt commit."
         elif (
-            status == "running"
+            status in RUNNABLE_PHASE_STATUSES
             and (not commit or (attempts > 0 and commit_attempt != attempts))
         ):
+            nonterminal_started_attempt = latest_nonterminal_started_attempt(task_path, phase_number, reset_generation)
+            interrupted_attempt = nonterminal_started_attempt or attempts
+            if status == "pending" and interrupted_attempt <= 0:
+                continue
             terminal_record_type = (
-                attempt_terminal_manifest_record_type(task_path, phase_number, attempts, reset_generation)
-                if attempts > 0
+                attempt_terminal_manifest_record_type(task_path, phase_number, interrupted_attempt, reset_generation)
+                if interrupted_attempt > 0
                 else None
             )
             has_result_artifact = phase_result_artifacts_exist(task_path, phase_number)
@@ -2087,7 +2112,7 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
             reason = (
                 "interrupted_running_phase"
                 if terminal_record_type or has_result_artifact or has_commit
-                else "interrupted_running_attempt"
+                else f"interrupted_{status}_attempt"
             )
             message = (
                 "Phase attempt was interrupted before terminal runtime proof was written."
@@ -2099,10 +2124,12 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
                 phase["status"] = "error"
                 phase["failed_at"] = now()
                 phase["error_message"] = message
+                if interrupted_attempt > 0:
+                    phase["attempts"] = interrupted_attempt
                 write_last_error(task_path, phase_number, message)
-                if attempts > 0 and terminal_record_type is None:
+                if interrupted_attempt > 0 and terminal_record_type is None:
                     try:
-                        contract = runtime_phase_contract(task_path, phase_number, attempts)
+                        contract = runtime_phase_contract(task_path, phase_number, interrupted_attempt)
                     except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
                         try:
                             contract = runtime_phase_contract(task_path, phase_number)
@@ -2117,7 +2144,7 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
                             task_path,
                             phase_number,
                             phase,
-                            attempts,
+                            interrupted_attempt,
                             reason,
                             message,
                             retryable=False,
@@ -2125,7 +2152,7 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
                             required_outputs=required_outputs,
                             required_repo_outputs=required_repo_outputs,
                         ),
-                        attempts,
+                        interrupted_attempt,
                     )
     if changes and not dry_run:
         write_json(index_path, task_index)

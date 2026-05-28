@@ -276,9 +276,10 @@ runner 시작 시에는 runtime proof와 `index.json` projection을 조정합니
 - valid commit marker가 있고 `index.json`이 pending/running이면 completed projection으로 복구합니다.
 - `index.json`이 completed인데 valid commit marker가 없으면 error projection으로 바꿉니다.
 - `index.json`이 running인데 valid commit marker가 없으면 이전 runner가 attempt 중간에 멈춘 것으로 보고 error projection으로 바꿉니다.
+- `index.json`이 pending이어도 current reset generation에 terminal record 없는 `attempt_started`가 있으면 같은 attempt를 재사용하지 않고 error projection으로 바꿉니다.
 
 이 복구는 marker를 source of truth로 삼기 위한 최소 reconciliation입니다.
-running attempt가 terminal manifest record 없이 중단된 경우 runner는 같은 attempt를 실패로 관측했다고 주장하지 않습니다.
+pending/running attempt가 terminal manifest record 없이 중단된 경우 runner는 같은 attempt를 실패로 관측했다고 주장하지 않습니다.
 대신 `attempt_interrupted` terminal record와 repair packet을 쓰고 phase projection만 `error`로 바꿉니다.
 이 상태에서는 자동으로 다음 attempt를 시작하지 않고, 사람이 repair packet을 확인한 뒤 `--resume-repair` 또는 `--from <N>`으로 재개해야 합니다.
 장기적으로는 `index.json`을 runtime ledger에서 재생성 가능한 projection으로 낮추는 방향이 더 안전합니다.
