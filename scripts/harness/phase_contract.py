@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from decision_registry import validate_contract_refs
+from phase_semantics import (
+    NON_IMPLEMENTATION_LAYERS as _NON_IMPLEMENTATION_LAYERS,
+    analyze_phase,
+    contract_needs_verification_evidence,
+)
 
 
 CONTRACT_BLOCK_RE = re.compile(
@@ -36,20 +41,6 @@ GENERIC_FORBIDDEN_RULE_PATTERNS = [
         r"be\s+careful",
     ]
 ]
-BUGFIX_VALIDATION_PATTERNS = [
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in [
-        r"\bbug\s*fix\b",
-        r"\bbugfix\b",
-        r"\bfix\b",
-        r"\bvalidation\b",
-        r"\bvalidate\b",
-        r"버그",
-        r"고치",
-        r"오류",
-        r"검증",
-    ]
-]
 HANDOFF_BLOCK_PATTERNS = [
     re.compile(r"(?im)^\s*(?:status|state)\s*:\s*(blocked|partial|skipped|failed)\b"),
     re.compile(r"(?im)^\s*##\s*(?:status|state)\s*\n+\s*(blocked|partial|skipped|failed)\b"),
@@ -71,7 +62,9 @@ INSTRUCTION_ID_RE = re.compile(r"`([^`]+)`|([A-Za-z][A-Za-z0-9_-]*-\d+)")
 IMPLEMENTATION_QUALITY_DOC = "docs/harness/implementation-quality.md"
 DESIGN_REVIEW_DOC = "implementation-design-review.md"
 DESIGN_REVIEW_WAIVER_DOC = "design-review-waiver.md"
-NON_IMPLEMENTATION_LAYERS = {"docs", "documentation", "planning", "test", "tests", "qa"}
+COMMAND_EXPECTATION_ROLES = {"reproduction", "acceptance", "fixture", "build", "meta"}
+# Re-export for scripts or tests that imported this constant from phase_contract.
+NON_IMPLEMENTATION_LAYERS = _NON_IMPLEMENTATION_LAYERS
 
 
 def parse_phase_contract(markdown: str) -> tuple[dict[str, Any] | None, list[str]]:
@@ -141,20 +134,33 @@ def _validate_validation_budget(value: Any) -> list[str]:
     return errors
 
 
-def _contract_text_for_classification(contract: dict[str, Any], phase_name: str | None) -> str:
-    parts: list[str] = [phase_name or "", str(contract.get("name") or "")]
-    scope = contract.get("scope")
-    if isinstance(scope, dict):
-        parts.append(str(scope.get("layer") or ""))
-    for instruction in contract.get("instructions") or []:
-        if isinstance(instruction, dict):
-            parts.append(str(instruction.get("task") or ""))
-    return "\n".join(parts)
-
-
-def contract_needs_verification_evidence(contract: dict[str, Any], phase_name: str | None = None) -> bool:
-    text = _contract_text_for_classification(contract, phase_name)
-    return any(pattern.search(text) for pattern in BUGFIX_VALIDATION_PATTERNS)
+def _validate_command_expectations(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        return ["`command_expectations` must be a list when present."]
+    errors: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            errors.append(f"`command_expectations[{index}]` must be an object.")
+            continue
+        command = item.get("command")
+        if not isinstance(command, str) or not command.strip():
+            errors.append(f"`command_expectations[{index}].command` must be a non-empty string.")
+        role = item.get("role")
+        if role not in COMMAND_EXPECTATION_ROLES:
+            errors.append(
+                f"`command_expectations[{index}].role` must be one of "
+                + ", ".join(sorted(COMMAND_EXPECTATION_ROLES))
+                + "."
+            )
+        target = item.get("target")
+        if target is not None and (not isinstance(target, str) or not target.strip()):
+            errors.append(f"`command_expectations[{index}].target` must be a non-empty string when present.")
+        repo_scan = item.get("repo_scan")
+        if repo_scan is not None and not isinstance(repo_scan, bool):
+            errors.append(f"`command_expectations[{index}].repo_scan` must be boolean when present.")
+    return errors
 
 
 def _contract_expected_evidence(contract: dict[str, Any]) -> list[str]:
@@ -176,12 +182,6 @@ def _validate_verification_evidence(value: Any, contract: dict[str, Any]) -> lis
     evidence_refs = set(contract_acceptance_commands(contract))
     selected_evidence = reproduction or alternative
     if reproduction:
-        missing_refs = [item for item in selected_evidence if item not in evidence_refs]
-        if missing_refs:
-            return [
-                "`verification_evidence.reproduction` entries must also appear in "
-                f"`acceptance_commands`: {missing_refs!r}"
-            ]
         return []
     if (
         isinstance(fallback_reason, str)
@@ -353,6 +353,7 @@ def validate_phase_contract(
     errors.extend(_validate_non_empty_string_list(contract.get("stop_rules"), "stop_rules"))
     errors.extend(_validate_fallback_behavior(contract.get("fallback_behavior")))
     errors.extend(_validate_validation_budget(contract.get("validation_budget")))
+    errors.extend(_validate_command_expectations(contract.get("command_expectations")))
     errors.extend(_validate_decision_policy_shape(contract))
     if contract_needs_verification_evidence(contract, phase_name):
         errors.extend(_validate_verification_evidence(contract.get("verification_evidence"), contract))
@@ -399,8 +400,7 @@ def validate_phase_contract(
     if not isinstance(interfaces, list):
         errors.append("`interfaces` must be a list.")
     else:
-        layer = scope.get("layer") if isinstance(scope, dict) else ""
-        if isinstance(layer, str) and layer.lower() not in NON_IMPLEMENTATION_LAYERS and not interfaces:
+        if analyze_phase(contract, phase_name).writes_product_code and not interfaces:
             errors.append("`interfaces` must describe target signatures for non-documentation phases.")
         for index, item in enumerate(interfaces):
             if not isinstance(item, dict):
@@ -436,8 +436,7 @@ def validate_phase_contract(
                 errors.append(f"`instructions[{index}].expected_evidence` must be a non-empty list.")
 
     if isinstance(scope, dict):
-        layer = scope.get("layer")
-        if isinstance(layer, str) and layer.lower() not in NON_IMPLEMENTATION_LAYERS:
+        if analyze_phase(contract, phase_name).writes_product_code:
             docs = read_first.get("docs") if isinstance(read_first, dict) else []
             if not isinstance(docs, list) or IMPLEMENTATION_QUALITY_DOC not in docs:
                 errors.append(
@@ -582,6 +581,24 @@ def checklist_markdown(contract: dict[str, Any]) -> str:
             lines.append(f"- [ ] Fallback reason: {verification['fallback_reason']}")
         for item in verification.get("alternative_evidence") or []:
             lines.append(f"- [ ] Alternative evidence: {item}")
+
+    command_expectations = [
+        item for item in contract.get("command_expectations") or [] if isinstance(item, dict)
+    ]
+    if command_expectations:
+        lines.extend(["", "## Command Expectations", ""])
+        for item in command_expectations:
+            role = item.get("role", "")
+            command = item.get("command", "")
+            target = item.get("target")
+            repo_scan = item.get("repo_scan")
+            suffix = []
+            if target:
+                suffix.append(f"target: {target}")
+            if repo_scan is not None:
+                suffix.append(f"repo_scan: {repo_scan}")
+            suffix_text = f" ({', '.join(suffix)})" if suffix else ""
+            lines.append(f"- [ ] {role}: `{command}`{suffix_text}")
 
     lines.extend(["", "## Required Outputs", ""])
     for raw_path in contract_required_outputs(contract):

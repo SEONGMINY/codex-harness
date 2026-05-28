@@ -176,6 +176,20 @@ Required sections:
     "fallback_reason": "",
     "alternative_evidence": []
   },
+  "command_expectations": [
+    {
+      "command": "python3 tests/validate_regression.py --repo-scan",
+      "role": "reproduction",
+      "target": "tests/validate_regression.py",
+      "repo_scan": true
+    },
+    {
+      "command": "python3 tests/validate_regression.py --fixture tests/fixtures/regression",
+      "role": "fixture",
+      "target": "tests/fixtures/regression",
+      "repo_scan": false
+    }
+  ],
   "acceptance_commands": [
     "python3 -m py_compile .codex/harness/scripts/run-phases.py .codex/harness/scripts/verify-task.py"
   ],
@@ -248,6 +262,7 @@ Contract rules:
 - Bugfix or validation phases must include `verification_evidence`.
 - Use `verification_evidence.reproduction` for a reproducing test or command.
 - If reproduction is not possible, include both `verification_evidence.fallback_reason` and `verification_evidence.alternative_evidence`.
+- `command_expectations` is optional but recommended for validator phases; use it to distinguish repo-scan reproduction from fixture/meta acceptance without relying on command string guesses.
 - `acceptance_commands` must contain executable commands only.
 - `required_outputs` must contain task-relative paths.
 - `required_repo_outputs` must contain repository-relative implementation files for non-documentation phases, and every entry must be covered by `scope.allowed_paths`.

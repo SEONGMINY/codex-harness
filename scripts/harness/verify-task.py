@@ -20,7 +20,6 @@ from phase_contract import (
     DESIGN_REVIEW_DOC,
     DESIGN_REVIEW_WAIVER_DOC,
     IMPLEMENTATION_QUALITY_DOC,
-    NON_IMPLEMENTATION_LAYERS,
     contract_acceptance_commands,
     contract_allowed_paths,
     contract_required_outputs,
@@ -32,6 +31,7 @@ from phase_contract import (
     scope_violations,
     validate_phase_contract,
 )
+from phase_semantics import analyze_phase
 
 
 MANDATORY_STATIC_FILES = [
@@ -320,9 +320,7 @@ def validate_design_approval(root: Path, task_path: Path) -> list[str]:
 
 
 def is_implementation_contract(contract: dict[str, object]) -> bool:
-    scope = contract.get("scope")
-    layer = scope.get("layer") if isinstance(scope, dict) else ""
-    return isinstance(layer, str) and layer.lower() not in NON_IMPLEMENTATION_LAYERS
+    return analyze_phase(contract).writes_product_code
 
 
 def design_path_covers(raw_path: str, approved_paths: list[str]) -> bool:

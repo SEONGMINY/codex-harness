@@ -293,7 +293,7 @@ class PhaseContractValidationTest(unittest.TestCase):
 
             self.assertEqual(errors, [])
 
-    def test_bugfix_phase_rejects_unlinked_verification_evidence(self) -> None:
+    def test_bugfix_phase_accepts_reproduction_outside_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_context(Path(raw_tmp))
             contract = self.valid_contract()
@@ -318,7 +318,105 @@ class PhaseContractValidationTest(unittest.TestCase):
                 require_previous_outputs=False,
             )
 
-            self.assertTrue(any("acceptance_commands" in error for error in errors), errors)
+            self.assertEqual(errors, [])
+
+    def test_validation_phase_rejects_unlinked_alternative_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["name"] = "validation"
+            contract["instructions"] = [
+                {
+                    "id": "P0-001",
+                    "task": "Validate the migration behavior.",
+                    "expected_evidence": ["docs/runner.md"],
+                }
+            ]
+            contract["verification_evidence"] = {
+                "fallback_reason": "The external service is not available in local tests.",
+                "alternative_evidence": ["python3 scripts/check_migration_shape.py"],
+            }
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "validation",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertTrue(any("alternative_evidence" in error for error in errors), errors)
+
+    def test_command_expectations_are_validated_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["name"] = "docs"
+            contract["command_expectations"] = [
+                {
+                    "command": "python3 tests/validate_demo.py --repo-scan",
+                    "role": "reproduction",
+                    "target": "tests/validate_demo.py",
+                    "repo_scan": True,
+                },
+                {
+                    "command": "python3 tests/validate_demo.py --fixture tests/fixtures/demo",
+                    "role": "fixture",
+                    "target": "tests/fixtures/demo",
+                    "repo_scan": False,
+                },
+            ]
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "docs",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertEqual(errors, [])
+
+            checklist = PHASE_CONTRACT.checklist_markdown(contract)
+            self.assertIn("## Command Expectations", checklist)
+            self.assertIn("reproduction:", checklist)
+
+    def test_app_package_test_scope_is_not_treated_as_product_implementation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_context(Path(raw_tmp))
+            contract = self.valid_contract()
+            contract["name"] = "validator hardening"
+            contract["scope"] = {
+                "layer": "SupApp",
+                "allowed_paths": ["SupApp/Tests/SupAppTests/HomeLiveLoaderTests.swift"],
+            }
+            contract["read_first"] = {
+                "docs": ["docs/runner.md"],
+                "previous_outputs": [],
+            }
+            contract["interfaces"] = []
+            contract["required_repo_outputs"] = [
+                "SupApp/Tests/SupAppTests/HomeLiveLoaderTests.swift"
+            ]
+            contract["verification_evidence"] = {
+                "reproduction": [
+                    "xcodebuild -project SupApp.xcodeproj -scheme SupAppTests test"
+                ]
+            }
+
+            _, errors = PHASE_CONTRACT.validate_phase_contract(
+                root,
+                task_path,
+                0,
+                "validator hardening",
+                self.markdown(contract),
+                require_previous_outputs=False,
+            )
+
+            self.assertFalse(any("interfaces" in error for error in errors), errors)
+            self.assertFalse(any("implementation-quality" in error for error in errors), errors)
 
     def test_required_repo_outputs_are_validated_when_present(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

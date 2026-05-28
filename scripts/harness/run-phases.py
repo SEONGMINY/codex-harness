@@ -36,6 +36,7 @@ from phase_contract import (
     scope_violations,
     validate_phase_contract,
 )
+from phase_semantics import analyze_phase
 
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
@@ -718,9 +719,7 @@ def preflight_phase(root: Path, task_path: Path, task_index: dict, phase: dict) 
     if not phase_required_outputs(phase, phase_markdown):
         errors.append(f"Missing required_outputs for phase {phase_number}.")
     if contract is not None:
-        scope = contract.get("scope") if isinstance(contract.get("scope"), dict) else {}
-        layer = str(scope.get("layer") or "").lower()
-        if layer not in {"docs", "documentation", "planning", "test", "tests", "qa"}:
+        if analyze_phase(contract, phase.get("name")).writes_product_code:
             if not contract_required_repo_outputs(contract):
                 errors.append(
                     f"Missing required_repo_outputs for implementation phase {phase_number}."

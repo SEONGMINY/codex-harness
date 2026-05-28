@@ -11,30 +11,18 @@ from typing import Any
 
 from phase_contract import (
     contract_acceptance_commands,
-    contract_allowed_paths,
-    contract_required_repo_outputs,
     parse_phase_contract,
 )
+from phase_semantics import (
+    analyze_phase,
+    command_mentions_path,
+    command_runs_test_suite,
+    command_targets_any_path,
+    command_uses_fixture_or_meta,
+    command_uses_repo_scan,
+)
 
 
-IMPLEMENTATION_PATH_PREFIXES = (
-    "app/",
-    "apps/",
-    "src/",
-    "source/",
-    "sources/",
-    "modules/",
-    "packages/",
-    "supapp/",
-    "supabase/functions/",
-    "supabase/migrations/",
-)
-NON_IMPLEMENTATION_PREFIXES = (
-    "docs/",
-    "tasks/",
-    "tests/",
-)
-SWIFT_BUILD_RE = re.compile(r"\bxcodebuild\b")
 PHASE_FILE_RE = re.compile(r"^phase(?P<number>\d+)\.md$")
 AMBIGUOUS_IMPLEMENT_OR_PROVE_RE = re.compile(
     r"\b(?:implement|fix|repair)\s+or\s+(?:prove|verify|document)\b|"
@@ -99,57 +87,6 @@ def text_for_contract(markdown: str, contract: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def normalize_paths(paths: list[str]) -> list[str]:
-    return [item.strip().lstrip("./").lower() for item in paths if item.strip()]
-
-
-def is_non_implementation_path(path: str) -> bool:
-    lowered = path.lower().lstrip("./")
-    return lowered.startswith(NON_IMPLEMENTATION_PREFIXES)
-
-
-def is_implementation_path(path: str) -> bool:
-    lowered = path.lower().lstrip("./")
-    if is_non_implementation_path(lowered):
-        return False
-    if lowered.endswith((".swift", ".ts", ".tsx", ".js", ".jsx", ".py", ".sql", ".rs", ".go", ".kt")):
-        return True
-    return lowered.startswith(IMPLEMENTATION_PATH_PREFIXES)
-
-
-def phase_has_implementation_paths(contract: dict[str, Any]) -> bool:
-    paths = normalize_paths([
-        *contract_allowed_paths(contract),
-        *contract_required_repo_outputs(contract),
-    ])
-    return any(is_implementation_path(path) for path in paths)
-
-
-def phase_has_swift_paths(contract: dict[str, Any]) -> bool:
-    paths = normalize_paths([
-        *contract_allowed_paths(contract),
-        *contract_required_repo_outputs(contract),
-    ])
-    return any(path.endswith(".swift") or path.startswith("supapp/") for path in paths)
-
-
-def acceptance_has_xcodebuild(contract: dict[str, Any]) -> bool:
-    return any(SWIFT_BUILD_RE.search(command) for command in contract_acceptance_commands(contract))
-
-
-def phase_layer(contract: dict[str, Any]) -> str:
-    scope = contract.get("scope")
-    if not isinstance(scope, dict):
-        return ""
-    return str(scope.get("layer") or "").strip().lower()
-
-
-def is_validation_or_qa_phase(contract: dict[str, Any]) -> bool:
-    layer = phase_layer(contract)
-    text = f"{contract.get('name') or ''} {layer}".lower()
-    return any(token in text for token in ["test", "tests", "validator", "validation", "qa", "검증"])
-
-
 def review_design_approval_text(root: Path, task_path: Path) -> list[str]:
     approval = read_json(task_path / "context-pack" / "static" / "design-approval.json")
     if approval.get("approved") is not True:
@@ -169,6 +106,69 @@ def review_design_approval_text(root: Path, task_path: Path) -> list[str]:
     return []
 
 
+def review_validation_only_acceptance(label: str, contract: dict[str, Any]) -> list[str]:
+    semantics = analyze_phase(contract)
+    if not semantics.validation_only or not semantics.writes_validator:
+        return []
+
+    target_paths = semantics.validator_paths or semantics.test_or_validator_paths
+    acceptance_commands = contract_acceptance_commands(contract)
+    verification = contract.get("verification_evidence")
+    reproduction_commands = []
+    if isinstance(verification, dict):
+        reproduction_commands = [
+            item for item in verification.get("reproduction") or [] if isinstance(item, str)
+        ]
+    command_expectations = [
+        item for item in contract.get("command_expectations") or [] if isinstance(item, dict)
+    ]
+
+    validator_acceptance = [
+        command
+        for command in acceptance_commands
+        if command_targets_any_path(command, target_paths) or command_runs_test_suite(command)
+    ]
+    if not validator_acceptance:
+        return []
+
+    has_repo_scan_reproduction = any(
+        (command_targets_any_path(command, target_paths) or command_runs_test_suite(command))
+        and command_uses_repo_scan(command)
+        for command in reproduction_commands
+    ) or any(
+        item.get("role") == "reproduction"
+        and item.get("repo_scan") is True
+        and isinstance(item.get("command"), str)
+        and item.get("command") in reproduction_commands
+        for item in command_expectations
+    )
+    has_fixture_or_meta_acceptance = any(
+        command_uses_fixture_or_meta(command)
+        for command in validator_acceptance
+    )
+    if not has_fixture_or_meta_acceptance:
+        for item in command_expectations:
+            command = item.get("command")
+            target = item.get("target")
+            if item.get("role") not in {"fixture", "meta"} or not isinstance(command, str):
+                continue
+            if command not in validator_acceptance:
+                continue
+            if item.get("role") == "meta" or command_uses_fixture_or_meta(command):
+                has_fixture_or_meta_acceptance = True
+                break
+            if isinstance(target, str) and command_mentions_path(command, target):
+                has_fixture_or_meta_acceptance = True
+                break
+    if not has_repo_scan_reproduction or has_fixture_or_meta_acceptance:
+        return []
+
+    return [
+        f"{label}: validation-only phase must separate failing repo-scan reproduction "
+        "from passing fixture/meta acceptance, or include product implementation scope."
+    ]
+
+
 def review_phase_plan(root: Path, task_path: Path) -> list[str]:
     errors: list[str] = []
     parsed: list[tuple[Path, int, str, dict[str, Any]]] = []
@@ -186,10 +186,11 @@ def review_phase_plan(root: Path, task_path: Path) -> list[str]:
     for path, phase_number, markdown, contract in parsed:
         label = repo_relative(path, root)
         contract_text = text_for_contract(markdown, contract)
-        has_implementation = phase_has_implementation_paths(contract)
-        has_swift = phase_has_swift_paths(contract)
-        has_xcodebuild = acceptance_has_xcodebuild(contract)
-        validation_or_qa = is_validation_or_qa_phase(contract)
+        semantics = analyze_phase(contract)
+        has_implementation = semantics.writes_product_code
+        has_swift = semantics.has_swift_paths
+        has_xcodebuild = semantics.has_xcodebuild_acceptance
+        validation_or_qa = semantics.phase_kind == "validation"
 
         if has_swift and not has_xcodebuild:
             errors.append(
@@ -210,6 +211,8 @@ def review_phase_plan(root: Path, task_path: Path) -> list[str]:
             errors.append(
                 f"{label}: validator/QA phase defers enforcement of known gaps to a later phase; planned state requires enforceable phase semantics."
             )
+
+        errors.extend(review_validation_only_acceptance(label, contract))
 
         if has_implementation and has_xcodebuild:
             previous_xcodebuild_implementation_phases.append(phase_number)

@@ -45,6 +45,7 @@ required = [
     root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
     root / ".codex" / "harness" / "scripts" / "gen-relationship-graph.py",
     root / ".codex" / "harness" / "scripts" / "review-phase-plan.py",
+    root / ".codex" / "harness" / "scripts" / "phase_semantics.py",
 ]
 missing = [str(path) for path in required if not path.exists()]
 if missing:

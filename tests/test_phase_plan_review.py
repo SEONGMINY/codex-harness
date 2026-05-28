@@ -121,6 +121,221 @@ class PhasePlanReviewTest(unittest.TestCase):
             errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
             self.assertTrue(any("defers enforcement of known gaps" in error for error in errors), errors)
 
+    def test_validation_only_phase_rejects_validator_acceptance_without_separate_reproduction(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "validator hardening"
+            contract["scope"] = {"layer": "tests", "allowed_paths": ["tests/validate_home_live_loader.py"]}
+            contract["required_repo_outputs"] = ["tests/validate_home_live_loader.py"]
+            contract["verification_evidence"] = {
+                "reproduction": ["python3 tests/validate_home_live_loader.py"],
+            }
+            contract["acceptance_commands"] = ["python3 tests/validate_home_live_loader.py"]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("validation-only phase must separate" in error for error in errors), errors)
+
+    def test_validation_only_phase_accepts_distinct_reproduction_and_meta_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "validator hardening"
+            contract["scope"] = {"layer": "tests", "allowed_paths": ["tests/validate_home_live_loader.py"]}
+            contract["required_repo_outputs"] = ["tests/validate_home_live_loader.py"]
+            contract["verification_evidence"] = {
+                "reproduction": ["python3 tests/validate_home_live_loader.py --repo-scan"],
+            }
+            contract["acceptance_commands"] = [
+                "python3 tests/validate_home_live_loader.py --fixture tests/fixtures/home_live_loader"
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            self.assertEqual(PHASE_PLAN_REVIEW.review_phase_plan(root, task_path), [])
+
+    def test_validation_only_phase_accepts_command_expectation_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "validator hardening"
+            contract["scope"] = {"layer": "tests", "allowed_paths": ["tests/validate_home_live_loader.py"]}
+            contract["required_repo_outputs"] = ["tests/validate_home_live_loader.py"]
+            contract["verification_evidence"] = {
+                "reproduction": ["python3 tests/validate_home_live_loader.py"],
+            }
+            contract["acceptance_commands"] = [
+                "python3 tests/validate_home_live_loader.py --fixture tests/fixtures/home_live_loader"
+            ]
+            contract["command_expectations"] = [
+                {
+                    "command": "python3 tests/validate_home_live_loader.py",
+                    "role": "reproduction",
+                    "target": "tests/validate_home_live_loader.py",
+                    "repo_scan": True,
+                },
+                {
+                    "command": "python3 tests/validate_home_live_loader.py --fixture tests/fixtures/home_live_loader",
+                    "role": "fixture",
+                    "target": "tests/fixtures/home_live_loader",
+                    "repo_scan": False,
+                },
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            self.assertEqual(PHASE_PLAN_REVIEW.review_phase_plan(root, task_path), [])
+
+    def test_validation_only_phase_rejects_unlinked_fixture_expectation_role(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "validator hardening"
+            contract["scope"] = {"layer": "tests", "allowed_paths": ["tests/validate_home_live_loader.py"]}
+            contract["required_repo_outputs"] = ["tests/validate_home_live_loader.py"]
+            contract["verification_evidence"] = {
+                "reproduction": ["python3 tests/validate_home_live_loader.py"],
+            }
+            contract["acceptance_commands"] = ["python3 tests/validate_home_live_loader.py"]
+            contract["command_expectations"] = [
+                {
+                    "command": "python3 tests/validate_home_live_loader.py",
+                    "role": "reproduction",
+                    "target": "tests/validate_home_live_loader.py",
+                    "repo_scan": True,
+                },
+                {
+                    "command": "python3 tests/validate_home_live_loader.py",
+                    "role": "fixture",
+                    "target": "tests/fixtures/home_live_loader",
+                    "repo_scan": False,
+                },
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("validation-only phase must separate" in error for error in errors), errors)
+
+    def test_validation_only_phase_rejects_same_validator_repo_scan_with_different_args(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "validator hardening"
+            contract["scope"] = {"layer": "tests", "allowed_paths": ["tests/validate_home_live_loader.py"]}
+            contract["required_repo_outputs"] = ["tests/validate_home_live_loader.py"]
+            contract["verification_evidence"] = {
+                "reproduction": ["python3 tests/validate_home_live_loader.py --repo-scan"],
+            }
+            contract["acceptance_commands"] = ["python3 tests/validate_home_live_loader.py"]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("validation-only phase must separate" in error for error in errors), errors)
+
+    def test_validation_only_phase_rejects_generic_test_suite_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "validator hardening"
+            contract["scope"] = {"layer": "tests", "allowed_paths": ["tests/validate_home_live_loader.py"]}
+            contract["required_repo_outputs"] = ["tests/validate_home_live_loader.py"]
+            contract["verification_evidence"] = {
+                "reproduction": ["python3 tests/validate_home_live_loader.py"],
+            }
+            contract["acceptance_commands"] = ["pytest"]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("validation-only phase must separate" in error for error in errors), errors)
+
+    def test_validation_only_phase_rejects_app_package_test_validator_without_product_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "validator hardening"
+            contract["scope"] = {
+                "layer": "tests",
+                "allowed_paths": ["SupApp/Tests/SupAppTests/HomeLiveLoaderTests.swift"],
+            }
+            contract["required_repo_outputs"] = ["SupApp/Tests/SupAppTests/HomeLiveLoaderTests.swift"]
+            contract["verification_evidence"] = {
+                "reproduction": [
+                    "xcodebuild -project SupApp.xcodeproj -scheme SupAppTests test"
+                ],
+            }
+            contract["acceptance_commands"] = [
+                "xcodebuild -project SupApp.xcodeproj -scheme SupAppTests test"
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("validation-only phase must separate" in error for error in errors), errors)
+
+    def test_validation_only_phase_detects_validator_from_allowed_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "validator hardening"
+            contract["scope"] = {"layer": "tests", "allowed_paths": ["tests/validate_home_live_loader.py"]}
+            contract["required_repo_outputs"] = []
+            contract["verification_evidence"] = {
+                "reproduction": ["python3 tests/validate_home_live_loader.py"],
+            }
+            contract["acceptance_commands"] = ["python3 tests/validate_home_live_loader.py"]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(any("validation-only phase must separate" in error for error in errors), errors)
+
+    def test_validation_only_phase_allows_post_fix_acceptance_without_reproduction_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "post-fix validation"
+            contract["scope"] = {"layer": "tests", "allowed_paths": ["tests/validate_home_live_loader.py"]}
+            contract["required_repo_outputs"] = ["tests/validate_home_live_loader.py"]
+            contract["verification_evidence"] = {
+                "fallback_reason": "The implementation fix is completed in an earlier phase.",
+                "alternative_evidence": ["tests/validate_home_live_loader.py"],
+            }
+            contract["acceptance_commands"] = ["python3 tests/validate_home_live_loader.py"]
+
+            self.write_phase(task_path, 0, contract)
+
+            self.assertEqual(PHASE_PLAN_REVIEW.review_phase_plan(root, task_path), [])
+
+    def test_combined_validator_and_implementation_phase_allows_validator_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            contract = self.base_contract()
+            contract["name"] = "implementation with validator"
+            contract["scope"] = {
+                "layer": "SupApp",
+                "allowed_paths": [
+                    "tests/validate_home_live_loader.py",
+                    "SupApp/Sources/SupApp/NativePolish/SupHomeView.swift",
+                ],
+            }
+            contract["required_repo_outputs"] = [
+                "tests/validate_home_live_loader.py",
+                "SupApp/Sources/SupApp/NativePolish/SupHomeView.swift",
+            ]
+            contract["acceptance_commands"] = [
+                "python3 tests/validate_home_live_loader.py",
+                "xcodebuild -project App.xcodeproj -scheme App -configuration Debug build",
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            self.assertEqual(PHASE_PLAN_REVIEW.review_phase_plan(root, task_path), [])
+
     def test_implementation_phase_rejects_implement_or_prove_wording(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))

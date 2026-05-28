@@ -499,6 +499,7 @@ def phase_template(
             "command_timeout_seconds": 600,
         },
         "missing_evidence_behavior": "Treat missing expected evidence as unresolved until command output or required files prove it.",
+        "command_expectations": [],
         "acceptance_commands": [
             "TODO"
         ],
