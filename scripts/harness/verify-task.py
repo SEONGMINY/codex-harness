@@ -1280,6 +1280,24 @@ def validate_phase_result(
     return errors
 
 
+def load_completed_phase_result(
+    task_path: Path,
+    phase_number: int,
+    expected_attempt: int | None,
+) -> dict[str, Any] | None:
+    runtime_dir = task_path / "context-pack" / "runtime"
+    result_path = (
+        runtime_dir / f"phase{phase_number}-result-attempt{expected_attempt}.json"
+        if isinstance(expected_attempt, int) and expected_attempt > 0
+        else runtime_dir / f"phase{phase_number}-result.json"
+    )
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return result if isinstance(result, dict) else None
+
+
 def validate_phase_attempt_commit(
     root: Path,
     task_path: Path,
@@ -1596,6 +1614,7 @@ def verify(
     handoff_dir = task_path / "context-pack" / "handoffs"
     phase_design_refs: list[tuple[int, str]] = []
     phase_closes_obligations: set[str] = set()
+    completed_phase_results: list[tuple[int, dict[str, Any]]] = []
     for phase in phases:
         phase_number = int(phase["phase"])
         phase_path = task_path / "phases" / f"phase{phase_number}.md"
@@ -1652,6 +1671,7 @@ def verify(
                 errors.append(f"Missing required outputs for phase {phase_number}.")
 
         if phase.get("status") == "completed":
+            expected_attempt = phase.get("attempts") if isinstance(phase.get("attempts"), int) else None
             handoff_path = handoff_dir / f"phase{phase_number}.md"
             errors.extend(require_file(root, handoff_path, "handoff"))
             if handoff_path.exists():
@@ -1670,11 +1690,13 @@ def verify(
                     expected_commands,
                     expected_outputs,
                     expected_repo_outputs,
-                    expected_attempt=phase.get("attempts") if isinstance(phase.get("attempts"), int) else None,
+                    expected_attempt=expected_attempt,
                     strict_current_harness=strict_current_harness,
                 )
             )
-            expected_attempt = phase.get("attempts") if isinstance(phase.get("attempts"), int) else None
+            result = load_completed_phase_result(task_path, phase_number, expected_attempt)
+            if result is not None:
+                completed_phase_results.append((phase_number, result))
             errors.extend(
                 require_file(
                     root,
@@ -1751,6 +1773,8 @@ def verify(
                 )
             if phase_number == 0:
                 errors.extend(require_file(root, runtime_dir / "docs-diff.md", "docs diff", check_placeholder=False))
+
+    errors.extend(validate_latest_repo_content_matches_current(root, completed_phase_results))
 
     if design_info and design_kind == "review":
         errors.extend(validate_traceability_matrix(root, static_dir / "traceability-matrix.json", design_ref_ids, phase_design_refs))
