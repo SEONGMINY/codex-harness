@@ -818,6 +818,90 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual([item["record_type"] for item in manifest], ["attempt_started", "attempt_interrupted"])
             self.assertTrue(RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).exists())
 
+    def test_running_projection_recovers_clean_retryable_failed_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (task_path / "phases").mkdir(parents=True, exist_ok=True)
+            contract = {
+                "phase": 0,
+                "name": "demo",
+                "validation_budget": {"max_attempts": 2, "command_timeout_seconds": 600},
+                "required_outputs": [],
+                "acceptance_commands": [],
+            }
+            (task_path / "phases" / "phase0.md").write_text(
+                "# Phase 0\n\n## Contract\n```json\n" + json.dumps(contract) + "\n```\n",
+                encoding="utf-8",
+            )
+            phase = {"phase": 0, "name": "demo", "status": "running", "attempts": 1}
+            packet = RUN_PHASES.build_repair_packet(
+                task_path,
+                0,
+                phase,
+                1,
+                "acceptance_commands",
+                "AC command failed.",
+                retryable=True,
+                contract=contract,
+                required_outputs=[],
+                required_repo_outputs=[],
+            )
+            RUN_PHASES.write_repair_packet(task_path, 0, packet, attempt=1)
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [phase]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(changes[0]["reason"], "retryable_attempt_failed")
+            self.assertEqual(task_index["phases"][0]["status"], "pending")
+            self.assertEqual(task_index["phases"][0]["attempts"], 1)
+            self.assertTrue(RUN_PHASES.phase_repair_packet_path(task_path, 0).exists())
+
+    def test_running_projection_rejects_contaminated_retryable_failed_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (task_path / "phases").mkdir(parents=True, exist_ok=True)
+            contract = {
+                "phase": 0,
+                "name": "demo",
+                "validation_budget": {"max_attempts": 2, "command_timeout_seconds": 600},
+                "required_outputs": [],
+                "acceptance_commands": [],
+            }
+            (task_path / "phases" / "phase0.md").write_text(
+                "# Phase 0\n\n## Contract\n```json\n" + json.dumps(contract) + "\n```\n",
+                encoding="utf-8",
+            )
+            phase = {"phase": 0, "name": "demo", "status": "running", "attempts": 1}
+            packet = RUN_PHASES.build_repair_packet(
+                task_path,
+                0,
+                phase,
+                1,
+                "acceptance_commands",
+                "AC command failed.",
+                retryable=True,
+                contract=contract,
+                required_outputs=[],
+                required_repo_outputs=[],
+                contaminating_changes=["outside.txt"],
+            )
+            RUN_PHASES.write_repair_packet(task_path, 0, packet, attempt=1)
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [phase]}) + "\n",
+                encoding="utf-8",
+            )
+
+            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(changes[0]["reason"], "interrupted_running_phase")
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertEqual(task_index["phases"][0]["attempts"], 1)
+
     def test_phase_result_records_runner_owned_obligation_assertion_outcomes(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))

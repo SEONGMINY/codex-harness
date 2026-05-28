@@ -80,6 +80,8 @@ from redaction import redact_text
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
 RUNNABLE_PHASE_STATUSES = {"pending", "running"}
 TERMINAL_ATTEMPT_RECORD_TYPES = {"attempt_committed", "attempt_failed", "attempt_interrupted"}
+DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_AC_TIMEOUT = 600
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUNTIME_HARNESS_ATTESTATION = harness_attestation()
@@ -1864,13 +1866,13 @@ def manifest_record_matches_current_reset(
     return not isinstance(record_generation, int) or record_generation == current_reset_generation
 
 
-def attempt_terminal_manifest_record_type(
+def attempt_terminal_manifest_record(
     task_path: Path,
     phase_number: int,
     attempt: int,
     current_reset_generation: int,
-) -> str | None:
-    terminal_type: str | None = None
+) -> dict[str, object] | None:
+    terminal_record: dict[str, object] | None = None
     for record in read_attempt_manifest_records(task_path, phase_number):
         record_type = record.get("record_type")
         if (
@@ -1879,8 +1881,19 @@ def attempt_terminal_manifest_record_type(
             and record_type in TERMINAL_ATTEMPT_RECORD_TYPES
             and manifest_record_matches_current_reset(record, current_reset_generation)
         ):
-            terminal_type = record_type
-    return terminal_type
+            terminal_record = record
+    return terminal_record
+
+
+def attempt_terminal_manifest_record_type(
+    task_path: Path,
+    phase_number: int,
+    attempt: int,
+    current_reset_generation: int,
+) -> str | None:
+    record = attempt_terminal_manifest_record(task_path, phase_number, attempt, current_reset_generation)
+    record_type = record.get("record_type") if isinstance(record, dict) else None
+    return record_type if isinstance(record_type, str) else None
 
 
 def latest_nonterminal_started_attempt(
@@ -1902,6 +1915,61 @@ def latest_nonterminal_started_attempt(
         if attempt_terminal_manifest_record_type(task_path, phase_number, attempt, current_reset_generation) is None:
             return attempt
     return None
+
+
+def phase_retry_max_attempts(task_path: Path, phase_number: int) -> int:
+    contract: dict | None = None
+    try:
+        contract = runtime_phase_contract(task_path, phase_number)
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+        try:
+            contract = phase_contract_from_markdown(phase_file(task_path, phase_number).read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+            contract = None
+    args = argparse.Namespace(max_attempts=DEFAULT_MAX_ATTEMPTS, ac_timeout=DEFAULT_AC_TIMEOUT)
+    max_attempts, _ = contract_validation_budget(contract, args)
+    return max_attempts
+
+
+def retryable_terminal_failure_recovery_errors(
+    task_path: Path,
+    phase_number: int,
+    attempt: int,
+    record: dict[str, object] | None,
+) -> list[str]:
+    if not isinstance(record, dict):
+        return ["missing terminal manifest record"]
+    if record.get("record_type") != "attempt_failed":
+        return [f"terminal record is {record.get('record_type')}"]
+    if record.get("attempt") != attempt:
+        return ["terminal record attempt does not match phase attempt"]
+    failure = record.get("failure") if isinstance(record.get("failure"), dict) else {}
+    if record.get("retryable") is not True and failure.get("retryable") is not True:
+        return ["terminal failure is not retryable"]
+    if attempt >= phase_retry_max_attempts(task_path, phase_number):
+        return ["attempt budget exhausted"]
+
+    errors = repair_context_integrity_errors(task_path, phase_number)
+    if errors:
+        return errors
+    packet_path = phase_repair_packet_path(task_path, phase_number)
+    if not packet_path.exists():
+        return ["missing phase repair packet alias"]
+    try:
+        packet = read_json(packet_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"invalid phase repair packet alias: {exc}"]
+    if not isinstance(packet, dict):
+        return ["phase repair packet alias must be a JSON object"]
+    packet_failure = packet.get("failure") if isinstance(packet.get("failure"), dict) else {}
+    if packet.get("attempt") != attempt:
+        return ["phase repair packet attempt does not match phase attempt"]
+    if packet_failure.get("retryable") is not True:
+        return ["phase repair packet is not retryable"]
+    contaminating_changes = packet.get("contaminating_changes")
+    if isinstance(contaminating_changes, list) and contaminating_changes:
+        return ["phase repair packet has contaminating changes"]
+    return []
 
 
 def attempt_runtime_artifact_refs(task_path: Path, phase_number: int, attempt: int) -> list[dict[str, object]]:
@@ -2206,6 +2274,35 @@ def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> 
                 if interrupted_attempt > 0
                 else None
             )
+            terminal_record = (
+                attempt_terminal_manifest_record(task_path, phase_number, interrupted_attempt, reset_generation)
+                if interrupted_attempt > 0
+                else None
+            )
+            if (
+                interrupted_attempt > 0
+                and nonterminal_started_attempt is None
+                and not retryable_terminal_failure_recovery_errors(
+                    task_path,
+                    phase_number,
+                    interrupted_attempt,
+                    terminal_record,
+                )
+            ):
+                changes.append(
+                    {
+                        "phase": phase_number,
+                        "from_status": status,
+                        "to_status": "pending",
+                        "reason": "retryable_attempt_failed",
+                    }
+                )
+                if not dry_run:
+                    phase["status"] = "pending"
+                    phase["attempts"] = interrupted_attempt
+                    phase.pop("failed_at", None)
+                    phase.pop("error_message", None)
+                continue
             has_result_artifact = phase_result_artifacts_exist(task_path, phase_number)
             has_commit = bool(list((task_path / "context-pack" / "runtime").glob(f"phase{phase_number}-attempt*-commit.json")))
             reason = (
@@ -4056,8 +4153,8 @@ def main() -> int:
     parser.add_argument("task", help="Task directory name or path.")
     parser.add_argument("--root", default=".", help="Repository root.")
     parser.add_argument("--codex-bin", default="codex", help="Codex executable.")
-    parser.add_argument("--max-attempts", type=int, default=3)
-    parser.add_argument("--ac-timeout", type=int, default=600)
+    parser.add_argument("--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS)
+    parser.add_argument("--ac-timeout", type=int, default=DEFAULT_AC_TIMEOUT)
     parser.add_argument(
         "--codex-idle-timeout",
         type=non_negative_int,
