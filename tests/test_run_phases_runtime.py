@@ -60,6 +60,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 "reference_resolver.py",
                 "redaction.py",
                 "run-phases.py",
+                "runtime_protocol.py",
                 "verify-task.py",
                 "run-quality-checks.py",
                 "relationship_graph.py",

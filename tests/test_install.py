@@ -350,6 +350,44 @@ class InstallCodexHarnessTest(unittest.TestCase):
             self.assertIn(".codex/harness/scripts/process_runner.py", result.stderr)
             self.assertNotIn("ModuleNotFoundError", result.stderr)
 
+    def test_installed_verify_preflight_reports_missing_runtime_protocol_before_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            target = tmp / "target"
+            target.mkdir()
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(INSTALLER),
+                    str(target),
+                    "--scope",
+                    "project",
+                    "--force",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            (target / ".codex" / "harness" / "scripts" / "runtime_protocol.py").unlink()
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(target / ".codex" / "harness" / "scripts" / "verify-task.py"),
+                    "demo",
+                    "--root",
+                    str(target),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(".codex/harness/scripts/runtime_protocol.py", result.stderr)
+            self.assertNotIn("ModuleNotFoundError", result.stderr)
+
     def test_project_hook_install_ignores_local_hook_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)

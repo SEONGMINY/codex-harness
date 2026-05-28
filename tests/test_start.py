@@ -147,6 +147,10 @@ class StartLauncherTest(unittest.TestCase):
             "# relationship graph helper\n",
             encoding="utf-8",
         )
+        (repo / ".codex" / "harness" / "scripts" / "runtime_protocol.py").write_text(
+            "# runtime protocol helper\n",
+            encoding="utf-8",
+        )
         (repo / ".codex" / "harness" / "scripts" / "gen-relationship-graph.py").write_text(
             "#!/usr/bin/env python3\n",
             encoding="utf-8",

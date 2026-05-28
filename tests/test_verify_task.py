@@ -1341,6 +1341,59 @@ classDiagram
             self.assertTrue(any("active repair packet alias" in error for error in errors), errors)
             self.assertTrue(any("active repair packet summary alias" in error for error in errors), errors)
 
+    def test_completed_phase_requires_attempt_manifest_records(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            (task_path / "context-pack" / "runtime").mkdir(parents=True)
+
+            errors = VERIFY_TASK.validate_phase_attempt_manifest(
+                root,
+                task_path,
+                {"phase": 0, "name": "demo", "status": "completed", "attempts": 1},
+            )
+
+            self.assertTrue(any("missing attempt manifest records" in error for error in errors), errors)
+
+    def test_phase_attempt_manifest_reuses_runtime_protocol_escape_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            runtime = task_path / "context-pack" / "runtime"
+            runtime.mkdir(parents=True)
+            (runtime / "phase0-attempt-manifest.jsonl").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "artifact_kind": "phase_attempt_manifest_record",
+                        "record_type": "attempt_committed",
+                        "phase": 0,
+                        "attempt": 1,
+                        "result": {
+                            "name": "result",
+                            "path": "../outside.json",
+                            "exists": True,
+                            "sha256": "bad",
+                        },
+                        "attempt_commit": {
+                            "name": "attempt_commit",
+                            "path": "context-pack/runtime/missing-commit.json",
+                            "exists": False,
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            errors = VERIFY_TASK.validate_phase_attempt_manifest(
+                root,
+                task_path,
+                {"phase": 0, "name": "demo", "status": "completed", "attempts": 1},
+            )
+
+            self.assertTrue(any("inside the task directory" in error for error in errors), errors)
+
     def test_extract_design_repo_paths_reads_files_to_change_section(self) -> None:
         text = """# Implementation Design Review
 

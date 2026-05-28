@@ -75,11 +75,21 @@ from policy_lineage import (
 from scope_policy import required_output_repo_paths, traceable_changed_files
 from task_paths import resolve_task_path
 from redaction import redact_text
+from runtime_protocol import (
+    TERMINAL_ATTEMPT_RECORD_TYPES,
+    artifact_ref,
+    attempt_manifest_semantic_errors,
+    file_sha256,
+    phase_attempt_manifest_path,
+    read_attempt_manifest_records_with_errors,
+    resolve_task_artifact_path,
+    runtime_artifact_ref_errors,
+    task_relative,
+)
 
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
 RUNNABLE_PHASE_STATUSES = {"pending", "running"}
-TERMINAL_ATTEMPT_RECORD_TYPES = {"attempt_committed", "attempt_failed", "attempt_interrupted"}
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_AC_TIMEOUT = 600
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
@@ -152,6 +162,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "verify-task.py",
         root / ".codex" / "harness" / "scripts" / "run-quality-checks.py",
         root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
+        root / ".codex" / "harness" / "scripts" / "runtime_protocol.py",
         root / ".codex" / "harness" / "scripts" / "scope_policy.py",
         root / ".codex" / "harness" / "scripts" / "task_paths.py",
         install_manifest_path,
@@ -549,10 +560,6 @@ def ac_results_path(task_path: Path, phase_number: int, attempt: int) -> Path:
 
 def phase_attempt_commit_path(task_path: Path, phase_number: int, attempt: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-attempt{attempt}-commit.json"
-
-
-def phase_attempt_manifest_path(task_path: Path, phase_number: int) -> Path:
-    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-attempt-manifest.jsonl"
 
 
 def phase_result_artifacts_exist(task_path: Path, phase_number: int) -> bool:
@@ -1114,10 +1121,6 @@ def file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def file_sha256(path: Path) -> str:
-    return file_digest(path)
-
-
 def runtime_policy_pack() -> dict[str, str]:
     return policy_pack_metadata()
 
@@ -1571,24 +1574,6 @@ def handoff_change_trace_blockers(
     )
 
 
-def task_relative(path: Path, task_path: Path) -> str:
-    return str(path.relative_to(task_path))
-
-
-def resolve_task_artifact_path(task_path: Path, raw_path: object) -> Path | None:
-    if not isinstance(raw_path, str) or not raw_path:
-        return None
-    path = Path(raw_path)
-    if path.is_absolute():
-        return None
-    target = (task_path / path).resolve()
-    try:
-        target.relative_to(task_path.resolve())
-    except ValueError:
-        return None
-    return target
-
-
 COMMAND_IDENTITY_FIELDS = ("id", "command", "role", "target", "exit_code", "timed_out")
 
 
@@ -1802,17 +1787,6 @@ def _artifact_entry(name: str, task_path: Path, raw_path: object) -> dict[str, o
     return entry
 
 
-def artifact_ref(task_path: Path, name: str, path: Path) -> dict[str, object]:
-    entry: dict[str, object] = {
-        "name": name,
-        "path": task_relative(path, task_path),
-        "exists": path.exists(),
-    }
-    if path.exists() and path.is_file():
-        entry["sha256"] = file_sha256(path)
-    return entry
-
-
 def append_attempt_manifest_record(
     task_path: Path,
     phase_number: int,
@@ -1839,118 +1813,9 @@ def append_attempt_manifest_record(
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-def read_attempt_manifest_records_with_errors(
-    task_path: Path,
-    phase_number: int,
-) -> tuple[list[dict[str, object]], list[str]]:
-    path = phase_attempt_manifest_path(task_path, phase_number)
-    if not path.exists():
-        return [], []
-    records: list[dict[str, object]] = []
-    errors: list[str] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            errors.append(f"Invalid phase {phase_number} attempt manifest JSON at line {line_number}.")
-            continue
-        if isinstance(record, dict):
-            records.append(record)
-        else:
-            errors.append(f"Phase {phase_number} attempt manifest record at line {line_number} must be a JSON object.")
-    return records, errors
-
-
 def read_attempt_manifest_records(task_path: Path, phase_number: int) -> list[dict[str, object]]:
     records, _errors = read_attempt_manifest_records_with_errors(task_path, phase_number)
     return records
-
-
-def runtime_artifact_ref_errors(
-    task_path: Path,
-    ref: object,
-    label: str,
-    expected_name: str | None = None,
-) -> list[str]:
-    if not isinstance(ref, dict):
-        return [f"{label} must be an artifact ref object."]
-    errors: list[str] = []
-    if expected_name is not None and ref.get("name") != expected_name:
-        errors.append(f"{label}.name must be {expected_name!r}.")
-    raw_path = ref.get("path")
-    path = resolve_task_artifact_path(task_path, raw_path)
-    if path is None:
-        errors.append(f"{label}.path is invalid.")
-        return errors
-    exists = ref.get("exists")
-    if not isinstance(exists, bool):
-        errors.append(f"{label}.exists must be boolean.")
-    elif exists != path.exists():
-        errors.append(f"{label}.exists does not match filesystem.")
-    if path.exists() and path.is_file():
-        expected_sha = file_sha256(path)
-        if ref.get("sha256") != expected_sha:
-            errors.append(f"{label}.sha256 does not match file content.")
-    elif "sha256" in ref:
-        errors.append(f"{label}.sha256 is present for a missing or non-file artifact.")
-    return errors
-
-
-def attempt_manifest_semantic_errors(
-    task_path: Path,
-    phase_number: int,
-    records: list[dict[str, object]],
-) -> list[str]:
-    errors: list[str] = []
-    terminal_by_attempt: dict[int, list[str]] = {}
-    for index, record in enumerate(records):
-        label = f"Phase {phase_number} attempt manifest record {index + 1}"
-        if record.get("schema_version") != 1:
-            errors.append(f"{label} schema_version must be 1.")
-        if record.get("artifact_kind") != "phase_attempt_manifest_record":
-            errors.append(f'{label} artifact_kind must be "phase_attempt_manifest_record".')
-        record_type = record.get("record_type")
-        if record_type not in {"attempt_started", *TERMINAL_ATTEMPT_RECORD_TYPES}:
-            errors.append(f"{label} record_type is invalid: {record_type!r}.")
-        if record.get("phase") != phase_number:
-            errors.append(f"{label} phase must be {phase_number}.")
-        attempt = record.get("attempt")
-        if not isinstance(attempt, int) or attempt <= 0:
-            errors.append(f"{label} attempt must be a positive integer.")
-            continue
-        if isinstance(record_type, str) and record_type in TERMINAL_ATTEMPT_RECORD_TYPES:
-            terminal_by_attempt.setdefault(attempt, []).append(record_type)
-        for artifact_key in ["result", "attempt_commit", "repair_packet", "repair_packet_summary"]:
-            if artifact_key in record:
-                errors.extend(
-                    runtime_artifact_ref_errors(
-                        task_path,
-                        record.get(artifact_key),
-                        f"{label}.{artifact_key}",
-                        expected_name=artifact_key,
-                    )
-                )
-        artifacts = record.get("artifacts")
-        if isinstance(artifacts, list):
-            for artifact_index, artifact in enumerate(artifacts):
-                errors.extend(
-                    runtime_artifact_ref_errors(
-                        task_path,
-                        artifact,
-                        f"{label}.artifacts[{artifact_index}]",
-                    )
-                )
-        elif "artifacts" in record:
-            errors.append(f"{label}.artifacts must be a list.")
-    for attempt, terminal_types in terminal_by_attempt.items():
-        if len(terminal_types) > 1:
-            errors.append(
-                f"Phase {phase_number} attempt {attempt} has multiple terminal manifest records: "
-                + ", ".join(terminal_types)
-            )
-    return errors
 
 
 def manifest_record_matches_current_reset(

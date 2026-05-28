@@ -12,6 +12,21 @@ import sys
 from pathlib import Path
 from typing import Any
 
+HARNESS_VERSION = "0.1.5"
+
+if (
+    __name__ == "__main__"
+    and Path(__file__).resolve().parent.name == "scripts"
+    and Path(__file__).resolve().parent.parent.name == "harness"
+    and Path(__file__).resolve().parent.parent.parent.name == ".codex"
+):
+    try:
+        from install_preflight import validate_entrypoint_install_or_exit
+    except Exception as exc:  # noqa: BLE001 - entrypoint preflight must fail closed before runtime imports.
+        print(f"[ERROR] codex-harness install preflight is unavailable: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    validate_entrypoint_install_or_exit(sys.argv[1:], HARNESS_VERSION)
+
 from decision_registry import (
     approved_decision_ids,
     architecture_ref_ids,
@@ -61,9 +76,16 @@ from policy_lineage import (
 )
 from scope_policy import required_output_repo_paths, traceable_changed_files
 from task_paths import resolve_task_path
+from runtime_protocol import (
+    TERMINAL_ATTEMPT_RECORD_TYPES,
+    attempt_manifest_semantic_errors,
+    file_sha256,
+    phase_attempt_manifest_path,
+    read_attempt_manifest_records_with_errors,
+    runtime_artifact_ref_errors,
+)
 
 
-HARNESS_VERSION = "0.1.5"
 MANDATORY_STATIC_FILES = [
     "original-prompt.md",
     "product.md",
@@ -237,14 +259,6 @@ def validate_mermaid_blocks(text: str) -> list[str]:
     if not valid_block_found:
         errors.append("Implementation design review must include an allowed Mermaid diagram type.")
     return errors
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def text_sha256(value: str) -> str:
@@ -1079,33 +1093,13 @@ def validate_runtime_artifact_ref(
     expected_name: str | None = None,
     expected_path: str | None = None,
 ) -> list[str]:
-    if not isinstance(entry, dict):
-        return [f"{label} must be an artifact reference."]
-    errors: list[str] = []
-    if expected_name is not None and entry.get("name") != expected_name:
-        errors.append(f"{label} name must be {expected_name}.")
-    raw_path = entry.get("path")
-    if expected_path is not None and raw_path != expected_path:
-        errors.append(f"{label} path must be {expected_path}.")
-    if not isinstance(raw_path, str) or not raw_path:
-        errors.append(f"{label} path must be a non-empty string.")
-        return errors
-    target, path_errors = resolve_task_relative_path(root, task_path, raw_path, f"{label}.path")
-    errors.extend(path_errors)
-    if target is None:
-        return errors
-    exists = entry.get("exists")
-    if exists is True:
-        if not target.exists() or not target.is_file():
-            errors.append(f"{label} path does not exist: {rel(root, target)}")
-        elif entry.get("sha256") != file_sha256(target):
-            errors.append(f"{label} sha256 does not match current artifact.")
-    elif exists is False:
-        if target.exists():
-            errors.append(f"{label} exists is false but path exists: {rel(root, target)}")
-    else:
-        errors.append(f"{label} exists must be true or false.")
-    return errors
+    return runtime_artifact_ref_errors(
+        task_path,
+        entry,
+        label,
+        expected_name=expected_name,
+        expected_path=expected_path,
+    )
 
 
 def validate_evaluation_commit(
@@ -1963,13 +1957,6 @@ def validate_obligation_closure_ledger(
     return errors
 
 
-TERMINAL_ATTEMPT_RECORD_TYPES = {"attempt_committed", "attempt_failed", "attempt_interrupted"}
-
-
-def phase_attempt_manifest_path(task_path: Path, phase_number: int) -> Path:
-    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-attempt-manifest.jsonl"
-
-
 def phase_repair_packet_path(task_path: Path, phase_number: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-repair-packet.json"
 
@@ -1992,23 +1979,12 @@ def read_phase_attempt_manifest(
     phase_number: int,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     path = phase_attempt_manifest_path(task_path, phase_number)
-    if not path.exists():
-        return [], []
-    records: list[dict[str, Any]] = []
-    errors: list[str] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError as exc:
-            errors.append(f"Invalid attempt manifest JSON: {rel(root, path)}:{line_number}: {exc}")
-            continue
-        if not isinstance(record, dict):
-            errors.append(f"Attempt manifest record must be a JSON object: {rel(root, path)}:{line_number}")
-            continue
-        records.append(record)
-    return records, errors
+    return read_attempt_manifest_records_with_errors(
+        task_path,
+        phase_number,
+        invalid_json_prefix=f"Invalid attempt manifest JSON: {rel(root, path)}",
+        non_object_prefix=f"Attempt manifest record must be a JSON object: {rel(root, path)}",
+    )
 
 
 def validate_repair_packet_file(
@@ -2073,21 +2049,20 @@ def validate_phase_attempt_manifest(
 ) -> list[str]:
     phase_number = int(phase["phase"])
     records, errors = read_phase_attempt_manifest(root, task_path, phase_number)
+    errors.extend(
+        attempt_manifest_semantic_errors(
+            task_path,
+            phase_number,
+            records,
+            label_prefix="Attempt manifest phase {phase} record {index}",
+        )
+    )
     terminal_by_attempt: dict[int, list[dict[str, Any]]] = {}
     for index, record in enumerate(records):
         label = f"Attempt manifest phase {phase_number} record {index + 1}"
-        if record.get("schema_version") != 1:
-            errors.append(f"{label} schema_version must be 1.")
-        if record.get("artifact_kind") != "phase_attempt_manifest_record":
-            errors.append(f'{label} artifact_kind must be "phase_attempt_manifest_record".')
         record_type = record.get("record_type")
-        if record_type not in {"attempt_started", *TERMINAL_ATTEMPT_RECORD_TYPES}:
-            errors.append(f"{label} record_type is invalid: {record_type!r}")
-        if record.get("phase") != phase_number:
-            errors.append(f"{label} phase must be {phase_number}.")
         attempt = record.get("attempt")
         if not isinstance(attempt, int) or attempt <= 0:
-            errors.append(f"{label} attempt must be a positive integer.")
             continue
         if isinstance(record_type, str) and record_type in TERMINAL_ATTEMPT_RECORD_TYPES:
             terminal_by_attempt.setdefault(attempt, []).append(record)
@@ -2098,27 +2073,6 @@ def validate_phase_attempt_manifest(
         attestation = record.get("harness_attestation")
         if attestation is not None:
             errors.extend(validate_harness_attestation_metadata(attestation, label))
-        for artifact_key in ["result", "attempt_commit", "repair_packet", "repair_packet_summary"]:
-            if artifact_key in record:
-                errors.extend(
-                    validate_runtime_artifact_ref(
-                        root,
-                        task_path,
-                        record.get(artifact_key),
-                        f"{label}.{artifact_key}",
-                        expected_name=artifact_key,
-                    )
-                )
-        if isinstance(record.get("artifacts"), list):
-            for artifact_index, entry in enumerate(record["artifacts"]):
-                errors.extend(
-                    validate_runtime_artifact_ref(
-                        root,
-                        task_path,
-                        entry,
-                        f"{label}.artifacts[{artifact_index}]",
-                    )
-                )
 
     for attempt, terminals in terminal_by_attempt.items():
         if len(terminals) > 1:
@@ -2150,14 +2104,17 @@ def validate_phase_attempt_manifest(
 
     expected_attempt = phase.get("attempts")
     if phase.get("status") == "completed":
-        if isinstance(expected_attempt, int) and expected_attempt > 0 and records:
-            committed = [
-                record
-                for record in terminal_by_attempt.get(expected_attempt, [])
-                if record.get("record_type") == "attempt_committed"
-            ]
-            if not committed:
-                errors.append(f"Completed phase {phase_number} attempt {expected_attempt} is missing attempt_committed manifest record.")
+        if isinstance(expected_attempt, int) and expected_attempt > 0:
+            if not records:
+                errors.append(f"Completed phase {phase_number} attempt {expected_attempt} is missing attempt manifest records.")
+            else:
+                committed = [
+                    record
+                    for record in terminal_by_attempt.get(expected_attempt, [])
+                    if record.get("record_type") == "attempt_committed"
+                ]
+                if not committed:
+                    errors.append(f"Completed phase {phase_number} attempt {expected_attempt} is missing attempt_committed manifest record.")
         if phase_repair_packet_path(task_path, phase_number).exists():
             errors.append(f"Completed phase {phase_number} must not retain active repair packet alias.")
         if phase_repair_packet_summary_path(task_path, phase_number).exists():

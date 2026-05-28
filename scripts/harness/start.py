@@ -695,6 +695,7 @@ def harness_install_errors(root: Path) -> list[str]:
         root / ".codex" / "harness" / "scripts" / "review-phase-plan.py",
         root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
         root / ".codex" / "harness" / "scripts" / "gen-relationship-graph.py",
+        root / ".codex" / "harness" / "scripts" / "runtime_protocol.py",
         root / ".codex" / "harness" / "scripts" / "scope_policy.py",
         root / ".codex" / "harness" / "scripts" / "task_paths.py",
         install_manifest_path,
