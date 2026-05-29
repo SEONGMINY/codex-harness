@@ -5182,6 +5182,99 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertNotIn("tampered", RUN_PHASES.phase_attempt_manifest_path(task_path, 0).read_text(encoding="utf-8"))
             self.assertEqual(VERIFY_TASK.validate_phase_attempt_manifest(root, task_path, phase), [])
 
+    def test_execute_phase_terminalizes_late_runtime_artifact_tamper_after_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (task_path / "phases").mkdir(parents=True)
+            (task_path / "context-pack" / "handoffs").mkdir(parents=True)
+            subprocess.run(["git", "init"], cwd=root, text=True, capture_output=True, check=False)
+            late_artifact = task_path / "context-pack" / "runtime" / "phase0-attempt99-commit.json"
+            contract = {
+                "phase": 0,
+                "name": "demo",
+                "read_first": {"docs": [], "previous_outputs": []},
+                "scope": {"layer": "app", "allowed_paths": ["src/**"]},
+                "interfaces": [],
+                "decision_refs": [],
+                "architecture_refs": [],
+                "dependency_policy": {"new_dependencies": "forbidden"},
+                "instructions": [{"id": "P0-001", "task": "Create app output.", "expected_evidence": ["src/app.py"]}],
+                "success_criteria": ["The app output exists."],
+                "stop_rules": ["Stop if required context is missing."],
+                "fallback_behavior": {"if_blocked": "Write the blocker.", "if_tests_fail": "Fix failures."},
+                "validation_budget": {"max_attempts": 3, "command_timeout_seconds": 600},
+                "missing_evidence_behavior": "Treat missing evidence as unresolved.",
+                "acceptance_commands": ["true"],
+                "required_outputs": ["context-pack/handoffs/phase0.md"],
+                "required_repo_outputs": ["src/app.py"],
+            }
+            (task_path / "phases" / "phase0.md").write_text(
+                "# Phase 0: demo\n\n## Contract\n\n```json\n"
+                + json.dumps(contract, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"project": "demo", "task": "demo", "docs": [], "common_docs": [], "phases": [{"phase": 0, "name": "demo", "status": "pending"}]})
+                + "\n",
+                encoding="utf-8",
+            )
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    f"""
+                    sys.stdin.read()
+                    import subprocess
+                    from pathlib import Path
+                    Path.cwd().joinpath("src/app.py").parent.mkdir(parents=True, exist_ok=True)
+                    Path.cwd().joinpath("src/app.py").write_text("ok\\n", encoding="utf-8")
+                    Path.cwd().joinpath("tasks/demo/context-pack/handoffs/phase0.md").write_text(
+                        "# Handoff\\n\\n## Change Trace\\n\\n- `src/app.py`: `P0-001`\\n",
+                        encoding="utf-8",
+                    )
+                    subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-c",
+                            "import time; from pathlib import Path; time.sleep(0.05); Path({str(late_artifact)!r}).write_text('{{}}\\\\n', encoding='utf-8')",
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        close_fds=True,
+                    )
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=3,
+                ac_timeout=600,
+                codex_bin=str(fake),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                runtime_settle_seconds=0.2,
+                failed=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            phase = task_index["phases"][0]
+            manifest = self.read_attempt_manifest(task_path, 0)
+            self.assertEqual([item["record_type"] for item in manifest], ["attempt_started", "attempt_failed"])
+            self.assertEqual(manifest[1]["failure"]["type"], "runtime_integrity")
+            repair_packet = json.loads(RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).read_text(encoding="utf-8"))
+            self.assertTrue(any("phase0-attempt99-commit.json created" in item for item in repair_packet["contaminating_changes"]))
+            self.assertEqual(VERIFY_TASK.validate_phase_attempt_manifest(root, task_path, phase), [])
+
     def test_execute_phase_terminalizes_runtime_artifact_tamper_from_acceptance_command(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)

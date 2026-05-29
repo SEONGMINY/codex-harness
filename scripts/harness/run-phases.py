@@ -97,6 +97,7 @@ from runtime_protocol import (
 from runtime_integrity import (
     restore_attempt_manifest_content,
     runtime_artifact_integrity_changes,
+    runtime_artifact_stable_snapshot,
     runtime_artifact_snapshot,
 )
 
@@ -105,6 +106,8 @@ TEXT_EXTENSIONS = {".md", ".txt", ".json"}
 RUNNABLE_PHASE_STATUSES = {"pending", "running"}
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_AC_TIMEOUT = 600
+DEFAULT_RUNTIME_SETTLE_SECONDS = 0.05
+DEFAULT_RUNTIME_SETTLE_POLL_SECONDS = 0.05
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUNTIME_HARNESS_ATTESTATION = harness_attestation()
@@ -166,6 +169,26 @@ def non_negative_int(value: str) -> int:
     if parsed < 0:
         raise argparse.ArgumentTypeError("value must be non-negative")
     return parsed
+
+
+def non_negative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return parsed
+
+
+def runtime_settle_seconds(args: argparse.Namespace) -> float:
+    configured = getattr(args, "runtime_settle_seconds", None)
+    if configured is not None:
+        return float(configured)
+    if getattr(args, "strict_current_harness", False):
+        return DEFAULT_RUNTIME_SETTLE_SECONDS
+    return 0.0
+
+
+def runtime_settle_poll_seconds(args: argparse.Namespace) -> float:
+    return float(getattr(args, "runtime_settle_poll_seconds", DEFAULT_RUNTIME_SETTLE_POLL_SECONDS))
 
 
 def env_flag(name: str) -> bool:
@@ -4104,7 +4127,11 @@ def execute_phase(
         )
         runtime_integrity_changes = runtime_artifact_integrity_changes(
             codex_runtime_snapshot,
-            runtime_artifact_snapshot(task_path),
+            runtime_artifact_stable_snapshot(
+                task_path,
+                settle_seconds=runtime_settle_seconds(args),
+                poll_seconds=runtime_settle_poll_seconds(args),
+            ),
             allowed_paths=[
                 task_relative(output_path, task_path),
                 task_relative(stderr_path, task_path),
@@ -4372,6 +4399,41 @@ def execute_phase(
                 args.failed = True
                 return False
         else:
+            runtime_integrity_changes = runtime_artifact_integrity_changes(
+                ac_runtime_snapshot,
+                runtime_artifact_stable_snapshot(
+                    task_path,
+                    settle_seconds=runtime_settle_seconds(args),
+                    poll_seconds=runtime_settle_poll_seconds(args),
+                ),
+                ignored_paths=runtime_integrity_ignored_contract_paths(task_path, phase_number, attempt),
+            )
+            if runtime_integrity_changes:
+                message = (
+                    "Runner-owned runtime artifacts changed after acceptance command execution: "
+                    + ", ".join(runtime_integrity_changes)
+                )
+                append_progress(task_path, f"phase {phase_number}: attempt {attempt} runtime integrity failed")
+                restore_attempt_manifest_content(task_path, phase_number, trusted_attempt_manifest_content)
+                write_terminal_phase_failure(
+                    root,
+                    task_path,
+                    phase,
+                    phase_number,
+                    attempt,
+                    "runtime_integrity",
+                    message,
+                    contract=contract,
+                    retryable=False,
+                    command_results=command_results,
+                    required_outputs=required_outputs,
+                    required_repo_outputs=required_repo_outputs,
+                    contaminating_changes=runtime_integrity_changes,
+                    changed_files=runtime_integrity_changes,
+                )
+                print(message, file=sys.stderr)
+                args.failed = True
+                return False
             ac_results = write_ac_results(task_path, phase_number, attempt, command_results)
             missing_outputs = verify_required_outputs(task_path, required_outputs)
             if missing_outputs:
@@ -4627,6 +4689,21 @@ def main() -> int:
         type=non_negative_int,
         default=1800,
         help="Fail codex exec after this many wall-clock seconds even if activity continues. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--runtime-settle-seconds",
+        type=non_negative_float,
+        default=None,
+        help=(
+            "Require runner-owned runtime artifacts to stay stable for this many seconds after child commands. "
+            "Defaults to 0 unless --strict-current-harness is set."
+        ),
+    )
+    parser.add_argument(
+        "--runtime-settle-poll-seconds",
+        type=non_negative_float,
+        default=DEFAULT_RUNTIME_SETTLE_POLL_SECONDS,
+        help="Polling interval for --runtime-settle-seconds.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Only build the next prompt.")
     parser.add_argument("--one", action="store_true", help="Run only one pending phase.")

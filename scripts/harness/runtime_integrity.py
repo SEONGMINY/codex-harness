@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -50,6 +51,32 @@ def runtime_artifact_snapshot(task_path: Path) -> dict[str, str]:
             continue
         snapshot[task_relative(path, task_path)] = runtime_artifact_fingerprint(path)
     return snapshot
+
+
+def runtime_artifact_stable_snapshot(
+    task_path: Path,
+    *,
+    settle_seconds: float = 0.0,
+    poll_seconds: float = 0.05,
+) -> dict[str, str]:
+    snapshot = runtime_artifact_snapshot(task_path)
+    if settle_seconds <= 0:
+        return snapshot
+    poll_interval = max(poll_seconds, 0.001)
+    deadline = time.monotonic() + max(settle_seconds * 3, settle_seconds + poll_interval)
+    stable_since = time.monotonic()
+    while True:
+        time.sleep(poll_interval)
+        next_snapshot = runtime_artifact_snapshot(task_path)
+        now = time.monotonic()
+        if next_snapshot == snapshot:
+            if now - stable_since >= settle_seconds:
+                return next_snapshot
+        else:
+            snapshot = next_snapshot
+            stable_since = now
+        if now >= deadline:
+            return snapshot
 
 
 def runtime_artifact_integrity_changes(
