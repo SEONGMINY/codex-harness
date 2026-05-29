@@ -33,6 +33,15 @@ def fd_identity(fd: int) -> tuple[int, int, int, int]:
     return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
 
 
+def lock_handle_matches_path(handle: LockHandle | None, path: Path) -> bool:
+    if handle is None or handle.path != path:
+        return False
+    try:
+        return file_identity(path) == handle.identity and fd_identity(handle.fd) == handle.identity
+    except (FileNotFoundError, OSError):
+        return False
+
+
 def open_lock_file(path: Path, boundary: Path | None = None, *, create: bool = True) -> int:
     ensure_no_symlink_path(path, boundary=boundary)
     if create:

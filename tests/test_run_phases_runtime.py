@@ -739,7 +739,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(changes[0]["reason"], "interrupted_running_phase")
@@ -771,7 +771,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             manifest = self.read_attempt_manifest(task_path, 0)
@@ -831,7 +831,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(changes[0]["reason"], "valid_attempt_commit")
@@ -854,7 +854,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             manifest = self.read_attempt_manifest(task_path, 0)
@@ -885,7 +885,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(changes[0]["reason"], "invalid_attempt_manifest")
@@ -938,7 +938,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             manifest = self.read_attempt_manifest(task_path, 0)
@@ -983,7 +983,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(changes[0]["reason"], "retryable_attempt_failed")
@@ -1026,7 +1026,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(changes[0]["reason"], "interrupted_running_phase")
@@ -1190,7 +1190,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(changes[0]["reason"], "valid_attempt_commit")
@@ -1258,7 +1258,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             manifest = self.read_attempt_manifest(task_path, 0)
@@ -1338,7 +1338,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             manifest = self.read_attempt_manifest(task_path, 0)
             self.assertEqual(changes[0]["reason"], "valid_attempt_commit")
@@ -1360,6 +1360,21 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(report["status"], "fail")
             self.assertEqual(report["checks"][0]["id"], "phase.attempt_manifest.missing_committed_record")
             self.assertFalse(RUN_PHASES.phase_attempt_manifest_path(task_path, 0).exists())
+
+    def test_runtime_projection_mutation_requires_repo_execution_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_valid_attempt_commit(root, task_path, phase=0, attempt=1)
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "running", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "requires an active codex-harness repo execution lock"):
+                RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(task_index["phases"][0]["status"], "running")
 
     def test_runtime_doctor_reports_non_completed_projection_drift(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -1537,7 +1552,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertFalse(RUN_PHASES.runner_lock_path(task_path).exists())
             self.assertFalse(RUN_PHASES.repo_execution_lock_path(root).exists())
 
-    def test_runtime_doctor_active_repo_lock_blocks_direct_backfill_without_writes(self) -> None:
+    def test_runtime_doctor_direct_backfill_requires_repo_execution_lock_without_writes(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
             self.write_valid_attempt_commit(root, task_path, phase=0, attempt=1)
@@ -1545,16 +1560,13 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed", "attempts": 1}]}) + "\n",
                 encoding="utf-8",
             )
-            held = file_lock.acquire_lock(RUN_PHASES.repo_execution_lock_path(root), boundary=root)
-            try:
-                report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=True)
-            finally:
-                file_lock.release_lock(held)
+
+            report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=True)
 
             self.assertEqual(report["status"], "unstable")
             self.assertTrue(report["applied"])
             self.assertFalse(report["backfill_applied"])
-            self.assertEqual(report["checks"][0]["id"], "doctor.repo_execution_active")
+            self.assertEqual(report["checks"][0]["id"], "doctor.repo_execution_lock_required")
             self.assertFalse(RUN_PHASES.phase_attempt_manifest_path(task_path, 0).exists())
             self.assertFalse((task_path / "context-pack" / "runtime" / "progress.md").exists())
 
@@ -1624,7 +1636,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             phase = {"phase": 0, "name": "demo", "status": "completed", "attempts": 1}
             (task_path / "index.json").write_text(json.dumps({"phases": [phase]}) + "\n", encoding="utf-8")
 
-            report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=True)
+            report = self.doctor_runtime_backfill(root, task_path)
 
             self.assertEqual(report["status"], "ok")
             self.assertEqual(report["checks"][0]["id"], "phase.attempt_manifest.backfilled")
@@ -1638,7 +1650,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 [],
             )
 
-            second_report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=True)
+            second_report = self.doctor_runtime_backfill(root, task_path)
             self.assertEqual(second_report["status"], "ok")
             self.assertEqual(second_report["checks"][0]["id"], "phase.attempt_manifest.committed_present")
             self.assertEqual(len(self.read_attempt_manifest(task_path, 0)), 1)
@@ -1658,7 +1670,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             (task_path / "index.json").write_text(json.dumps({"phases": [phase]}) + "\n", encoding="utf-8")
 
             self.assertIsNone(RUN_PHASES.latest_current_phase_attempt_commit(task_path, 0))
-            report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=True)
+            report = self.doctor_runtime_backfill(root, task_path)
 
             self.assertEqual(report["status"], "ok")
             self.assertEqual(report["checks"][0]["id"], "phase.attempt_manifest.backfilled")
@@ -1699,7 +1711,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=True)
+            report = self.doctor_runtime_backfill(root, task_path)
 
             self.assertEqual(report["status"], "fail")
             self.assertEqual(report["checks"][0]["id"], "phase.repair_alias.active_after_completion")
@@ -1715,7 +1727,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=True)
+            report = self.doctor_runtime_backfill(root, task_path)
 
             self.assertEqual(report["status"], "fail")
             self.assertEqual(report["checks"][0]["id"], "phase.attempt_manifest.invalid")
@@ -1781,7 +1793,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             manifest = self.read_attempt_manifest(task_path, 0)
@@ -1856,7 +1868,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(changes[0]["reason"], "invalid_attempt_manifest")
@@ -1912,7 +1924,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(changes[0]["reason"], "interrupted_running_phase")
@@ -1977,7 +1989,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(changes, [])
@@ -2167,7 +2179,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertIsNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 1))
@@ -2214,7 +2226,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertIsNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 1))
@@ -2427,7 +2439,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(changes[0]["reason"], "missing_attempt_commit")
@@ -2462,7 +2474,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(changes[0]["reason"], "stale_attempt_commit")
@@ -2475,9 +2487,18 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed", "attempts": 1}]}) + "\n",
                 encoding="utf-8",
             )
-            args = argparse.Namespace(dry_run=False, from_phase=None, resume_repair=False)
+            lock = file_lock.acquire_lock(RUN_PHASES.repo_execution_lock_path(root), boundary=root)
+            args = argparse.Namespace(
+                dry_run=False,
+                from_phase=None,
+                resume_repair=False,
+                repo_execution_lock=lock,
+            )
 
-            changes = RUN_PHASES.reconcile_before_execution(root, task_path, args)
+            try:
+                changes = RUN_PHASES.reconcile_before_execution(root, task_path, args)
+            finally:
+                file_lock.release_lock(lock)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             progress = (task_path / "context-pack" / "runtime" / "progress.md").read_text(encoding="utf-8")
@@ -2625,6 +2646,30 @@ class RunCodexRuntimeTest(unittest.TestCase):
             ).splitlines()
             if line.strip()
         ]
+
+    def reconcile_runtime_projection(self, root: Path, task_path: Path) -> list[dict[str, object]]:
+        lock = file_lock.acquire_lock(RUN_PHASES.repo_execution_lock_path(root), boundary=root)
+        try:
+            return RUN_PHASES.reconcile_runtime_projection(
+                root,
+                task_path,
+                dry_run=False,
+                repo_execution_lock=lock,
+            )
+        finally:
+            file_lock.release_lock(lock)
+
+    def doctor_runtime_backfill(self, root: Path, task_path: Path) -> dict[str, object]:
+        lock = file_lock.acquire_lock(RUN_PHASES.repo_execution_lock_path(root), boundary=root)
+        try:
+            return RUN_PHASES.doctor_runtime_proof(
+                root,
+                task_path,
+                apply_backfill=True,
+                repo_execution_lock=lock,
+            )
+        finally:
+            file_lock.release_lock(lock)
 
     def write_valid_attempt_commit(self, root: Path, task_path: Path, phase: int = 0, attempt: int = 1) -> tuple[Path, Path]:
         runtime = task_path / "context-pack" / "runtime"
@@ -3868,7 +3913,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
             RUN_PHASES.write_phase_attempt_commit(task_path, 0, 1, result_path)
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             self.assertEqual(changes[0]["to_status"], "error")
             self.assertEqual(changes[0]["reason"], "interrupted_running_phase")
@@ -4565,7 +4610,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             self.assertEqual(changes[0]["reason"], "reset_marker_without_projection")
@@ -4613,7 +4658,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            changes = RUN_PHASES.reconcile_runtime_projection(root, task_path, dry_run=False)
+            changes = self.reconcile_runtime_projection(root, task_path)
 
             task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
             by_phase = {item["phase"]: item for item in changes}

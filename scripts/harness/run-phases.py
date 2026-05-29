@@ -64,6 +64,7 @@ from file_lock import (
     acquire_lock,
     acquire_repo_execution_lock as acquire_shared_repo_execution_lock,
     acquire_task_runtime_lock,
+    lock_handle_matches_path,
     probe_lock_state,
     release_lock,
     remove_stale_lock,
@@ -1371,6 +1372,15 @@ def release_repo_execution_lock(handle: LockHandle | None) -> None:
     release_lock(handle)
 
 
+def repo_execution_lock_is_held(root: Path, handle: LockHandle | None) -> bool:
+    return lock_handle_matches_path(handle, repo_execution_lock_path(root))
+
+
+def require_repo_execution_lock(root: Path, handle: LockHandle | None, action: str) -> None:
+    if not repo_execution_lock_is_held(root, handle):
+        raise RuntimeError(f"{action} requires an active codex-harness repo execution lock.")
+
+
 def allowed_path_activity_root(root: Path, raw_path: str) -> Path | None:
     value = raw_path.strip().lstrip("./")
     if not value or value.startswith("../") or Path(value).is_absolute():
@@ -2549,8 +2559,22 @@ def doctor_runtime_proof(
     task_path: Path,
     *,
     apply_backfill: bool,
-    repo_execution_lock_held: bool = False,
+    repo_execution_lock: LockHandle | None = None,
 ) -> dict[str, object]:
+    repo_execution_lock_held = repo_execution_lock_is_held(root, repo_execution_lock)
+    if apply_backfill and not repo_execution_lock_held:
+        return doctor_runtime_unstable_report(
+            root,
+            task_path,
+            apply_backfill=True,
+            check={
+                "id": "doctor.repo_execution_lock_required",
+                "severity": "unstable",
+                "message": "Backfill requires the repository execution lock.",
+                "lock_path": str(repo_execution_lock_path(root).relative_to(root)),
+                "operator_action": "Run backfill through run-phases --doctor-runtime --backfill-attempt-manifests.",
+            },
+        )
     if not repo_execution_lock_held:
         active_execution_check = active_repo_execution_doctor_check(root)
         if active_execution_check is not None:
@@ -2588,7 +2612,15 @@ def doctor_runtime_proof(
     return report
 
 
-def reconcile_runtime_projection(root: Path, task_path: Path, dry_run: bool) -> list[dict[str, object]]:
+def reconcile_runtime_projection(
+    root: Path,
+    task_path: Path,
+    dry_run: bool,
+    *,
+    repo_execution_lock: LockHandle | None = None,
+) -> list[dict[str, object]]:
+    if not dry_run:
+        require_repo_execution_lock(root, repo_execution_lock, "Runtime projection reconciliation")
     index_path = task_path / "index.json"
     task_index = read_json(index_path)
     changes: list[dict[str, object]] = []
@@ -2771,7 +2803,12 @@ def reconcile_before_execution(root: Path, task_path: Path, args: argparse.Names
         return []
     if getattr(args, "from_phase", None) is not None or getattr(args, "resume_repair", False):
         return []
-    changes = reconcile_runtime_projection(root, task_path, dry_run=False)
+    changes = reconcile_runtime_projection(
+        root,
+        task_path,
+        dry_run=False,
+        repo_execution_lock=getattr(args, "repo_execution_lock", None),
+    )
     if changes:
         append_progress(
             task_path,
@@ -4964,6 +5001,7 @@ def main() -> int:
             runner_lock = acquire_runner_lock(task_path, args.dry_run)
             if not args.doctor_runtime or args.backfill_attempt_manifests:
                 repo_lock = acquire_repo_execution_lock(root, task_path, args)
+                args.repo_execution_lock = repo_lock
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             return 1
@@ -4973,7 +5011,7 @@ def main() -> int:
                 root,
                 task_path,
                 apply_backfill=args.backfill_attempt_manifests,
-                repo_execution_lock_held=repo_lock is not None,
+                repo_execution_lock=repo_lock,
             )
             print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
             return 0 if report.get("status") == "ok" else 1

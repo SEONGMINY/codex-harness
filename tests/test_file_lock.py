@@ -105,8 +105,11 @@ class FileLockTest(unittest.TestCase):
             handle = FILE_LOCK.acquire_lock(path)
             try:
                 self.assertEqual(FILE_LOCK.probe_lock_state(path), "active")
+                self.assertTrue(FILE_LOCK.lock_handle_matches_path(handle, path))
             finally:
                 FILE_LOCK.release_lock(handle)
+
+            self.assertFalse(FILE_LOCK.lock_handle_matches_path(handle, path))
 
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("{}\n", encoding="utf-8")
