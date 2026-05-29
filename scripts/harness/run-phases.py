@@ -26,7 +26,14 @@ if __name__ == "__main__":
         raise SystemExit(1) from exc
     validate_entrypoint_install_or_exit(sys.argv[1:], HARNESS_VERSION)
 
-from codex_exec import CODEX_IDLE_EXIT_CODE, CODEX_MAX_RUNTIME_EXIT_CODE, add_output_schema, run_codex_exec
+from codex_exec import (
+    CODEX_CLEANUP_FAILED_EXIT_CODE,
+    CODEX_IDLE_EXIT_CODE,
+    CODEX_MAX_RUNTIME_EXIT_CODE,
+    CODEX_STARTUP_EXIT_CODE,
+    add_output_schema,
+    run_codex_exec,
+)
 from artifact_io import atomic_write_json, atomic_write_text, open_append_text
 from decision_registry import (
     load_decision_registry,
@@ -200,11 +207,16 @@ def package_manager_install_command(root: Path) -> list[str] | None:
         package_data = {}
     package_manager = package_data.get("packageManager") if isinstance(package_data, dict) else ""
     if (root / "pnpm-workspace.yaml").exists() or str(package_manager).startswith("pnpm@"):
-        return ["pnpm", "install"]
+        return ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"]
     if (root / "yarn.lock").exists() or str(package_manager).startswith("yarn@"):
-        return ["yarn", "install"]
+        if not str(package_manager).startswith("yarn@"):
+            return ["yarn", "install", "--frozen-lockfile", "--ignore-scripts"]
+        yarn_version = str(package_manager).split("@", 1)[1]
+        if yarn_version.startswith("1."):
+            return ["yarn", "install", "--frozen-lockfile", "--ignore-scripts"]
+        return ["yarn", "install", "--immutable", "--mode=skip-builds"]
     if (root / "package-lock.json").exists() or (root / "npm-shrinkwrap.json").exists():
-        return ["npm", "install"]
+        return ["npm", "ci", "--ignore-scripts"]
     return None
 
 
@@ -3278,6 +3290,54 @@ def write_repair_packet(
         )
 
 
+def write_terminal_phase_failure(
+    root: Path,
+    task_path: Path,
+    phase: dict,
+    phase_number: int,
+    attempt: int,
+    failure_type: str,
+    message: str,
+    *,
+    contract: dict | None,
+    retryable: bool = False,
+    codex_exit_code: int | None = None,
+    stderr_path: Path | None = None,
+    command_results: list[dict[str, object]] | None = None,
+    required_outputs: list[str] | None = None,
+    required_repo_outputs: list[str] | None = None,
+    contaminating_changes: list[str] | None = None,
+    changed_files: list[str] | None = None,
+) -> None:
+    write_last_error(task_path, phase_number, message)
+    write_repair_packet(
+        task_path,
+        phase_number,
+        build_repair_packet(
+            task_path,
+            phase_number,
+            phase,
+            attempt,
+            failure_type,
+            message,
+            retryable=retryable,
+            contract=contract,
+            codex_exit_code=codex_exit_code,
+            stderr_path=stderr_path,
+            command_results=command_results,
+            required_outputs=required_outputs or [],
+            required_repo_outputs=required_repo_outputs or [],
+            contaminating_changes=contaminating_changes or [],
+            changed_files=changed_files or [],
+        ),
+        attempt=attempt,
+    )
+    task_index = read_json(task_path / "index.json")
+    set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
+    write_json(task_path / "index.json", task_index)
+    update_top_index(root, task_path.name, "error")
+
+
 def clear_attempt_artifacts(task_path: Path, phase_number: int) -> None:
     for path in [
         phase_result_path(task_path, phase_number),
@@ -3969,11 +4029,6 @@ def execute_phase(
             attempt,
             "attempt_started",
             status="running",
-            artifacts=[
-                artifact_ref(task_path, "prompt", prompt_path),
-                artifact_ref(task_path, "contract", contract_path),
-                artifact_ref(task_path, "checklist", checklist_path),
-            ],
         )
 
         install_errors = run_install_preflight(root, task_path, args)
@@ -4045,7 +4100,11 @@ def execute_phase(
                 changed_files,
                 required_outputs,
             )
-            retryable = attempt < max_attempts and not contaminating_changes
+            retryable = (
+                attempt < max_attempts
+                and not contaminating_changes
+                and returncode not in {CODEX_STARTUP_EXIT_CODE, CODEX_CLEANUP_FAILED_EXIT_CODE}
+            )
             if contaminating_changes:
                 message += (
                     " Out-of-scope changes require cleanup before retry: "
@@ -4059,11 +4118,23 @@ def execute_phase(
                 ]
                 if contract_tamper_errors:
                     message = "; ".join(contract_tamper_errors)
-                    write_last_error(task_path, phase_number, message)
-                    task_index = read_json(index_path)
-                    set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
-                    write_json(index_path, task_index)
-                    update_top_index(root, task_path.name, "error")
+                    write_terminal_phase_failure(
+                        root,
+                        task_path,
+                        phase,
+                        phase_number,
+                        attempt,
+                        "contract_tamper",
+                        message,
+                        contract=contract,
+                        retryable=False,
+                        codex_exit_code=returncode,
+                        stderr_path=stderr_path,
+                        required_outputs=required_outputs,
+                        required_repo_outputs=required_repo_outputs,
+                        contaminating_changes=contaminating_changes,
+                        changed_files=changed_files,
+                    )
                     print(message, file=sys.stderr)
                     args.failed = True
                     return False
@@ -4103,11 +4174,19 @@ def execute_phase(
             contract = runtime_phase_contract(task_path, phase_number, attempt)
         except (FileNotFoundError, ValueError) as exc:
             message = str(exc)
-            write_last_error(task_path, phase_number, message)
-            task_index = read_json(index_path)
-            set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
-            write_json(index_path, task_index)
-            update_top_index(root, task_path.name, "error")
+            write_terminal_phase_failure(
+                root,
+                task_path,
+                phase,
+                phase_number,
+                attempt,
+                "runtime_contract",
+                message,
+                contract=initial_contract,
+                retryable=False,
+                required_outputs=contract_outputs(phase, initial_contract) if initial_contract else [],
+                required_repo_outputs=contract_repo_outputs(initial_contract) if initial_contract else [],
+            )
             print(message, file=sys.stderr)
             args.failed = True
             return False
@@ -4118,11 +4197,19 @@ def execute_phase(
         ]
         if contract_tamper_errors:
             message = "; ".join(contract_tamper_errors)
-            write_last_error(task_path, phase_number, message)
-            task_index = read_json(index_path)
-            set_phase_status(task_index, phase_number, "error", failed_at=now(), error_message=message)
-            write_json(index_path, task_index)
-            update_top_index(root, task_path.name, "error")
+            write_terminal_phase_failure(
+                root,
+                task_path,
+                phase,
+                phase_number,
+                attempt,
+                "contract_tamper",
+                message,
+                contract=contract,
+                retryable=False,
+                required_outputs=contract_outputs(phase, contract),
+                required_repo_outputs=contract_repo_outputs(contract),
+            )
             print(message, file=sys.stderr)
             args.failed = True
             return False

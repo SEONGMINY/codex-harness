@@ -18,6 +18,8 @@ from redaction import redact_text
 
 CODEX_IDLE_EXIT_CODE = 124
 CODEX_MAX_RUNTIME_EXIT_CODE = 124
+CODEX_CLEANUP_FAILED_EXIT_CODE = 125
+CODEX_STARTUP_EXIT_CODE = 127
 SKIP_ACTIVITY_DIRS = {
     ".git",
     ".codex-harness",
@@ -146,17 +148,22 @@ def run_codex_exec(
         allow_harness_policy_controls=True,
         allow_additional_env_names=False,
     ) if env is not None else sanitized_env(allow_harness_policy_controls=True)
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        env=process_env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-        start_new_session=True,
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=process_env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        with open_append_text(stderr_path) as handle:
+            handle.write(f"[codex-harness] failed to start codex exec: {redact_text(str(exc))}\n")
+        return CODEX_STARTUP_EXIT_CODE
     assert process.stdin is not None
     assert process.stdout is not None
     assert process.stderr is not None
@@ -182,6 +189,7 @@ def run_codex_exec(
         thread.start()
 
     timeout_reason: str | None = None
+    cleanup_confirmed = True
     watched_paths = list(activity_paths)
     last_watched_marker = activity_marker(watched_paths)
     last_mtime_check = 0.0
@@ -190,7 +198,7 @@ def run_codex_exec(
         now = time.monotonic()
         if max_runtime > 0 and now - started_at > max_runtime:
             timeout_reason = "max_runtime"
-            terminate_process_group(process)
+            cleanup_confirmed = terminate_process_group(process)
             break
         last_activity = drain_activity_queue(activity_queue, last_activity)
         if watched_paths and now - last_mtime_check >= mtime_check_interval:
@@ -201,7 +209,7 @@ def run_codex_exec(
             last_mtime_check = now
         if idle_timeout > 0 and now - last_activity > idle_timeout:
             timeout_reason = "idle"
-            terminate_process_group(process)
+            cleanup_confirmed = terminate_process_group(process)
             break
         sleep_seconds = 0.5
         if max_runtime > 0:
@@ -218,6 +226,8 @@ def run_codex_exec(
                 f"[codex-harness] codex exec idle timeout after {idle_timeout} seconds "
                 "with no stdout/stderr/stdin or watched file activity.\n"
             )
+            if not cleanup_confirmed:
+                handle.write("[codex-harness] process cleanup could not be confirmed after idle timeout.\n")
         return CODEX_IDLE_EXIT_CODE
     if timeout_reason == "max_runtime":
         with open_append_text(stderr_path) as handle:
@@ -225,6 +235,8 @@ def run_codex_exec(
                 "\n"
                 f"[codex-harness] codex exec max runtime timeout after {max_runtime} seconds.\n"
             )
+            if not cleanup_confirmed:
+                handle.write("[codex-harness] process cleanup could not be confirmed after max runtime timeout.\n")
         return CODEX_MAX_RUNTIME_EXIT_CODE
 
     return process.returncode or 0

@@ -2518,6 +2518,29 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(returncode, RUN_PHASES.CODEX_IDLE_EXIT_CODE)
             self.assertIn("idle timeout", stderr_path.read_text(encoding="utf-8"))
 
+    def test_codex_startup_failure_returns_structured_exit_code(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+            stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+
+            returncode = RUN_PHASES.run_codex(
+                root,
+                task_path,
+                1,
+                "prompt",
+                output_path,
+                stderr_path,
+                str(tmp / "missing-codex"),
+                False,
+                False,
+                1,
+            )
+
+            self.assertEqual(returncode, RUN_PHASES.CODEX_STARTUP_EXIT_CODE)
+            self.assertIn("failed to start codex exec", stderr_path.read_text(encoding="utf-8"))
+
     def test_codex_max_runtime_bounds_continuous_stdout_process(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -4304,6 +4327,39 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(marker.read_text(encoding="utf-8"), "run\n")
             self.assertFalse(RUN_PHASES.install_preflight_lock_path(root).exists())
 
+    def test_install_preflight_uses_frozen_scriptless_package_manager_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, _task_path = self.make_task(tmp)
+            (root / "package.json").write_text('{"packageManager":"pnpm@9.0.0"}\n', encoding="utf-8")
+            (root / "pnpm-workspace.yaml").write_text("packages: []\n", encoding="utf-8")
+            self.assertEqual(
+                RUN_PHASES.package_manager_install_command(root),
+                ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"],
+            )
+
+            (root / "pnpm-workspace.yaml").unlink()
+            (root / "package.json").write_text('{"packageManager":"yarn@1.22.0"}\n', encoding="utf-8")
+            (root / "yarn.lock").write_text("# yarn v1\n", encoding="utf-8")
+            self.assertEqual(
+                RUN_PHASES.package_manager_install_command(root),
+                ["yarn", "install", "--frozen-lockfile", "--ignore-scripts"],
+            )
+
+            (root / "package.json").write_text('{"packageManager":"yarn@4.0.0"}\n', encoding="utf-8")
+            self.assertEqual(
+                RUN_PHASES.package_manager_install_command(root),
+                ["yarn", "install", "--immutable", "--mode=skip-builds"],
+            )
+
+            (root / "yarn.lock").unlink()
+            (root / "package.json").write_text("{}\n", encoding="utf-8")
+            (root / "package-lock.json").write_text("{}\n", encoding="utf-8")
+            self.assertEqual(
+                RUN_PHASES.package_manager_install_command(root),
+                ["npm", "ci", "--ignore-scripts"],
+            )
+
     def test_install_preflight_rejects_concurrent_repo_install(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -4940,6 +4996,153 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 encoding="utf-8"
             )
             self.assertIn("AC command failed: false", last_error)
+
+    def test_execute_phase_terminalizes_runtime_contract_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (task_path / "phases").mkdir(parents=True)
+            (task_path / "context-pack" / "handoffs").mkdir(parents=True)
+            subprocess.run(["git", "init"], cwd=root, text=True, capture_output=True, check=False)
+            contract = {
+                "phase": 0,
+                "name": "demo",
+                "read_first": {"docs": [], "previous_outputs": []},
+                "scope": {"layer": "app", "allowed_paths": ["src/**"]},
+                "interfaces": [],
+                "decision_refs": [],
+                "architecture_refs": [],
+                "dependency_policy": {"new_dependencies": "forbidden"},
+                "instructions": [{"id": "P0-001", "task": "Create app output.", "expected_evidence": ["src/app.py"]}],
+                "success_criteria": ["The app output exists."],
+                "stop_rules": ["Stop if required context is missing."],
+                "fallback_behavior": {"if_blocked": "Write the blocker.", "if_tests_fail": "Fix failures."},
+                "validation_budget": {"max_attempts": 1, "command_timeout_seconds": 600},
+                "missing_evidence_behavior": "Treat missing evidence as unresolved.",
+                "acceptance_commands": ["true"],
+                "required_outputs": ["context-pack/handoffs/phase0.md"],
+                "required_repo_outputs": ["src/app.py"],
+            }
+            (task_path / "phases" / "phase0.md").write_text(
+                "# Phase 0: demo\n\n## Contract\n\n```json\n"
+                + json.dumps(contract, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"project": "demo", "task": "demo", "docs": [], "common_docs": [], "phases": [{"phase": 0, "name": "demo", "status": "pending"}]})
+                + "\n",
+                encoding="utf-8",
+            )
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    sys.stdin.read()
+                    import json
+                    from pathlib import Path
+                    Path.cwd().joinpath("src/app.py").parent.mkdir(parents=True, exist_ok=True)
+                    Path.cwd().joinpath("src/app.py").write_text("ok\\n", encoding="utf-8")
+                    Path.cwd().joinpath("tasks/demo/context-pack/handoffs/phase0.md").write_text(
+                        "# Handoff\\n\\n## Change Trace\\n\\n- `src/app.py`: `P0-001`\\n",
+                        encoding="utf-8",
+                    )
+                    attempt_contract = Path.cwd().joinpath("tasks/demo/context-pack/runtime/phase0-contract-attempt1.json")
+                    data = json.loads(attempt_contract.read_text(encoding="utf-8"))
+                    data["required_repo_outputs"] = []
+                    attempt_contract.write_text(json.dumps(data) + "\\n", encoding="utf-8")
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=3,
+                ac_timeout=600,
+                codex_bin=str(fake),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            phase = task_index["phases"][0]
+            self.assertEqual(phase["status"], "error")
+            manifest = self.read_attempt_manifest(task_path, 0)
+            self.assertEqual([item["record_type"] for item in manifest], ["attempt_started", "attempt_failed"])
+            self.assertEqual(manifest[1]["failure"]["type"], "contract_tamper")
+            self.assertEqual(VERIFY_TASK.validate_phase_attempt_manifest(root, task_path, phase), [])
+
+    def test_execute_phase_terminalizes_codex_startup_failure_without_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            (task_path / "phases").mkdir(parents=True)
+            subprocess.run(["git", "init"], cwd=root, text=True, capture_output=True, check=False)
+            contract = {
+                "phase": 0,
+                "name": "demo",
+                "read_first": {"docs": [], "previous_outputs": []},
+                "scope": {"layer": "app", "allowed_paths": ["src/**"]},
+                "interfaces": [],
+                "decision_refs": [],
+                "architecture_refs": [],
+                "dependency_policy": {"new_dependencies": "forbidden"},
+                "instructions": [{"id": "P0-001", "task": "Create app output.", "expected_evidence": ["src/app.py"]}],
+                "success_criteria": ["The app output exists."],
+                "stop_rules": ["Stop if required context is missing."],
+                "fallback_behavior": {"if_blocked": "Write the blocker.", "if_tests_fail": "Fix failures."},
+                "validation_budget": {"max_attempts": 3, "command_timeout_seconds": 600},
+                "missing_evidence_behavior": "Treat missing evidence as unresolved.",
+                "acceptance_commands": ["true"],
+                "required_repo_outputs": ["src/app.py"],
+            }
+            (task_path / "phases" / "phase0.md").write_text(
+                "# Phase 0: demo\n\n## Contract\n\n```json\n"
+                + json.dumps(contract, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"project": "demo", "task": "demo", "docs": [], "common_docs": [], "phases": [{"phase": 0, "name": "demo", "status": "pending"}]})
+                + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=3,
+                ac_timeout=600,
+                codex_bin=str(tmp / "missing-codex"),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            phase = task_index["phases"][0]
+            self.assertEqual(phase["status"], "error")
+            self.assertEqual(phase["attempts"], 1)
+            manifest = self.read_attempt_manifest(task_path, 0)
+            self.assertEqual([item["record_type"] for item in manifest], ["attempt_started", "attempt_failed"])
+            self.assertEqual(manifest[1]["failure"]["type"], "codex_exec")
+            self.assertFalse(manifest[1]["failure"]["retryable"])
+            self.assertEqual(VERIFY_TASK.validate_phase_attempt_manifest(root, task_path, phase), [])
 
     def test_execute_phase_retry_keeps_attempt_prompt_artifacts_immutable(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
