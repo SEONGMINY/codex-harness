@@ -64,6 +64,7 @@ from file_lock import (
     acquire_lock,
     acquire_repo_execution_lock as acquire_shared_repo_execution_lock,
     acquire_task_runtime_lock,
+    probe_lock_state,
     release_lock,
     remove_stale_lock,
     repo_execution_lock_path,
@@ -2503,7 +2504,62 @@ def runtime_projection_drift_checks(root: Path, task_path: Path) -> list[dict[st
     return checks
 
 
-def doctor_runtime_proof(root: Path, task_path: Path, *, apply_backfill: bool) -> dict[str, object]:
+def active_repo_execution_doctor_check(root: Path) -> dict[str, object] | None:
+    lock_path = repo_execution_lock_path(root)
+    lock_state = probe_lock_state(lock_path, boundary=root)
+    if lock_state in {"missing", "stale"}:
+        return None
+    if lock_state == "unsafe":
+        return {
+            "id": "doctor.repo_execution_lock_unsafe",
+            "severity": "unstable",
+            "message": "The repository execution lock path is unsafe.",
+            "lock_path": str(lock_path.relative_to(root)),
+            "operator_action": "Inspect the lock path before trusting runtime proof diagnostics.",
+        }
+    return {
+        "id": "doctor.repo_execution_active",
+        "severity": "unstable",
+        "message": "Another phase execution holds the repository execution lock.",
+        "lock_path": str(lock_path.relative_to(root)),
+        "operator_action": "Rerun doctor-runtime after the active phase execution finishes.",
+    }
+
+
+def doctor_runtime_unstable_report(
+    root: Path,
+    task_path: Path,
+    *,
+    apply_backfill: bool,
+    check: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "status": "unstable",
+        "root": str(root),
+        "task": str(task_path.relative_to(root)),
+        "applied": apply_backfill,
+        "backfill_applied": False,
+        "checks": [check],
+    }
+
+
+def doctor_runtime_proof(
+    root: Path,
+    task_path: Path,
+    *,
+    apply_backfill: bool,
+    repo_execution_lock_held: bool = False,
+) -> dict[str, object]:
+    if not repo_execution_lock_held:
+        active_execution_check = active_repo_execution_doctor_check(root)
+        if active_execution_check is not None:
+            return doctor_runtime_unstable_report(
+                root,
+                task_path,
+                apply_backfill=apply_backfill,
+                check=active_execution_check,
+            )
     task_index = read_json(task_path / "index.json")
     checks: list[dict[str, object]] = []
     for phase in task_index.get("phases") or []:
@@ -4883,6 +4939,27 @@ def main() -> int:
     runner_lock: LockHandle | None = None
     repo_lock: LockHandle | None = None
     try:
+        if args.from_phase is not None and args.resume_repair:
+            print("--from and --resume-repair cannot be used together.", file=sys.stderr)
+            return 1
+        if args.backfill_attempt_manifests and not args.doctor_runtime:
+            print("--backfill-attempt-manifests requires --doctor-runtime.", file=sys.stderr)
+            return 1
+        if args.doctor_runtime and not args.backfill_attempt_manifests:
+            report = doctor_runtime_proof(root, task_path, apply_backfill=False)
+            print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0 if report.get("status") == "ok" else 1
+        if args.doctor_runtime and args.backfill_attempt_manifests:
+            active_execution_check = active_repo_execution_doctor_check(root)
+            if active_execution_check is not None:
+                report = doctor_runtime_unstable_report(
+                    root,
+                    task_path,
+                    apply_backfill=True,
+                    check=active_execution_check,
+                )
+                print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+                return 1
         try:
             runner_lock = acquire_runner_lock(task_path, args.dry_run)
             if not args.doctor_runtime or args.backfill_attempt_manifests:
@@ -4891,14 +4968,13 @@ def main() -> int:
             print(str(exc), file=sys.stderr)
             return 1
 
-        if args.from_phase is not None and args.resume_repair:
-            print("--from and --resume-repair cannot be used together.", file=sys.stderr)
-            return 1
-        if args.backfill_attempt_manifests and not args.doctor_runtime:
-            print("--backfill-attempt-manifests requires --doctor-runtime.", file=sys.stderr)
-            return 1
         if args.doctor_runtime:
-            report = doctor_runtime_proof(root, task_path, apply_backfill=args.backfill_attempt_manifests)
+            report = doctor_runtime_proof(
+                root,
+                task_path,
+                apply_backfill=args.backfill_attempt_manifests,
+                repo_execution_lock_held=repo_lock is not None,
+            )
             print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
             return 0 if report.get("status") == "ok" else 1
         task_index_override = (

@@ -95,8 +95,37 @@ class FileLockTest(unittest.TestCase):
 
             self.assertTrue(FILE_LOCK.lock_is_stale(path))
             self.assertTrue(FILE_LOCK.remove_stale_lock(path))
+            self.assertEqual(FILE_LOCK.probe_lock_state(path), "missing")
 
             self.assertFalse(path.exists())
+
+    def test_probe_lock_state_reports_active_and_stale_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            path = Path(raw_tmp) / "runtime" / "state.lock"
+            handle = FILE_LOCK.acquire_lock(path)
+            try:
+                self.assertEqual(FILE_LOCK.probe_lock_state(path), "active")
+            finally:
+                FILE_LOCK.release_lock(handle)
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}\n", encoding="utf-8")
+
+            self.assertEqual(FILE_LOCK.probe_lock_state(path), "stale")
+            self.assertTrue(path.exists())
+
+    def test_probe_lock_state_reports_unsafe_symlink_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            outside = Path(raw_tmp) / "outside"
+            outside.mkdir()
+            root.mkdir()
+            linked_harness = root / ".codex" / "harness"
+            linked_harness.parent.mkdir(parents=True)
+            linked_harness.symlink_to(outside, target_is_directory=True)
+            (outside / "state.lock").write_text("{}\n", encoding="utf-8")
+
+            self.assertEqual(FILE_LOCK.probe_lock_state(linked_harness / "state.lock", boundary=root), "unsafe")
 
     def test_lock_rejects_symlink_parent_with_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

@@ -1381,6 +1381,242 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(task_index["phases"][0]["status"], "running")
             self.assertFalse(RUN_PHASES.phase_attempt_manifest_path(task_path, 0).exists())
 
+    def test_runtime_doctor_reports_unstable_when_repo_execution_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_valid_attempt_commit(root, task_path, phase=0, attempt=1)
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "running", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+            held = file_lock.acquire_lock(RUN_PHASES.repo_execution_lock_path(root), boundary=root)
+            try:
+                report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=False)
+            finally:
+                file_lock.release_lock(held)
+
+            self.assertEqual(report["status"], "unstable")
+            self.assertEqual(report["checks"][0]["id"], "doctor.repo_execution_active")
+            self.assertFalse(RUN_PHASES.phase_attempt_manifest_path(task_path, 0).exists())
+
+    def test_runtime_doctor_active_repo_lock_short_circuits_before_index_read(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (task_path / "index.json").write_text("{not-json}\n", encoding="utf-8")
+            held = file_lock.acquire_lock(RUN_PHASES.repo_execution_lock_path(root), boundary=root)
+            try:
+                report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=False)
+            finally:
+                file_lock.release_lock(held)
+
+            self.assertEqual(report["status"], "unstable")
+            self.assertEqual(report["checks"][0]["id"], "doctor.repo_execution_active")
+
+    def test_main_doctor_runtime_reports_unstable_when_repo_execution_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (task_path / "index.json").write_text("{not-json}\n", encoding="utf-8")
+            held = file_lock.acquire_lock(RUN_PHASES.repo_execution_lock_path(root), boundary=root)
+            stdout = io.StringIO()
+            try:
+                with (
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        ["run-phases.py", "demo", "--root", str(root), "--doctor-runtime"],
+                    ),
+                    mock.patch.object(RUN_PHASES, "harness_install_errors", return_value=[]),
+                    mock.patch.object(sys, "stdout", stdout),
+                ):
+                    exit_code = RUN_PHASES.main()
+            finally:
+                file_lock.release_lock(held)
+
+            report = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(report["status"], "unstable")
+            self.assertEqual(report["checks"][0]["id"], "doctor.repo_execution_active")
+            self.assertFalse(RUN_PHASES.runner_lock_path(task_path).exists())
+
+    def test_main_doctor_runtime_reports_unstable_when_same_task_execution_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (task_path / "index.json").write_text("{not-json}\n", encoding="utf-8")
+            held_runner = file_lock.acquire_lock(RUN_PHASES.runner_lock_path(task_path), boundary=task_path)
+            held_repo = file_lock.acquire_lock(RUN_PHASES.repo_execution_lock_path(root), boundary=root)
+            stdout = io.StringIO()
+            try:
+                with (
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        ["run-phases.py", "demo", "--root", str(root), "--doctor-runtime"],
+                    ),
+                    mock.patch.object(RUN_PHASES, "harness_install_errors", return_value=[]),
+                    mock.patch.object(sys, "stdout", stdout),
+                ):
+                    exit_code = RUN_PHASES.main()
+            finally:
+                file_lock.release_lock(held_repo)
+                file_lock.release_lock(held_runner)
+
+            report = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(report["status"], "unstable")
+            self.assertEqual(report["checks"][0]["id"], "doctor.repo_execution_active")
+            self.assertFalse(RUN_PHASES.runner_lock_path(task_path).exists())
+
+    def test_main_doctor_runtime_backfill_reports_unstable_before_same_task_runner_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (task_path / "index.json").write_text("{not-json}\n", encoding="utf-8")
+            held_runner = file_lock.acquire_lock(RUN_PHASES.runner_lock_path(task_path), boundary=task_path)
+            held_repo = file_lock.acquire_lock(RUN_PHASES.repo_execution_lock_path(root), boundary=root)
+            stdout = io.StringIO()
+            try:
+                with (
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "run-phases.py",
+                            "demo",
+                            "--root",
+                            str(root),
+                            "--doctor-runtime",
+                            "--backfill-attempt-manifests",
+                        ],
+                    ),
+                    mock.patch.object(RUN_PHASES, "harness_install_errors", return_value=[]),
+                    mock.patch.object(sys, "stdout", stdout),
+                ):
+                    exit_code = RUN_PHASES.main()
+            finally:
+                file_lock.release_lock(held_repo)
+                file_lock.release_lock(held_runner)
+
+            report = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(report["status"], "unstable")
+            self.assertTrue(report["applied"])
+            self.assertFalse(report["backfill_applied"])
+            self.assertEqual(report["checks"][0]["id"], "doctor.repo_execution_active")
+            self.assertFalse((task_path / "context-pack" / "runtime" / "progress.md").exists())
+
+    def test_main_doctor_runtime_backfill_uses_held_repo_lock_without_self_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_valid_attempt_commit(root, task_path, phase=0, attempt=1)
+            phase = {"phase": 0, "name": "demo", "status": "completed", "attempts": 1}
+            (task_path / "index.json").write_text(json.dumps({"phases": [phase]}) + "\n", encoding="utf-8")
+            stdout = io.StringIO()
+
+            with (
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "run-phases.py",
+                        "demo",
+                        "--root",
+                        str(root),
+                        "--doctor-runtime",
+                        "--backfill-attempt-manifests",
+                    ],
+                ),
+                mock.patch.object(RUN_PHASES, "harness_install_errors", return_value=[]),
+                mock.patch.object(sys, "stdout", stdout),
+            ):
+                exit_code = RUN_PHASES.main()
+
+            report = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(report["status"], "ok")
+            self.assertEqual(report["checks"][0]["id"], "phase.attempt_manifest.backfilled")
+            self.assertEqual(len(self.read_attempt_manifest(task_path, 0)), 1)
+            self.assertFalse(RUN_PHASES.runner_lock_path(task_path).exists())
+            self.assertFalse(RUN_PHASES.repo_execution_lock_path(root).exists())
+
+    def test_runtime_doctor_active_repo_lock_blocks_direct_backfill_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_valid_attempt_commit(root, task_path, phase=0, attempt=1)
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+            held = file_lock.acquire_lock(RUN_PHASES.repo_execution_lock_path(root), boundary=root)
+            try:
+                report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=True)
+            finally:
+                file_lock.release_lock(held)
+
+            self.assertEqual(report["status"], "unstable")
+            self.assertTrue(report["applied"])
+            self.assertFalse(report["backfill_applied"])
+            self.assertEqual(report["checks"][0]["id"], "doctor.repo_execution_active")
+            self.assertFalse(RUN_PHASES.phase_attempt_manifest_path(task_path, 0).exists())
+            self.assertFalse((task_path / "context-pack" / "runtime" / "progress.md").exists())
+
+    def test_runtime_doctor_ignores_unlocked_stale_repo_execution_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_valid_attempt_commit(root, task_path, phase=0, attempt=1)
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "completed", "attempts": 1}]}) + "\n",
+                encoding="utf-8",
+            )
+            lock_path = RUN_PHASES.repo_execution_lock_path(root)
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path.write_text("{}\n", encoding="utf-8")
+
+            report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=False)
+
+            self.assertEqual(report["status"], "fail")
+            self.assertEqual(report["checks"][0]["id"], "phase.attempt_manifest.missing_committed_record")
+
+    def test_runtime_doctor_fails_closed_on_unsafe_repo_execution_lock_path(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (task_path / "index.json").write_text("{not-json}\n", encoding="utf-8")
+            lock_path = RUN_PHASES.repo_execution_lock_path(root)
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path.symlink_to("/tmp/unsafe-lock-target")
+
+            report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=False)
+
+            self.assertEqual(report["status"], "unstable")
+            self.assertEqual(report["checks"][0]["id"], "doctor.repo_execution_lock_unsafe")
+
+    def test_runtime_doctor_fails_closed_on_unsafe_repo_execution_lock_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (task_path / "index.json").write_text("{not-json}\n", encoding="utf-8")
+            unsafe_harness_dir = Path(raw_tmp) / "unsafe-harness"
+            unsafe_harness_dir.mkdir()
+            (root / ".codex").mkdir(parents=True, exist_ok=True)
+            (root / ".codex" / "harness").symlink_to(unsafe_harness_dir, target_is_directory=True)
+            (unsafe_harness_dir / "repo-execution.lock").write_text("{}\n", encoding="utf-8")
+
+            report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=False)
+
+            self.assertEqual(report["status"], "unstable")
+            self.assertEqual(report["checks"][0]["id"], "doctor.repo_execution_lock_unsafe")
+
+    def test_runtime_doctor_fails_closed_when_repo_execution_lock_probe_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (task_path / "index.json").write_text("{not-json}\n", encoding="utf-8")
+            lock_path = RUN_PHASES.repo_execution_lock_path(root)
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path.write_text("{}\n", encoding="utf-8")
+
+            with mock.patch.object(RUN_PHASES, "probe_lock_state", return_value="unsafe"):
+                report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=False)
+
+            self.assertEqual(report["status"], "unstable")
+            self.assertEqual(report["checks"][0]["id"], "doctor.repo_execution_lock_unsafe")
+
     def test_runtime_doctor_backfills_completed_phase_manifest_from_valid_commit(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))

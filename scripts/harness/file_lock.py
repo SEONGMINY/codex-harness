@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from artifact_io import ensure_no_symlink_path
+from artifact_io import SymlinkPathError, ensure_no_symlink_path
 
 
 class LockHandle(NamedTuple):
@@ -73,6 +73,29 @@ def lock_is_stale(path: Path) -> bool:
         return True
     try:
         return try_lock_fd(fd)
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+
+
+def probe_lock_state(path: Path, boundary: Path | None = None) -> str:
+    """Return missing, stale, active, or unsafe for an existing lock path."""
+
+    try:
+        fd = open_lock_file(path, boundary=boundary, create=False)
+    except FileNotFoundError:
+        return "missing"
+    except (OSError, SymlinkPathError):
+        return "unsafe"
+    try:
+        try:
+            stale_lock = try_lock_fd(fd)
+        except OSError:
+            return "unsafe"
+        return "stale" if stale_lock else "active"
     finally:
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
