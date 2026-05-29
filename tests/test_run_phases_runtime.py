@@ -579,7 +579,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
             )
             self.assertEqual(json.loads(commit1.read_text(encoding="utf-8"))["attempt"], 1)
 
-    def test_runtime_projection_does_not_recover_stale_runner_metadata_commit(self) -> None:
+    def test_current_attempt_commit_validation_rejects_stale_runner_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
             runtime = task_path / "context-pack" / "runtime"
@@ -628,7 +628,8 @@ class RunCodexRuntimeTest(unittest.TestCase):
             commit["result"]["sha256"] = RUN_PHASES.file_sha256(result_path)
             commit_path.write_text(json.dumps(commit) + "\n", encoding="utf-8")
 
-            self.assertIsNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 0))
+            self.assertIsNone(RUN_PHASES.latest_current_phase_attempt_commit(task_path, 0))
+            self.assertIsNotNone(RUN_PHASES.latest_valid_phase_attempt_commit(task_path, 0))
 
     def test_running_projection_does_not_recover_old_commit_after_new_result_before_commit_crash(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -1366,6 +1367,30 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(second_report["status"], "ok")
             self.assertEqual(second_report["checks"][0]["id"], "phase.attempt_manifest.committed_present")
             self.assertEqual(len(self.read_attempt_manifest(task_path, 0)), 1)
+
+    def test_runtime_doctor_backfills_historical_commit_after_runner_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            result_path, commit_path = self.write_valid_attempt_commit(root, task_path, phase=0, attempt=1)
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result["runner_version"] = "0.1.4"
+            result_path.write_text(json.dumps(result) + "\n", encoding="utf-8")
+            commit = json.loads(commit_path.read_text(encoding="utf-8"))
+            commit["runner_version"] = "0.1.4"
+            commit["result"]["sha256"] = RUN_PHASES.file_sha256(result_path)
+            commit_path.write_text(json.dumps(commit) + "\n", encoding="utf-8")
+            phase = {"phase": 0, "name": "demo", "status": "completed", "attempts": 1}
+            (task_path / "index.json").write_text(json.dumps({"phases": [phase]}) + "\n", encoding="utf-8")
+
+            self.assertIsNone(RUN_PHASES.latest_current_phase_attempt_commit(task_path, 0))
+            report = RUN_PHASES.doctor_runtime_proof(root, task_path, apply_backfill=True)
+
+            self.assertEqual(report["status"], "ok")
+            self.assertEqual(report["checks"][0]["id"], "phase.attempt_manifest.backfilled")
+            self.assertEqual(
+                VERIFY_TASK.validate_phase_attempt_manifest(root, task_path, phase),
+                [],
+            )
 
     def test_runtime_doctor_refuses_backfill_when_completed_phase_has_active_repair_alias(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -2820,6 +2845,62 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(evidence_check["status"], "passed")
             self.assertEqual(reconciliation["status"], "satisfied")
             self.assertEqual(reconciliation["instruction_results"][0]["status"], "satisfied")
+
+    def test_expected_evidence_matches_typed_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            repo_output = root / "src" / "existing.py"
+            repo_output.parent.mkdir(parents=True)
+            repo_output.write_text("ok\n", encoding="utf-8")
+            required_output = task_path / "context-pack" / "handoffs" / "phase0.md"
+            required_output.parent.mkdir(parents=True)
+            required_output.write_text("handoff\n", encoding="utf-8")
+            contract = {
+                "scope": {"allowed_paths": ["src/**"]},
+                "dependency_policy": {"new_dependencies": "forbidden"},
+                "instructions": [
+                    {
+                        "id": "I-1",
+                        "task": "Validate typed evidence refs",
+                        "expected_evidence": [
+                            {"type": "command", "ref": "unit-tests"},
+                            {"type": "required_output", "ref": "context-pack/handoffs/phase0.md"},
+                            {"type": "required_repo_output", "ref": "src/existing.py"},
+                            {"type": "changed_file", "ref": "src/changed.py"},
+                        ],
+                    }
+                ],
+            }
+            command_results = [{"command": "python3 -m unittest", "id": "unit-tests", "exit_code": 0}]
+            evidence = RUN_PHASES.build_evidence(
+                root=root,
+                phase_number=0,
+                attempt=1,
+                changed_files=["src/changed.py"],
+                command_results=command_results,
+                required_outputs=["context-pack/handoffs/phase0.md"],
+                required_repo_outputs=["src/existing.py"],
+                task_path=task_path,
+            )
+
+            gate = RUN_PHASES.build_gate(
+                root=root,
+                task_path=task_path,
+                phase_number=0,
+                contract=contract,
+                changed_files=["src/changed.py"],
+                command_results=command_results,
+                required_outputs=["context-pack/handoffs/phase0.md"],
+                required_repo_outputs=["src/existing.py"],
+                handoff_reasons=[],
+                handoff_trace_errors=[],
+                evidence=evidence,
+            )
+
+            self.assertEqual(gate["status"], "passed")
+            evidence_check = [item for item in gate["checks"] if item["name"] == "expected_evidence"][0]
+            self.assertEqual(evidence_check["status"], "passed")
 
     def test_execute_phase_blocks_when_task_verification_fails(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -4737,6 +4818,11 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(manifest[1]["result"]["path"], "context-pack/runtime/phase0-result-attempt1.json")
             self.assertEqual(manifest[1]["attempt_commit"]["path"], "context-pack/runtime/phase0-attempt1-commit.json")
             self.assertEqual(manifest[1]["attempt_commit"]["sha256"], RUN_PHASES.file_sha256(commit_path))
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                VERIFY_TASK.validate_phase_attempt_manifest(root, task_path, task_index["phases"][0]),
+                [],
+            )
             self.assertIn("src/app.py", result["changed_files"])
             self.assertEqual(baseline["required_repo_outputs"][0]["path"], "src/app.py")
 

@@ -139,6 +139,14 @@ class RelationshipGraphTest(unittest.TestCase):
         )
         (task_path / "context-pack" / "runtime" / "phase0-result.json").write_text("{}\n", encoding="utf-8")
         (task_path / "context-pack" / "runtime" / "phase0-result-attempt1.json").write_text("{}\n", encoding="utf-8")
+        (task_path / "context-pack" / "runtime" / "phase0-attempt-manifest.jsonl").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+        (task_path / "context-pack" / "runtime" / "phase0-attempt1-commit.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
         (task_path / "context-pack" / "runtime" / "phase0-handoff-attempt1.md").write_text(
             "# Handoff snapshot\n",
             encoding="utf-8",
@@ -159,6 +167,8 @@ class RelationshipGraphTest(unittest.TestCase):
             self.assertIn(("phase:0", "runtime:context-pack/runtime/phase0-result.json", "has_runtime_proof"), edges)
             self.assertIn(("phase:0", "runtime:context-pack/runtime/phase0-result-attempt1.json", "has_runtime_proof"), edges)
             self.assertIn(("phase:0", "runtime:context-pack/runtime/phase0-handoff-attempt1.md", "has_runtime_proof"), edges)
+            self.assertIn(("phase:0", "runtime:context-pack/runtime/phase0-attempt-manifest.jsonl", "has_runtime_proof"), edges)
+            self.assertIn(("phase:0", "runtime:context-pack/runtime/phase0-attempt1-commit.json", "has_runtime_proof"), edges)
             self.assertIn(("architecture:runner", "architecture:phase", "allows_dependency"), edges)
 
     def test_mermaid_output_contains_relationship_labels(self) -> None:

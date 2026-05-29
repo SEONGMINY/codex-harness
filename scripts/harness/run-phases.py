@@ -2025,6 +2025,9 @@ def attempt_commit_artifacts_valid(
 def attempt_commit_runtime_metadata_valid(
     commit: dict[str, object],
     result: dict[str, object],
+    *,
+    strict_current_harness: bool,
+    approved_policy_fingerprints: list[dict[str, str]] | None = None,
 ) -> bool:
     if commit.get("schema_version") != 1:
         return False
@@ -2032,40 +2035,82 @@ def attempt_commit_runtime_metadata_valid(
         return False
     if commit.get("status") != "committed":
         return False
-    if commit.get("runner_version") != HARNESS_VERSION or result.get("runner_version") != HARNESS_VERSION:
-        return False
     if result.get("status") != "completed":
         return False
     if result.get("codex_exit_code") != 0 or result.get("tests_passed") is not True:
         return False
-    current_policy = policy_pack_fingerprint(runtime_policy_pack())
+
+    commit_runner = commit.get("runner_version")
+    result_runner = result.get("runner_version")
+    if not isinstance(commit_runner, str) or not commit_runner.strip():
+        return False
+    if commit_runner != result_runner:
+        return False
+    if strict_current_harness and commit_runner != HARNESS_VERSION:
+        return False
+
     commit_policy = policy_pack_fingerprint(commit.get("policy_pack") if isinstance(commit.get("policy_pack"), dict) else None)
     result_policy = policy_pack_fingerprint(result.get("policy_pack") if isinstance(result.get("policy_pack"), dict) else None)
-    if current_policy is None or commit_policy != current_policy or result_policy != current_policy:
+    if commit_policy is None or commit_policy != result_policy:
         return False
-    current_attestation = attestation_fingerprint(RUNTIME_HARNESS_ATTESTATION)
+    if approved_policy_fingerprints is not None and commit_policy not in approved_policy_fingerprints:
+        return False
+    if strict_current_harness:
+        current_policy = policy_pack_fingerprint(runtime_policy_pack())
+        if current_policy is None or commit_policy != current_policy:
+            return False
+
     commit_attestation = attestation_fingerprint(
         commit.get("harness_attestation") if isinstance(commit.get("harness_attestation"), dict) else None
     )
     result_attestation = attestation_fingerprint(
         result.get("harness_attestation") if isinstance(result.get("harness_attestation"), dict) else None
     )
-    if current_attestation is None or commit_attestation != current_attestation or result_attestation != current_attestation:
+    if commit_attestation is None or commit_attestation != result_attestation:
         return False
+    if strict_current_harness:
+        current_attestation = attestation_fingerprint(RUNTIME_HARNESS_ATTESTATION)
+        if current_attestation is None or commit_attestation != current_attestation:
+            return False
     return True
 
 
-def phase_attempt_commit_sort_key(path: Path) -> tuple[int, str]:
-    match = re.search(r"-attempt(\d+)-commit\.json$", path.name)
-    attempt = int(match.group(1)) if match else -1
-    return attempt, path.name
+def attempt_commit_can_recover_historical_projection(
+    commit: dict[str, object],
+    result: dict[str, object],
+    approved_policy_fingerprints: list[dict[str, str]] | None = None,
+) -> bool:
+    return attempt_commit_runtime_metadata_valid(
+        commit,
+        result,
+        strict_current_harness=False,
+        approved_policy_fingerprints=approved_policy_fingerprints,
+    )
 
 
-def phase_attempt_commit_files_exist(task_path: Path, phase_number: int) -> bool:
-    return any((task_path / "context-pack" / "runtime").glob(f"phase{phase_number}-attempt*-commit.json"))
+def attempt_commit_can_support_current_execution(
+    commit: dict[str, object],
+    result: dict[str, object],
+    approved_policy_fingerprints: list[dict[str, str]] | None = None,
+) -> bool:
+    return attempt_commit_runtime_metadata_valid(
+        commit,
+        result,
+        strict_current_harness=True,
+        approved_policy_fingerprints=approved_policy_fingerprints,
+    )
 
 
-def latest_valid_phase_attempt_commit(task_path: Path, phase_number: int) -> dict[str, object] | None:
+def latest_valid_phase_attempt_commit(
+    task_path: Path,
+    phase_number: int,
+    *,
+    strict_current_harness: bool = False,
+) -> dict[str, object] | None:
+    lineage, lineage_errors = approved_policy_pack_lineage(task_path)
+    if lineage_errors:
+        return None
+    approved_fingerprints = lineage or None
     reset_generation, reset_at, reset_has_generation = phase_reset_boundary(task_path, phase_number)
     commits = sorted(
         (task_path / "context-pack" / "runtime").glob(f"phase{phase_number}-attempt*-commit.json"),
@@ -2106,19 +2151,39 @@ def latest_valid_phase_attempt_commit(task_path: Path, phase_number: int) -> dic
         if "reset_generation" in data or "reset_generation" in result_data:
             if data.get("reset_generation") != result_data.get("reset_generation"):
                 continue
-        if not attempt_commit_runtime_metadata_valid(data, result_data):
+        if strict_current_harness:
+            metadata_valid = attempt_commit_can_support_current_execution(
+                data,
+                result_data,
+                approved_policy_fingerprints=approved_fingerprints,
+            )
+        else:
+            metadata_valid = attempt_commit_can_recover_historical_projection(
+                data,
+                result_data,
+                approved_policy_fingerprints=approved_fingerprints,
+            )
+        if not metadata_valid:
             continue
         if not attempt_commit_artifacts_valid(task_path, data, result_data):
-            continue
-        lineage, lineage_errors = approved_policy_pack_lineage(task_path)
-        if lineage_errors:
-            continue
-        fingerprint = policy_pack_fingerprint(data.get("policy_pack") if isinstance(data.get("policy_pack"), dict) else None)
-        if lineage and fingerprint not in lineage:
             continue
         data["_path"] = str(path)
         valid = data
     return valid
+
+
+def latest_current_phase_attempt_commit(task_path: Path, phase_number: int) -> dict[str, object] | None:
+    return latest_valid_phase_attempt_commit(task_path, phase_number, strict_current_harness=True)
+
+
+def phase_attempt_commit_sort_key(path: Path) -> tuple[int, str]:
+    match = re.search(r"-attempt(\d+)-commit\.json$", path.name)
+    attempt = int(match.group(1)) if match else -1
+    return attempt, path.name
+
+
+def phase_attempt_commit_files_exist(task_path: Path, phase_number: int) -> bool:
+    return any((task_path / "context-pack" / "runtime").glob(f"phase{phase_number}-attempt*-commit.json"))
 
 
 def recovered_commit_terminalization_error(
@@ -2765,39 +2830,51 @@ def _path_matches(expected: str, observed: str) -> bool:
     return observed == expected or observed.endswith(f"/{expected}")
 
 
+def _expected_evidence_type_and_ref(expected: object) -> tuple[str | None, str | None]:
+    if isinstance(expected, dict):
+        raw_type = expected.get("type")
+        evidence_type = raw_type if isinstance(raw_type, str) else None
+        return evidence_type, _normalized_evidence_path(expected.get("ref"))
+    return None, _normalized_evidence_path(expected)
+
+
 def expected_evidence_matched(expected: object, evidence: dict[str, object]) -> bool:
-    expected_text = _normalized_evidence_path(expected)
+    evidence_type, expected_text = _expected_evidence_type_and_ref(expected)
     if expected_text is None:
         return False
 
-    for item in evidence.get("commands", []) or []:
-        if (
-            isinstance(item, dict)
-            and (item.get("command") == expected_text or item.get("id") == expected_text)
-            and item.get("exit_code") == 0
-        ):
-            return True
+    if evidence_type in {None, "command"}:
+        for item in evidence.get("commands", []) or []:
+            if (
+                isinstance(item, dict)
+                and (item.get("command") == expected_text or item.get("id") == expected_text)
+                and item.get("exit_code") == 0
+            ):
+                return True
 
-    for item in evidence.get("required_outputs", []) or []:
-        if (
-            isinstance(item, dict)
-            and item.get("exists") is True
-            and item.get("path") == expected_text
-        ):
-            return True
+    if evidence_type in {None, "required_output", "path"}:
+        for item in evidence.get("required_outputs", []) or []:
+            if (
+                isinstance(item, dict)
+                and item.get("exists") is True
+                and item.get("path") == expected_text
+            ):
+                return True
 
-    for item in evidence.get("required_repo_outputs", []) or []:
-        if (
-            isinstance(item, dict)
-            and item.get("exists") is True
-            and item.get("path") == expected_text
-        ):
-            return True
+    if evidence_type in {None, "required_repo_output", "path"}:
+        for item in evidence.get("required_repo_outputs", []) or []:
+            if (
+                isinstance(item, dict)
+                and item.get("exists") is True
+                and item.get("path") == expected_text
+            ):
+                return True
 
-    for raw_path in evidence.get("changed_files", []) or []:
-        observed = _normalized_evidence_path(raw_path)
-        if observed and _path_matches(expected_text, observed):
-            return True
+    if evidence_type in {None, "changed_file", "path"}:
+        for raw_path in evidence.get("changed_files", []) or []:
+            observed = _normalized_evidence_path(raw_path)
+            if observed and _path_matches(expected_text, observed):
+                return True
 
     return False
 
@@ -3852,20 +3929,6 @@ def execute_phase(
         checklist_path = phase_attempt_checklist_path(task_path, phase_number, attempt)
         output_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-output-attempt{attempt}.jsonl"
         stderr_path = task_path / "context-pack" / "runtime" / f"phase{phase_number}-stderr-attempt{attempt}.txt"
-        append_attempt_manifest_record(
-            task_path,
-            phase_number,
-            attempt,
-            "attempt_started",
-            status="running",
-            artifacts=[
-                artifact_ref(task_path, "prompt", prompt_path),
-                artifact_ref(task_path, "contract", contract_path),
-                artifact_ref(task_path, "checklist", checklist_path),
-                artifact_ref(task_path, "stdout", output_path),
-                artifact_ref(task_path, "stderr", stderr_path),
-            ],
-        )
         task_index = read_json(index_path)
         set_phase_status(
             task_index,
@@ -3900,6 +3963,18 @@ def execute_phase(
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(prompt_path, prompt)
         atomic_write_text(task_path / "context-pack" / "runtime" / f"phase{phase_number}-prompt.md", prompt)
+        append_attempt_manifest_record(
+            task_path,
+            phase_number,
+            attempt,
+            "attempt_started",
+            status="running",
+            artifacts=[
+                artifact_ref(task_path, "prompt", prompt_path),
+                artifact_ref(task_path, "contract", contract_path),
+                artifact_ref(task_path, "checklist", checklist_path),
+            ],
+        )
 
         install_errors = run_install_preflight(root, task_path, args)
         if install_errors:

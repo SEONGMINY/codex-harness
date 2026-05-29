@@ -200,7 +200,7 @@ def _validate_command_expectation_sources(contract: dict[str, Any]) -> list[str]
 
 def _validate_expected_evidence_items(instructions: Any) -> list[str]:
     errors: list[str] = []
-    allowed_types = {"required_output", "required_repo_output", "command", "path"}
+    allowed_types = {"required_output", "required_repo_output", "command", "path", "changed_file"}
     for instruction_index, instruction in enumerate(instructions or []):
         if not isinstance(instruction, dict):
             continue
