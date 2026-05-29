@@ -1959,27 +1959,71 @@ def retryable_terminal_failure_recovery_errors(
     if attempt >= phase_retry_max_attempts(task_path, phase_number):
         return ["attempt budget exhausted"]
 
-    errors = repair_context_integrity_errors(task_path, phase_number)
+    errors = attempt_scoped_repair_context_errors(task_path, phase_number, attempt, record)
     if errors:
         return errors
-    packet_path = phase_repair_packet_path(task_path, phase_number)
-    if not packet_path.exists():
-        return ["missing phase repair packet alias"]
+    packet_path = phase_attempt_repair_packet_path(task_path, phase_number, attempt)
     try:
         packet = read_json(packet_path)
     except (OSError, json.JSONDecodeError) as exc:
-        return [f"invalid phase repair packet alias: {exc}"]
+        return [f"invalid repair packet: {exc}"]
     if not isinstance(packet, dict):
-        return ["phase repair packet alias must be a JSON object"]
+        return ["repair packet must be a JSON object"]
     packet_failure = packet.get("failure") if isinstance(packet.get("failure"), dict) else {}
     if packet.get("attempt") != attempt:
-        return ["phase repair packet attempt does not match phase attempt"]
+        return ["repair packet attempt does not match phase attempt"]
     if packet_failure.get("retryable") is not True:
-        return ["phase repair packet is not retryable"]
+        return ["repair packet is not retryable"]
     contaminating_changes = packet.get("contaminating_changes")
     if isinstance(contaminating_changes, list) and contaminating_changes:
-        return ["phase repair packet has contaminating changes"]
+        return ["repair packet has contaminating changes"]
     return []
+
+
+def attempt_scoped_repair_context_errors(
+    task_path: Path,
+    phase_number: int,
+    attempt: int,
+    record: dict[str, object],
+) -> list[str]:
+    packet_path = phase_attempt_repair_packet_path(task_path, phase_number, attempt)
+    summary_path = phase_attempt_repair_packet_summary_path(task_path, phase_number, attempt)
+    errors: list[str] = []
+    if not packet_path.exists() or not summary_path.exists():
+        return ["missing attempt-scoped repair packet artifacts"]
+    try:
+        packet = read_json(packet_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"invalid attempt-scoped repair packet: {exc}"]
+    if not isinstance(packet, dict):
+        return ["attempt-scoped repair packet must be a JSON object"]
+    if packet.get("phase") != phase_number:
+        errors.append("attempt-scoped repair packet phase does not match")
+    if packet.get("attempt") != attempt:
+        errors.append("attempt-scoped repair packet attempt does not match")
+    if packet.get("status") != "repair_required":
+        errors.append("attempt-scoped repair packet status is not repair_required")
+    if repair_packet_markdown(packet) != summary_path.read_text(encoding="utf-8", errors="replace"):
+        errors.append("attempt-scoped repair packet summary does not match packet JSON")
+    failure = packet.get("failure") if isinstance(packet.get("failure"), dict) else {}
+    if failure != record.get("failure"):
+        errors.append("attempt-scoped repair packet failure does not match terminal manifest record")
+    artifacts = packet.get("failed_attempt_artifacts")
+    if isinstance(record.get("artifacts"), list) and artifacts != record.get("artifacts"):
+        errors.append("attempt-scoped repair packet artifacts do not match terminal manifest record")
+    return errors
+
+
+def restore_repair_packet_alias_from_attempt(task_path: Path, phase_number: int, attempt: int) -> None:
+    packet_path = phase_attempt_repair_packet_path(task_path, phase_number, attempt)
+    summary_path = phase_attempt_repair_packet_summary_path(task_path, phase_number, attempt)
+    if not packet_path.exists() or not summary_path.exists():
+        return
+    write_json(phase_repair_packet_path(task_path, phase_number), read_json(packet_path))
+    atomic_write_text(
+        phase_repair_packet_summary_path(task_path, phase_number),
+        summary_path.read_text(encoding="utf-8"),
+    )
 
 
 def attempt_runtime_artifact_refs(task_path: Path, phase_number: int, attempt: int) -> list[dict[str, object]]:
@@ -2012,8 +2056,6 @@ def write_interrupted_attempt_repair_packet(
     markdown = repair_packet_markdown(packet)
     write_json(phase_attempt_repair_packet_path(task_path, phase_number, attempt), packet)
     atomic_write_text(phase_attempt_repair_packet_summary_path(task_path, phase_number, attempt), markdown)
-    write_json(phase_repair_packet_path(task_path, phase_number), packet)
-    atomic_write_text(phase_repair_packet_summary_path(task_path, phase_number), markdown)
     append_attempt_manifest_record(
         task_path,
         phase_number,
@@ -2034,6 +2076,8 @@ def write_interrupted_attempt_repair_packet(
         ),
         observed_artifacts=observed_artifacts,
     )
+    write_json(phase_repair_packet_path(task_path, phase_number), packet)
+    atomic_write_text(phase_repair_packet_summary_path(task_path, phase_number), markdown)
 
 
 def snapshot_attempt_handoff(task_path: Path, phase_number: int, attempt: int) -> Path | None:
@@ -2756,6 +2800,7 @@ def reconcile_runtime_projection(
                     }
                 )
                 if not dry_run:
+                    restore_repair_packet_alias_from_attempt(task_path, phase_number, interrupted_attempt)
                     phase["status"] = "pending"
                     phase["attempts"] = interrupted_attempt
                     phase.pop("failed_at", None)
@@ -3470,8 +3515,6 @@ def write_repair_packet(
     if attempt is not None:
         write_json(phase_attempt_repair_packet_path(task_path, phase_number, attempt), packet)
         atomic_write_text(phase_attempt_repair_packet_summary_path(task_path, phase_number, attempt), markdown)
-    write_json(phase_repair_packet_path(task_path, phase_number), packet)
-    atomic_write_text(phase_repair_packet_summary_path(task_path, phase_number), markdown)
     if attempt is not None:
         failure = packet.get("failure") if isinstance(packet.get("failure"), dict) else {}
         append_attempt_manifest_record(
@@ -3490,6 +3533,8 @@ def write_repair_packet(
             ),
             artifacts=failed_attempt_artifacts,
         )
+    write_json(phase_repair_packet_path(task_path, phase_number), packet)
+    atomic_write_text(phase_repair_packet_summary_path(task_path, phase_number), markdown)
 
 
 def write_terminal_phase_failure(
@@ -5013,10 +5058,10 @@ def main() -> int:
                 print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
                 return 1
         try:
-            runner_lock = acquire_runner_lock(task_path, args.dry_run)
             if not args.doctor_runtime or args.backfill_attempt_manifests:
                 repo_lock = acquire_repo_execution_lock(root, task_path, args)
                 args.repo_execution_lock = repo_lock
+            runner_lock = acquire_runner_lock(task_path, args.dry_run)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             return 1
