@@ -34,9 +34,38 @@ assert VERIFY_SPEC.loader is not None
 VERIFY_SPEC.loader.exec_module(VERIFY_TASK)
 import env_policy  # noqa: E402
 import file_lock  # noqa: E402
+import runtime_integrity  # noqa: E402
 
 
 class RunCodexRuntimeTest(unittest.TestCase):
+    def test_runtime_integrity_report_is_sorted_bounded_and_schema_stable(self) -> None:
+        before: dict[str, str] = {}
+        after = {f"context-pack/runtime/generated-{index:03}.json": f"file:digest-{index}" for index in range(105)}
+
+        report = runtime_integrity.build_runtime_integrity_report(
+            phase_number=2,
+            attempt=3,
+            runner_version=RUN_PHASES.HARNESS_VERSION,
+            created_at="2026-05-29T00:00:00+09:00",
+            failure_window="codex_execution",
+            before=before,
+            after=after,
+            allowed_paths=["context-pack/runtime/phase2-output-attempt3.jsonl"],
+            ignored_paths=["context-pack/runtime/phase2-contract-attempt3.json"],
+            settle_seconds=0.2,
+            poll_seconds=0.05,
+        )
+
+        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(report["artifact_kind"], "runtime_integrity_report")
+        self.assertEqual(report["changed_count"], 105)
+        self.assertEqual(len(report["changed_paths"]), 100)
+        self.assertTrue(report["changed_paths_truncated"])
+        self.assertEqual(report["changed_paths"], sorted(report["changed_paths"]))
+        self.assertEqual(report["changed_paths_limit"], 100)
+        self.assertEqual(report["failure_window"], "codex_execution")
+        self.assertEqual(report["settle"], {"settle_seconds": 0.2, "poll_seconds": 0.05})
+
     def test_runner_install_check_requires_runtime_helper_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "repo"
@@ -5144,6 +5173,9 @@ class RunCodexRuntimeTest(unittest.TestCase):
                         "{}\\n",
                         encoding="utf-8",
                     )
+                    Path.cwd().joinpath("tasks/demo/context-pack/runtime/phase0-secret-link").symlink_to(
+                        "/tmp/super-secret-token"
+                    )
                     Path.cwd().joinpath("tasks/demo/context-pack/runtime/phase0-attempt-manifest.jsonl").write_text(
                         "tampered\\n",
                         encoding="utf-8",
@@ -5179,6 +5211,20 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertFalse(manifest[1]["failure"]["retryable"])
             repair_packet = json.loads(RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).read_text(encoding="utf-8"))
             self.assertTrue(any("phase0-attempt99-commit.json created" in item for item in repair_packet["contaminating_changes"]))
+            report_ref = repair_packet["runtime_integrity_report"]
+            self.assertEqual(report_ref["name"], "runtime_integrity_report")
+            report_path = task_path / report_ref["path"]
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["failure_window"], "codex_execution")
+            self.assertIn("context-pack/runtime/phase0-attempt99-commit.json", report["changed_paths"])
+            self.assertIn("context-pack/runtime/phase0-secret-link", report["changed_paths"])
+            self.assertEqual(report["fingerprints"]["context-pack/runtime/phase0-secret-link"]["after"], "symlink")
+            self.assertNotIn("super-secret-token", json.dumps(report, ensure_ascii=False))
+            manifest_artifacts = {item["name"]: item for item in manifest[1]["artifacts"]}
+            self.assertEqual(
+                manifest_artifacts["runtime_integrity_report"]["sha256"],
+                RUN_PHASES.file_sha256(report_path),
+            )
             self.assertNotIn("tampered", RUN_PHASES.phase_attempt_manifest_path(task_path, 0).read_text(encoding="utf-8"))
             self.assertEqual(VERIFY_TASK.validate_phase_attempt_manifest(root, task_path, phase), [])
 

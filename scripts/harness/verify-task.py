@@ -1102,6 +1102,92 @@ def validate_runtime_artifact_ref(
     )
 
 
+def validate_runtime_integrity_report(
+    root: Path,
+    task_path: Path,
+    entry: object,
+    phase_number: int,
+    attempt: int,
+    label: str,
+) -> list[str]:
+    errors = validate_runtime_artifact_ref(
+        root,
+        task_path,
+        entry,
+        label,
+        expected_name="runtime_integrity_report",
+    )
+    if errors or not isinstance(entry, dict) or entry.get("exists") is not True:
+        return errors
+    raw_path = entry.get("path")
+    if not isinstance(raw_path, str):
+        return errors
+    target, path_errors = resolve_task_relative_path(root, task_path, raw_path, f"{label}.path")
+    errors.extend(path_errors)
+    if target is None or not target.exists():
+        return errors
+    try:
+        report = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [*errors, f"{label} must be valid JSON: {rel(root, target)}: {exc}"]
+    if not isinstance(report, dict):
+        return [*errors, f"{label} must be a JSON object: {rel(root, target)}"]
+    if report.get("schema_version") != 1:
+        errors.append(f"{label}.schema_version must be 1.")
+    if report.get("artifact_kind") != "runtime_integrity_report":
+        errors.append(f'{label}.artifact_kind must be "runtime_integrity_report".')
+    if report.get("phase") != phase_number:
+        errors.append(f"{label}.phase must be {phase_number}.")
+    if report.get("attempt") != attempt:
+        errors.append(f"{label}.attempt must be {attempt}.")
+    if report.get("failure_window") not in {
+        "codex_execution",
+        "acceptance_command_execution",
+        "post_acceptance_settle",
+    }:
+        errors.append(f"{label}.failure_window is invalid.")
+    changed_count = report.get("changed_count")
+    changed_paths = report.get("changed_paths")
+    if not isinstance(changed_count, int) or changed_count < 0:
+        errors.append(f"{label}.changed_count must be a non-negative integer.")
+    if not isinstance(report.get("changed_paths_digest"), str) or len(report.get("changed_paths_digest", "")) != 64:
+        errors.append(f"{label}.changed_paths_digest must be a SHA-256 hex string.")
+    if not isinstance(report.get("changed_paths_truncated"), bool):
+        errors.append(f"{label}.changed_paths_truncated must be boolean.")
+    if not isinstance(report.get("changed_paths_limit"), int) or report.get("changed_paths_limit") <= 0:
+        errors.append(f"{label}.changed_paths_limit must be a positive integer.")
+    if not isinstance(changed_paths, list) or not all(isinstance(path, str) for path in changed_paths):
+        errors.append(f"{label}.changed_paths must be a list of strings.")
+        changed_paths = []
+    elif changed_paths != sorted(changed_paths):
+        errors.append(f"{label}.changed_paths must be sorted.")
+    settle = report.get("settle")
+    if not isinstance(settle, dict):
+        errors.append(f"{label}.settle must be an object.")
+    else:
+        for key in ["settle_seconds", "poll_seconds"]:
+            value = settle.get(key)
+            if not isinstance(value, (int, float)) or value < 0:
+                errors.append(f"{label}.settle.{key} must be a non-negative number.")
+    fingerprints = report.get("fingerprints")
+    if not isinstance(fingerprints, dict):
+        errors.append(f"{label}.fingerprints must be an object.")
+    else:
+        for raw_path, fingerprint in fingerprints.items():
+            if not isinstance(raw_path, str) or not isinstance(fingerprint, dict):
+                errors.append(f"{label}.fingerprints entries must map path strings to objects.")
+                continue
+            if fingerprint.get("status") not in {"created", "modified", "deleted"}:
+                errors.append(f"{label}.fingerprints[{raw_path}].status is invalid.")
+            for key in ["before", "after"]:
+                value = fingerprint.get(key)
+                if value is not None and not isinstance(value, str):
+                    errors.append(f"{label}.fingerprints[{raw_path}].{key} must be a string or null.")
+                if isinstance(value, str) and value.startswith("symlink:"):
+                    errors.append(f"{label}.fingerprints[{raw_path}].{key} must not include raw symlink targets.")
+    return errors
+
+
 def validate_evaluation_commit(
     root: Path,
     task_path: Path,
@@ -2177,6 +2263,18 @@ def validate_repair_packet_file(
                 )
     if isinstance(expected_artifacts, list) and artifacts != expected_artifacts:
         errors.append(f"Repair packet failed_attempt_artifacts do not match attempt manifest: {rel(root, path)}")
+    runtime_integrity_report = packet.get("runtime_integrity_report")
+    if runtime_integrity_report is not None:
+        errors.extend(
+            validate_runtime_integrity_report(
+                root,
+                task_path,
+                runtime_integrity_report,
+                phase_number,
+                expected_attempt if expected_attempt is not None else int(attempt or 0),
+                "Repair packet runtime_integrity_report",
+            )
+        )
     return packet, errors
 
 

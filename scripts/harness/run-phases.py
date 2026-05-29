@@ -95,10 +95,12 @@ from runtime_protocol import (
     task_relative,
 )
 from runtime_integrity import (
+    build_runtime_integrity_report,
     restore_attempt_manifest_content,
     runtime_artifact_integrity_changes,
     runtime_artifact_stable_snapshot,
     runtime_artifact_snapshot,
+    write_runtime_integrity_report,
 )
 
 
@@ -502,6 +504,10 @@ def phase_gate_path(task_path: Path, phase_number: int) -> Path:
 
 def phase_attempt_gate_path(task_path: Path, phase_number: int, attempt: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"phase{phase_number}-gate-attempt{attempt}.json"
+
+
+def phase_attempt_runtime_integrity_report_path(task_path: Path, phase_number: int, attempt: int) -> Path:
+    return task_path / "context-pack" / "runtime" / f"phase{phase_number}-runtime-integrity-attempt{attempt}.json"
 
 
 def phase_quality_path(task_path: Path, phase_number: int) -> Path:
@@ -928,6 +934,39 @@ def runtime_integrity_ignored_contract_paths(task_path: Path, phase_number: int,
         task_relative(phase_contract_path(task_path, phase_number), task_path),
         task_relative(phase_attempt_contract_path(task_path, phase_number, attempt), task_path),
     ]
+
+
+def write_attempt_runtime_integrity_report(
+    task_path: Path,
+    phase_number: int,
+    attempt: int,
+    *,
+    failure_window: str,
+    before: dict[str, str],
+    after: dict[str, str],
+    allowed_paths: Iterable[str] = (),
+    ignored_paths: Iterable[str] = (),
+    settle_seconds: float = 0.0,
+    poll_seconds: float = 0.0,
+) -> Path:
+    report_path = phase_attempt_runtime_integrity_report_path(task_path, phase_number, attempt)
+    write_runtime_integrity_report(
+        report_path,
+        build_runtime_integrity_report(
+            phase_number=phase_number,
+            attempt=attempt,
+            runner_version=HARNESS_VERSION,
+            created_at=now(),
+            failure_window=failure_window,
+            before=before,
+            after=after,
+            allowed_paths=allowed_paths,
+            ignored_paths=ignored_paths,
+            settle_seconds=settle_seconds,
+            poll_seconds=poll_seconds,
+        ),
+    )
+    return report_path
 
 
 def phase_ac_commands(phase: dict, phase_markdown: str) -> list[str]:
@@ -3137,6 +3176,7 @@ def build_repair_packet(
     missing_repo_outputs: list[str] | None = None,
     contaminating_changes: list[str] | None = None,
     changed_files: list[str] | None = None,
+    runtime_integrity_report_path: Path | None = None,
     gate: dict[str, object] | None = None,
     reconciliation: dict[str, object] | None = None,
 ) -> dict[str, object]:
@@ -3146,7 +3186,7 @@ def build_repair_packet(
     stderr_tail = ""
     if stderr_path and stderr_path.exists():
         stderr_tail = truncate_text(stderr_path.read_text(encoding="utf-8", errors="replace"), 4_000)
-    return {
+    packet = {
         "phase": phase_number,
         "attempt": attempt,
         "status": "repair_required",
@@ -3183,6 +3223,13 @@ def build_repair_packet(
             "Leave the required handoff for this phase.",
         ],
     }
+    if runtime_integrity_report_path is not None:
+        packet["runtime_integrity_report"] = artifact_ref(
+            task_path,
+            "runtime_integrity_report",
+            runtime_integrity_report_path,
+        )
+    return packet
 
 
 def repair_packet_markdown(packet: dict[str, object]) -> str:
@@ -3302,6 +3349,9 @@ def write_repair_packet(
             ("reconciliation_summary", phase_attempt_reconciliation_summary_path(task_path, phase_number, attempt)),
             ("handoff", phase_attempt_handoff_path(task_path, phase_number, attempt)),
         ]
+        runtime_integrity_report = phase_attempt_runtime_integrity_report_path(task_path, phase_number, attempt)
+        if runtime_integrity_report.exists():
+            artifact_paths.append(("runtime_integrity_report", runtime_integrity_report))
         failed_attempt_artifacts = [artifact_ref(task_path, name, path) for name, path in artifact_paths]
         packet = {**packet, "failed_attempt_artifacts": failed_attempt_artifacts}
     markdown = repair_packet_markdown(packet)
@@ -3348,6 +3398,7 @@ def write_terminal_phase_failure(
     required_repo_outputs: list[str] | None = None,
     contaminating_changes: list[str] | None = None,
     changed_files: list[str] | None = None,
+    runtime_integrity_report_path: Path | None = None,
 ) -> None:
     write_last_error(task_path, phase_number, message)
     write_repair_packet(
@@ -3369,6 +3420,7 @@ def write_terminal_phase_failure(
             required_repo_outputs=required_repo_outputs or [],
             contaminating_changes=contaminating_changes or [],
             changed_files=changed_files or [],
+            runtime_integrity_report_path=runtime_integrity_report_path,
         ),
         attempt=attempt,
     )
@@ -4125,18 +4177,23 @@ def execute_phase(
             args.codex_idle_timeout,
             getattr(args, "codex_max_runtime", 1800),
         )
+        codex_runtime_allowed_paths = [
+            task_relative(output_path, task_path),
+            task_relative(stderr_path, task_path),
+        ]
+        runtime_ignored_paths = runtime_integrity_ignored_contract_paths(task_path, phase_number, attempt)
+        settle_seconds = runtime_settle_seconds(args)
+        settle_poll_seconds = runtime_settle_poll_seconds(args)
+        codex_runtime_after_snapshot = runtime_artifact_stable_snapshot(
+            task_path,
+            settle_seconds=settle_seconds,
+            poll_seconds=settle_poll_seconds,
+        )
         runtime_integrity_changes = runtime_artifact_integrity_changes(
             codex_runtime_snapshot,
-            runtime_artifact_stable_snapshot(
-                task_path,
-                settle_seconds=runtime_settle_seconds(args),
-                poll_seconds=runtime_settle_poll_seconds(args),
-            ),
-            allowed_paths=[
-                task_relative(output_path, task_path),
-                task_relative(stderr_path, task_path),
-            ],
-            ignored_paths=runtime_integrity_ignored_contract_paths(task_path, phase_number, attempt),
+            codex_runtime_after_snapshot,
+            allowed_paths=codex_runtime_allowed_paths,
+            ignored_paths=runtime_ignored_paths,
         )
         if runtime_integrity_changes:
             message = (
@@ -4145,6 +4202,18 @@ def execute_phase(
             )
             append_progress(task_path, f"phase {phase_number}: attempt {attempt} runtime integrity failed")
             restore_attempt_manifest_content(task_path, phase_number, trusted_attempt_manifest_content)
+            runtime_integrity_report_path = write_attempt_runtime_integrity_report(
+                task_path,
+                phase_number,
+                attempt,
+                failure_window="codex_execution",
+                before=codex_runtime_snapshot,
+                after=codex_runtime_after_snapshot,
+                allowed_paths=codex_runtime_allowed_paths,
+                ignored_paths=runtime_ignored_paths,
+                settle_seconds=settle_seconds,
+                poll_seconds=settle_poll_seconds,
+            )
             try:
                 contract = runtime_phase_contract(task_path, phase_number, attempt)
                 required_outputs = contract_outputs(phase, contract)
@@ -4169,6 +4238,7 @@ def execute_phase(
                 required_repo_outputs=required_repo_outputs,
                 contaminating_changes=runtime_integrity_changes,
                 changed_files=runtime_integrity_changes,
+                runtime_integrity_report_path=runtime_integrity_report_path,
             )
             print(message, file=sys.stderr)
             args.failed = True
@@ -4319,10 +4389,11 @@ def execute_phase(
                     "timed_out": ac_timed_out,
                 }
             )
+            ac_runtime_after_snapshot = runtime_artifact_snapshot(task_path)
             runtime_integrity_changes = runtime_artifact_integrity_changes(
                 ac_runtime_snapshot,
-                runtime_artifact_snapshot(task_path),
-                ignored_paths=runtime_integrity_ignored_contract_paths(task_path, phase_number, attempt),
+                ac_runtime_after_snapshot,
+                ignored_paths=runtime_ignored_paths,
             )
             if runtime_integrity_changes:
                 message = (
@@ -4331,6 +4402,17 @@ def execute_phase(
                 )
                 append_progress(task_path, f"phase {phase_number}: attempt {attempt} runtime integrity failed")
                 restore_attempt_manifest_content(task_path, phase_number, trusted_attempt_manifest_content)
+                runtime_integrity_report_path = write_attempt_runtime_integrity_report(
+                    task_path,
+                    phase_number,
+                    attempt,
+                    failure_window="acceptance_command_execution",
+                    before=ac_runtime_snapshot,
+                    after=ac_runtime_after_snapshot,
+                    ignored_paths=runtime_ignored_paths,
+                    settle_seconds=0.0,
+                    poll_seconds=0.0,
+                )
                 write_terminal_phase_failure(
                     root,
                     task_path,
@@ -4346,6 +4428,7 @@ def execute_phase(
                     required_repo_outputs=required_repo_outputs,
                     contaminating_changes=runtime_integrity_changes,
                     changed_files=runtime_integrity_changes,
+                    runtime_integrity_report_path=runtime_integrity_report_path,
                 )
                 print(message, file=sys.stderr)
                 args.failed = True
@@ -4399,14 +4482,17 @@ def execute_phase(
                 args.failed = True
                 return False
         else:
+            post_ac_settle_seconds = runtime_settle_seconds(args)
+            post_ac_settle_poll_seconds = runtime_settle_poll_seconds(args)
+            post_ac_runtime_after_snapshot = runtime_artifact_stable_snapshot(
+                task_path,
+                settle_seconds=post_ac_settle_seconds,
+                poll_seconds=post_ac_settle_poll_seconds,
+            )
             runtime_integrity_changes = runtime_artifact_integrity_changes(
                 ac_runtime_snapshot,
-                runtime_artifact_stable_snapshot(
-                    task_path,
-                    settle_seconds=runtime_settle_seconds(args),
-                    poll_seconds=runtime_settle_poll_seconds(args),
-                ),
-                ignored_paths=runtime_integrity_ignored_contract_paths(task_path, phase_number, attempt),
+                post_ac_runtime_after_snapshot,
+                ignored_paths=runtime_ignored_paths,
             )
             if runtime_integrity_changes:
                 message = (
@@ -4415,6 +4501,17 @@ def execute_phase(
                 )
                 append_progress(task_path, f"phase {phase_number}: attempt {attempt} runtime integrity failed")
                 restore_attempt_manifest_content(task_path, phase_number, trusted_attempt_manifest_content)
+                runtime_integrity_report_path = write_attempt_runtime_integrity_report(
+                    task_path,
+                    phase_number,
+                    attempt,
+                    failure_window="post_acceptance_settle",
+                    before=ac_runtime_snapshot,
+                    after=post_ac_runtime_after_snapshot,
+                    ignored_paths=runtime_ignored_paths,
+                    settle_seconds=post_ac_settle_seconds,
+                    poll_seconds=post_ac_settle_poll_seconds,
+                )
                 write_terminal_phase_failure(
                     root,
                     task_path,
@@ -4430,6 +4527,7 @@ def execute_phase(
                     required_repo_outputs=required_repo_outputs,
                     contaminating_changes=runtime_integrity_changes,
                     changed_files=runtime_integrity_changes,
+                    runtime_integrity_report_path=runtime_integrity_report_path,
                 )
                 print(message, file=sys.stderr)
                 args.failed = True
