@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shlex
@@ -385,13 +386,53 @@ def required_output_repo_paths(ctx: HarnessContext) -> list[str]:
     return [f"{task_rel}/{path.strip('/')}" for path in contract_required_outputs(ctx.contract)]
 
 
+def stable_json_sha256(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def trusted_harness_scope_policy(root: Path, candidate: Path) -> bool:
+    scripts_dir = root / ".codex" / "harness" / "scripts"
+    try:
+        rel_path = candidate.resolve().relative_to(scripts_dir.resolve()).as_posix()
+    except ValueError:
+        return False
+    manifest_path = root / ".codex" / "harness" / "install-manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    attestation = manifest.get("runtime_attestation") if isinstance(manifest, dict) else None
+    if not isinstance(attestation, dict):
+        return False
+    entries = attestation.get("entries")
+    if not isinstance(entries, list) or attestation.get("digest") != stable_json_sha256(entries):
+        return False
+    expected_path = f"harness:{rel_path}"
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("path") != expected_path:
+            continue
+        expected_sha = entry.get("sha256")
+        return isinstance(expected_sha, str) and candidate.exists() and file_sha256(candidate) == expected_sha
+    return False
+
+
 def scope_policy_module(root: Path) -> Any | None:
     candidates = [
         root / ".codex" / "harness" / "scripts" / "scope_policy.py",
-        root / "scripts" / "harness" / "scope_policy.py",
     ]
     for candidate in candidates:
         if not candidate.exists():
+            continue
+        if not trusted_harness_scope_policy(root, candidate):
             continue
         cache_key = str(candidate.resolve())
         if cache_key in SCOPE_POLICY_CACHE:

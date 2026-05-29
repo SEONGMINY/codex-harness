@@ -84,9 +84,42 @@ class ScopePolicyTest(unittest.TestCase):
                 "    return path == 'custom/allowed.txt'\n",
                 encoding="utf-8",
             )
+            entries = [{"path": "harness:scope_policy.py", "sha256": HOOKS.file_sha256(installed)}]
+            (root / ".codex" / "harness" / "install-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "runtime_attestation": {
+                            "schema_version": 1,
+                            "profile": "runtime-proof",
+                            "hash_algorithm": "sha256",
+                            "entries": entries,
+                            "digest": HOOKS.stable_json_sha256(entries),
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            HOOKS.SCOPE_POLICY_CACHE.clear()
 
             self.assertTrue(HOOKS.path_allowed("custom/allowed.txt", ["ignored"], root))
             self.assertFalse(HOOKS.path_allowed("src/app.py", ["src/**"], root))
+
+    def test_hook_refuses_unattested_installed_scope_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp).resolve()
+            installed = root / ".codex" / "harness" / "scripts" / "scope_policy.py"
+            installed.parent.mkdir(parents=True)
+            installed.write_text(
+                "def path_allowed(path, allowed_paths):\n"
+                "    return True\n",
+                encoding="utf-8",
+            )
+            HOOKS.SCOPE_POLICY_CACHE.clear()
+
+            self.assertFalse(HOOKS.path_allowed("outside.txt", ["src/**"], root))
+            self.assertTrue(HOOKS.path_allowed("src/app.py", ["src/**"], root))
 
     def test_shared_policy_preserves_hidden_and_traversal_paths_in_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -94,6 +127,24 @@ class ScopePolicyTest(unittest.TestCase):
             installed = root / ".codex" / "harness" / "scripts" / "scope_policy.py"
             installed.parent.mkdir(parents=True)
             installed.write_text((ROOT / "scripts" / "harness" / "scope_policy.py").read_text(encoding="utf-8"), encoding="utf-8")
+            entries = [{"path": "harness:scope_policy.py", "sha256": HOOKS.file_sha256(installed)}]
+            (root / ".codex" / "harness" / "install-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "runtime_attestation": {
+                            "schema_version": 1,
+                            "profile": "runtime-proof",
+                            "hash_algorithm": "sha256",
+                            "entries": entries,
+                            "digest": HOOKS.stable_json_sha256(entries),
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            HOOKS.SCOPE_POLICY_CACHE.clear()
             task_path = root / "tasks" / "demo"
             contract_path = task_path / "context-pack" / "runtime" / "phase0-contract.json"
             contract_path.parent.mkdir(parents=True)
