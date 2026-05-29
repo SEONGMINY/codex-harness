@@ -27,12 +27,14 @@ class ArtifactIOTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             path = Path(raw_tmp) / "runtime" / "phase0-result.json"
 
-            ARTIFACT_IO.atomic_write_json(path, {"status": "completed", "phase": 0})
+            with mock.patch.object(ARTIFACT_IO.os, "fsync", wraps=ARTIFACT_IO.os.fsync) as fsync:
+                ARTIFACT_IO.atomic_write_json(path, {"status": "completed", "phase": 0})
 
             self.assertEqual(
                 json.loads(path.read_text(encoding="utf-8")),
                 {"status": "completed", "phase": 0},
             )
+            self.assertGreaterEqual(fsync.call_count, 2)
             self.assertEqual(list(path.parent.glob(".*.tmp")), [])
 
     def test_atomic_write_text_preserves_existing_file_when_replace_fails(self) -> None:
@@ -118,7 +120,7 @@ class ArtifactIOTest(unittest.TestCase):
                 with ARTIFACT_IO.open_append_text(path) as handle:
                     handle.write("one\n")
 
-            fsync.assert_called_once()
+            self.assertEqual(fsync.call_count, 2)
             self.assertEqual(path.read_text(encoding="utf-8"), "one\n")
 
     def test_open_append_text_rejects_symlink_target(self) -> None:

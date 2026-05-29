@@ -263,6 +263,45 @@ class InstallCodexHarnessTest(unittest.TestCase):
                 "project-local-drift-detection",
             )
 
+    def test_project_install_preserves_existing_project_config_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            target = tmp / "target"
+            target.mkdir()
+            (target / "codex-harness.json").write_text(
+                json.dumps(
+                    {
+                        "name": "codex-harness",
+                        "version": "0.0.1",
+                        "policy_pack_env_override": {"allow_env_override": True},
+                        "operator_note": "keep",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(INSTALLER),
+                    str(target),
+                    "--scope",
+                    "project",
+                    "--force",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            config = json.loads((target / "codex-harness.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["name"], "codex-harness")
+            self.assertEqual(config["version"], json.loads((ROOT / "codex-harness.json").read_text(encoding="utf-8"))["version"])
+            self.assertEqual(config["policy_pack_env_override"], {"allow_env_override": True})
+            self.assertEqual(config["operator_note"], "keep")
+
     def test_installed_start_preflight_reports_missing_helper_before_imports(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)

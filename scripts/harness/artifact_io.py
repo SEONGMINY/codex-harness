@@ -64,6 +64,14 @@ def ensure_artifact_parent(path: Path, boundary: Path | None = None) -> None:
     ensure_no_symlink_path(path.parent, boundary=boundary)
 
 
+def fsync_parent_dir(path: Path) -> None:
+    fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def atomic_write_text(path: Path, content: str, boundary: Path | None = None) -> None:
     ensure_no_symlink_path(path, boundary=boundary)
     ensure_artifact_parent(path, boundary=boundary)
@@ -82,6 +90,7 @@ def atomic_write_text(path: Path, content: str, boundary: Path | None = None) ->
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_name, path)
+        fsync_parent_dir(path)
         tmp_name = None
     finally:
         if tmp_name is not None:
@@ -113,3 +122,4 @@ def open_append_text(path: Path, boundary: Path | None = None) -> Iterator[TextI
         finally:
             handle.flush()
             os.fsync(handle.fileno())
+    fsync_parent_dir(path)

@@ -26,7 +26,7 @@ if __name__ == "__main__":
 from codex_exec import add_output_schema, run_codex_exec
 from artifact_io import atomic_write_json
 from design_approval import design_approval_bundle_entries, design_approval_bundle_sha256
-from harness_attestation import attestation_fingerprint, harness_attestation
+from install_preflight import install_validation_errors
 from policy_pack import policy_pack_metadata
 from policy_lineage import design_approval_scope_sha256, policy_pack_lineage_sha256
 from process_runner import run_process_to_files
@@ -671,54 +671,7 @@ def harness_skill_path(root: Path) -> Path | None:
 
 
 def harness_install_errors(root: Path) -> list[str]:
-    install_manifest_path = root / ".codex" / "harness" / "install-manifest.json"
-    required_paths = [
-        root / "codex-harness.json",
-        root / ".codex" / "harness" / "scripts" / "artifact_io.py",
-        root / ".codex" / "harness" / "scripts" / "codex_exec.py",
-        root / ".codex" / "harness" / "scripts" / "command_policy.py",
-        root / ".codex" / "harness" / "scripts" / "design_contract.py",
-        root / ".codex" / "harness" / "scripts" / "env_policy.py",
-        root / ".codex" / "harness" / "scripts" / "evidence_obligations.py",
-        root / ".codex" / "harness" / "scripts" / "file_lock.py",
-        root / ".codex" / "harness" / "scripts" / "harness_attestation.py",
-        root / ".codex" / "harness" / "scripts" / "install_preflight.py",
-        root / ".codex" / "harness" / "scripts" / "obligation_ledger.py",
-        root / ".codex" / "harness" / "scripts" / "policy_lineage.py",
-        root / ".codex" / "harness" / "scripts" / "policy_pack.py",
-        root / ".codex" / "harness" / "scripts" / "process_runner.py",
-        root / ".codex" / "harness" / "scripts" / "redaction.py",
-        root / ".codex" / "harness" / "scripts" / "reference_resolver.py",
-        root / ".codex" / "harness" / "scripts" / "start.py",
-        root / ".codex" / "harness" / "scripts" / "run-phases.py",
-        root / ".codex" / "harness" / "scripts" / "verify-task.py",
-        root / ".codex" / "harness" / "scripts" / "review-phase-plan.py",
-        root / ".codex" / "harness" / "scripts" / "relationship_graph.py",
-        root / ".codex" / "harness" / "scripts" / "gen-relationship-graph.py",
-        root / ".codex" / "harness" / "scripts" / "runtime_protocol.py",
-        root / ".codex" / "harness" / "scripts" / "scope_policy.py",
-        root / ".codex" / "harness" / "scripts" / "task_paths.py",
-        install_manifest_path,
-    ]
-    missing_required = [str(path.relative_to(root)) for path in required_paths if not path.exists()]
-    if missing_required:
-        return [
-            "codex-harness is not installed in this project. Missing: "
-            + ", ".join(missing_required)
-        ]
-
-    errors: list[str] = []
-    try:
-        manifest = json.loads((root / "codex-harness.json").read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        errors.append(f"Invalid codex-harness.json: {exc}")
-    else:
-        manifest_version = manifest.get("version")
-        if manifest_version != HARNESS_VERSION:
-            errors.append(
-                "codex-harness version mismatch: "
-                f"launcher={HARNESS_VERSION}, manifest={manifest_version or '(missing)'}."
-            )
+    errors = install_validation_errors(root, HARNESS_VERSION)
 
     skill_path = harness_skill_path(root)
     if skill_path is None:
@@ -731,22 +684,6 @@ def harness_install_errors(root: Path) -> list[str]:
             "codex-harness skill version mismatch: "
             f"launcher={HARNESS_VERSION}, skill={declared_skill_version or '(missing)'}."
         )
-    try:
-        install_manifest = json.loads(install_manifest_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        errors.append(f"Invalid codex-harness install manifest: {exc}")
-    else:
-        expected = attestation_fingerprint(
-            install_manifest.get("runtime_attestation") if isinstance(install_manifest, dict) else None
-        )
-        current = attestation_fingerprint(harness_attestation(root / ".codex" / "harness" / "scripts"))
-        if expected is None:
-            errors.append("codex-harness install manifest is missing a valid runtime_attestation.")
-        elif current != expected:
-            errors.append(
-                "codex-harness installed runtime drift detected. "
-                "Reinstall or update codex-harness in this project."
-            )
     return errors
 
 

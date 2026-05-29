@@ -19,9 +19,7 @@ from pathlib import Path
 INSTALL_PATHS = [
     (Path("scripts") / "harness", Path(".codex") / "harness" / "scripts"),
 ]
-INSTALL_FILES = [
-    (Path("codex-harness.json"), Path("codex-harness.json")),
-]
+PROJECT_CONFIG_TARGET = Path("codex-harness.json")
 PROJECT_INSTALL_MANIFEST_TARGET = Path(".codex") / "harness" / "install-manifest.json"
 PROJECT_INSTALL_LOCK_TARGET = Path(".codex") / "harness" / "install.lock"
 LEGACY_PROJECT_SCRIPT_TARGET = Path("scripts") / "harness"
@@ -93,6 +91,25 @@ def copy_optional_file(source: Path, target: Path, force: bool) -> bool:
         return False
     copy_file(source, target, force)
     return True
+
+
+def install_project_config(source_root: Path, target_root: Path) -> None:
+    source_path = source_root / PROJECT_CONFIG_TARGET
+    target_path = target_root / PROJECT_CONFIG_TARGET
+    source_config = json.loads(source_path.read_text(encoding="utf-8"))
+    if not isinstance(source_config, dict):
+        raise ValueError(f"Invalid source project config: {source_path}")
+    if target_path.exists() and source_path.resolve() != target_path.resolve():
+        target_config = json.loads(target_path.read_text(encoding="utf-8"))
+        if not isinstance(target_config, dict):
+            raise ValueError(f"Invalid existing project config: {target_path}")
+    else:
+        target_config = {}
+    merged = {**source_config, **target_config}
+    for key in ["name", "version"]:
+        if key in source_config:
+            merged[key] = source_config[key]
+    target_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 @contextmanager
@@ -248,7 +265,7 @@ def install_project_hooks(source_root: Path, target_root: Path, force: bool, opt
 
 def project_install_source_paths(source_root: Path, with_hooks: bool) -> list[Path]:
     paths = [source_root / source_rel for source_rel, _ in INSTALL_PATHS]
-    paths.extend(source_root / source_rel for source_rel, _ in INSTALL_FILES)
+    paths.append(source_root / PROJECT_CONFIG_TARGET)
     paths.append(source_root / USER_SKILL_SOURCE)
     if with_hooks:
         paths.append(source_root / PROJECT_HOOKS_SOURCE)
@@ -319,9 +336,8 @@ def install_project_locked(
     copy_tree(source_root / USER_SKILL_SOURCE, target_root / PROJECT_RUNTIME_SKILL_TARGET, True)
     print(f"installed {PROJECT_RUNTIME_SKILL_TARGET}")
 
-    for source_rel, target_rel in INSTALL_FILES:
-        copy_file(source_root / source_rel, target_root / target_rel, True)
-        print(f"installed {target_rel}")
+    install_project_config(source_root, target_root)
+    print(f"installed {PROJECT_CONFIG_TARGET}")
 
     write_project_install_manifest(source_root, target_root)
     print(f"installed {PROJECT_INSTALL_MANIFEST_TARGET}")
