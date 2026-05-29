@@ -94,6 +94,11 @@ from runtime_protocol import (
     runtime_artifact_ref_errors,
     task_relative,
 )
+from runtime_integrity import (
+    restore_attempt_manifest_content,
+    runtime_artifact_integrity_changes,
+    runtime_artifact_snapshot,
+)
 
 
 TEXT_EXTENSIONS = {".md", ".txt", ".json"}
@@ -892,6 +897,14 @@ def verify_phase_contract_unchanged(task_path: Path, phase_number: int, original
     if phase_contract_hash(current_contract) != phase_contract_hash(original_contract):
         return ["Phase contract changed during Codex execution."]
     return []
+
+
+def runtime_integrity_ignored_contract_paths(task_path: Path, phase_number: int, attempt: int) -> list[str]:
+    # Contract files have dedicated semantic checks so their failure reason stays precise.
+    return [
+        task_relative(phase_contract_path(task_path, phase_number), task_path),
+        task_relative(phase_attempt_contract_path(task_path, phase_number, attempt), task_path),
+    ]
 
 
 def phase_ac_commands(phase: dict, phase_markdown: str) -> list[str]:
@@ -4034,6 +4047,10 @@ def execute_phase(
             "attempt_started",
             status="running",
         )
+        trusted_attempt_manifest_content = phase_attempt_manifest_path(task_path, phase_number).read_text(
+            encoding="utf-8"
+        )
+        codex_runtime_snapshot = runtime_artifact_snapshot(task_path)
 
         install_errors = run_install_preflight(root, task_path, args)
         if install_errors:
@@ -4085,6 +4102,50 @@ def execute_phase(
             args.codex_idle_timeout,
             getattr(args, "codex_max_runtime", 1800),
         )
+        runtime_integrity_changes = runtime_artifact_integrity_changes(
+            codex_runtime_snapshot,
+            runtime_artifact_snapshot(task_path),
+            allowed_paths=[
+                task_relative(output_path, task_path),
+                task_relative(stderr_path, task_path),
+            ],
+            ignored_paths=runtime_integrity_ignored_contract_paths(task_path, phase_number, attempt),
+        )
+        if runtime_integrity_changes:
+            message = (
+                "Runner-owned runtime artifacts changed during phase Codex execution: "
+                + ", ".join(runtime_integrity_changes)
+            )
+            append_progress(task_path, f"phase {phase_number}: attempt {attempt} runtime integrity failed")
+            restore_attempt_manifest_content(task_path, phase_number, trusted_attempt_manifest_content)
+            try:
+                contract = runtime_phase_contract(task_path, phase_number, attempt)
+                required_outputs = contract_outputs(phase, contract)
+                required_repo_outputs = contract_repo_outputs(contract)
+            except (FileNotFoundError, ValueError, json.JSONDecodeError):
+                contract = initial_contract
+                required_outputs = contract_outputs(phase, contract) if contract else []
+                required_repo_outputs = contract_repo_outputs(contract) if contract else []
+            write_terminal_phase_failure(
+                root,
+                task_path,
+                phase,
+                phase_number,
+                attempt,
+                "runtime_integrity",
+                message,
+                contract=contract,
+                retryable=False,
+                codex_exit_code=returncode,
+                stderr_path=stderr_path,
+                required_outputs=required_outputs,
+                required_repo_outputs=required_repo_outputs,
+                contaminating_changes=runtime_integrity_changes,
+                changed_files=runtime_integrity_changes,
+            )
+            print(message, file=sys.stderr)
+            args.failed = True
+            return False
         if returncode != 0:
             message = f"codex exec failed with exit code {returncode}. See {stderr_path}."
             append_progress(task_path, f"phase {phase_number}: attempt {attempt} codex failed")
@@ -4220,6 +4281,7 @@ def execute_phase(
         required_outputs = contract_outputs(phase, contract)
         required_repo_outputs = contract_repo_outputs(contract)
         command_results: list[dict[str, object]] = []
+        ac_runtime_snapshot = runtime_artifact_snapshot(task_path)
         for command in contract_ac_commands(phase, contract):
             ac_returncode, ac_output, ac_timed_out = run_shell(command, root, ac_timeout)
             command_results.append(
@@ -4230,6 +4292,37 @@ def execute_phase(
                     "timed_out": ac_timed_out,
                 }
             )
+            runtime_integrity_changes = runtime_artifact_integrity_changes(
+                ac_runtime_snapshot,
+                runtime_artifact_snapshot(task_path),
+                ignored_paths=runtime_integrity_ignored_contract_paths(task_path, phase_number, attempt),
+            )
+            if runtime_integrity_changes:
+                message = (
+                    "Runner-owned runtime artifacts changed during acceptance command execution: "
+                    + ", ".join(runtime_integrity_changes)
+                )
+                append_progress(task_path, f"phase {phase_number}: attempt {attempt} runtime integrity failed")
+                restore_attempt_manifest_content(task_path, phase_number, trusted_attempt_manifest_content)
+                write_terminal_phase_failure(
+                    root,
+                    task_path,
+                    phase,
+                    phase_number,
+                    attempt,
+                    "runtime_integrity",
+                    message,
+                    contract=contract,
+                    retryable=False,
+                    command_results=command_results,
+                    required_outputs=required_outputs,
+                    required_repo_outputs=required_repo_outputs,
+                    contaminating_changes=runtime_integrity_changes,
+                    changed_files=runtime_integrity_changes,
+                )
+                print(message, file=sys.stderr)
+                args.failed = True
+                return False
             if ac_returncode != 0:
                 message = f"AC command failed: {command}\n\n{ac_output}"
                 append_progress(task_path, f"phase {phase_number}: attempt {attempt} acceptance command failed")
