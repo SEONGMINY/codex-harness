@@ -50,6 +50,16 @@ class EvaluateTaskTest(unittest.TestCase):
         path.chmod(path.stat().st_mode | 0o111)
         return path
 
+    def test_evaluation_prompt_artifact_redacts_secret_content(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            path = Path(raw_tmp) / "evaluation-prompt.md"
+
+            EVALUATE_TASK.write_prompt_artifact(path, "Use API_KEY=sk-1234567890abcdefghijklmnop.\n")
+
+            content = path.read_text(encoding="utf-8")
+            self.assertIn("[REDACTED]", content)
+            self.assertNotIn("sk-1234567890abcdefghijklmnop", content)
+
     def test_evaluation_codex_uses_output_schema(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)

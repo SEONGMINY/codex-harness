@@ -142,6 +142,10 @@ def write_json(path: Path, data: dict) -> None:
     atomic_write_json(path, data)
 
 
+def write_prompt_artifact(path: Path, prompt: str) -> None:
+    atomic_write_text(path, redact_text(prompt))
+
+
 def append_progress(task_path: Path, message: str) -> None:
     path = task_path / "context-pack" / "runtime" / "progress.md"
     with open_append_text(path) as handle:
@@ -3642,7 +3646,7 @@ def run_evaluation_improvement(
     output_path = runtime_dir / f"evaluation-repair{iteration}-output.jsonl"
     stderr_path = runtime_dir / f"evaluation-repair{iteration}-stderr.txt"
     last_message_path = runtime_dir / f"evaluation-repair{iteration}-last-message.json"
-    atomic_write_text(prompt_path, prompt)
+    write_prompt_artifact(prompt_path, prompt)
 
     before = worktree_snapshot(root)
     command = [args.codex_bin, "exec", "--json", "--output-last-message", str(last_message_path)]
@@ -4021,8 +4025,8 @@ def execute_phase(
             checklist_path=checklist_path,
         )
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(prompt_path, prompt)
-        atomic_write_text(task_path / "context-pack" / "runtime" / f"phase{phase_number}-prompt.md", prompt)
+        write_prompt_artifact(prompt_path, prompt)
+        write_prompt_artifact(task_path / "context-pack" / "runtime" / f"phase{phase_number}-prompt.md", prompt)
         append_attempt_manifest_record(
             task_path,
             phase_number,

@@ -20,6 +20,7 @@ from file_lock import LockHandle, acquire_repo_execution_lock, acquire_task_runt
 from harness_attestation import harness_attestation
 from policy_pack import policy_pack_metadata
 from policy_lineage import policy_pack_fingerprint, validate_current_policy_lineage
+from redaction import redact_text
 from task_paths import resolve_task_path
 
 
@@ -29,6 +30,10 @@ SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 
 def runtime_policy_pack() -> dict[str, str]:
     return policy_pack_metadata()
+
+
+def write_prompt_artifact(path: Path, prompt: str) -> None:
+    atomic_write_text(path, redact_text(prompt))
 
 
 def current_policy_lineage_errors(task_path: Path) -> list[str]:
@@ -466,7 +471,7 @@ def main() -> int:
 
         prompt = build_prompt(root, task_path, command_results)
         prompt_path = runtime_dir / "evaluation-prompt.md"
-        atomic_write_text(prompt_path, prompt)
+        write_prompt_artifact(prompt_path, prompt)
 
         failed_commands = [item for item in command_results if item["returncode"] != 0]
         if args.dry_run:

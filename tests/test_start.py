@@ -566,6 +566,33 @@ class StartLauncherTest(unittest.TestCase):
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["documents"], [])
 
+    def test_answer_file_must_stay_inside_repo_and_avoid_sensitive_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            safe_answer = repo / "answers.md"
+            safe_answer.write_text("safe\n", encoding="utf-8")
+            outside_answer = tmp / "outside.md"
+            outside_answer.write_text("outside\n", encoding="utf-8")
+            sensitive_answer = repo / ".env"
+            sensitive_answer.write_text("OPENAI_API_KEY=sk-testsecretsecretsecret\n", encoding="utf-8")
+
+            self.assertEqual(harness_start.resolve_answer_path(repo, str(safe_answer)), safe_answer.resolve())
+            with self.assertRaisesRegex(ValueError, "inside the repository"):
+                harness_start.resolve_answer_path(repo, str(outside_answer))
+            with self.assertRaisesRegex(ValueError, "sensitive"):
+                harness_start.resolve_answer_path(repo, str(sensitive_answer))
+
+    def test_launcher_prompt_artifact_redacts_secret_content(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            path = Path(raw_tmp) / "harness-prompt.md"
+
+            harness_start.write_prompt_artifact(path, "Use API_KEY=sk-1234567890abcdefghijklmnop.\n")
+
+            content = path.read_text(encoding="utf-8")
+            self.assertIn("[REDACTED]", content)
+            self.assertNotIn("sk-1234567890abcdefghijklmnop", content)
+
     def test_docs_approval_artifact_in_final_output_sets_docs_approval_needed_status(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)

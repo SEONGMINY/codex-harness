@@ -30,6 +30,7 @@ from install_preflight import install_validation_errors
 from policy_pack import policy_pack_metadata
 from policy_lineage import design_approval_scope_sha256, policy_pack_lineage_sha256
 from process_runner import run_process_to_files
+from redaction import redact_text
 from task_paths import resolve_task_path as resolve_harness_task_path
 
 
@@ -185,6 +186,31 @@ def is_under(path: str, directory: str) -> bool:
 
 def launcher_allowed_change(path: str, run_dir: Path, root: Path) -> bool:
     return is_under(path, rel(run_dir, root))
+
+
+SENSITIVE_INPUT_PATH_MARKERS = [".env", ".ssh", "secret", "password", "token", "private_key"]
+
+
+def resolve_answer_path(root: Path, raw_path: str) -> Path:
+    root = root.resolve()
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    resolved = candidate.resolve()
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"Answer file must be inside the repository: {raw_path}") from exc
+    lowered = relative.as_posix().lower()
+    if any(marker in lowered for marker in SENSITIVE_INPUT_PATH_MARKERS):
+        raise ValueError(f"Answer file path is sensitive and cannot be passed to the harness: {relative}")
+    if not resolved.exists() or not resolved.is_file():
+        raise ValueError(f"Missing answer file: {raw_path}")
+    return resolved
+
+
+def write_prompt_artifact(path: Path, prompt: str) -> None:
+    path.write_text(redact_text(prompt), encoding="utf-8")
 
 
 def build_prompt(
@@ -922,10 +948,10 @@ def main() -> int:
         print("[ERROR] Request is empty.", file=sys.stderr)
         return 1
 
-    answer_paths = [Path(path).expanduser().resolve() for path in args.answer_file]
-    missing_answers = [str(path) for path in answer_paths if not path.exists()]
-    if missing_answers:
-        print("[ERROR] Missing answer file(s): " + ", ".join(missing_answers), file=sys.stderr)
+    try:
+        answer_paths = [resolve_answer_path(root, path) for path in args.answer_file]
+    except ValueError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
     run_dir = create_run_dir(root, request)
@@ -945,7 +971,7 @@ def main() -> int:
         reasoning_effort,
     )
     prompt_path = run_dir / "harness-prompt.md"
-    prompt_path.write_text(prompt, encoding="utf-8")
+    write_prompt_artifact(prompt_path, prompt)
 
     returncode: int | None = None
     before_snapshot: dict[str, str] | None = None

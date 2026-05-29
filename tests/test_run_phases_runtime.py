@@ -309,6 +309,16 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertIn("[REDACTED]", output)
             self.assertNotIn("sk-1234567890abcdefghijklmnop", output)
 
+    def test_prompt_artifact_redacts_secret_content(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            path = Path(raw_tmp) / "phase0-prompt.md"
+
+            RUN_PHASES.write_prompt_artifact(path, "Use API_KEY=sk-1234567890abcdefghijklmnop for this run.\n")
+
+            content = path.read_text(encoding="utf-8")
+            self.assertIn("[REDACTED]", content)
+            self.assertNotIn("sk-1234567890abcdefghijklmnop", content)
+
     def test_env_policy_drops_sensitive_env_and_preserves_known_harness_env(self) -> None:
         env = env_policy.sanitized_env(
             {
