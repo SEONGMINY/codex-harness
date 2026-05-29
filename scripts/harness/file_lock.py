@@ -34,7 +34,7 @@ def fd_identity(fd: int) -> tuple[int, int, int, int]:
 
 
 def lock_handle_matches_path(handle: LockHandle | None, path: Path) -> bool:
-    if handle is None or handle.path != path:
+    if handle is None or handle.path.resolve() != path.resolve():
         return False
     try:
         return file_identity(path) == handle.identity and fd_identity(handle.fd) == handle.identity

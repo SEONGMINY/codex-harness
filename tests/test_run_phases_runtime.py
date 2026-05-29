@@ -1570,6 +1570,35 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertFalse(RUN_PHASES.phase_attempt_manifest_path(task_path, 0).exists())
             self.assertFalse((task_path / "context-pack" / "runtime" / "progress.md").exists())
 
+    def test_completed_phase_runtime_check_direct_backfill_requires_authorization_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_valid_attempt_commit(root, task_path, phase=0, attempt=1)
+            phase = {"phase": 0, "name": "demo", "status": "completed", "attempts": 1}
+
+            check = RUN_PHASES.completed_phase_runtime_check(
+                task_path,
+                phase,
+                apply_backfill=True,
+            )
+
+            self.assertEqual(check["id"], "phase.attempt_manifest.backfill_lock_required")
+            self.assertFalse(RUN_PHASES.phase_attempt_manifest_path(task_path, 0).exists())
+
+            lock = file_lock.acquire_lock(RUN_PHASES.repo_execution_lock_path(root), boundary=root)
+            try:
+                authorized_check = RUN_PHASES.completed_phase_runtime_check(
+                    task_path,
+                    phase,
+                    apply_backfill=True,
+                    backfill_authorized=RUN_PHASES.repo_execution_lock_is_held(root, lock),
+                )
+            finally:
+                file_lock.release_lock(lock)
+
+            self.assertEqual(authorized_check["id"], "phase.attempt_manifest.backfilled")
+            self.assertEqual(len(self.read_attempt_manifest(task_path, 0)), 1)
+
     def test_runtime_doctor_ignores_unlocked_stale_repo_execution_lock(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))

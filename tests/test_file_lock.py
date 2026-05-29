@@ -106,6 +106,7 @@ class FileLockTest(unittest.TestCase):
             try:
                 self.assertEqual(FILE_LOCK.probe_lock_state(path), "active")
                 self.assertTrue(FILE_LOCK.lock_handle_matches_path(handle, path))
+                self.assertTrue(FILE_LOCK.lock_handle_matches_path(handle, Path(".") / path))
             finally:
                 FILE_LOCK.release_lock(handle)
 

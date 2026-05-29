@@ -2368,6 +2368,7 @@ def completed_phase_runtime_check(
     phase: dict[str, object],
     *,
     apply_backfill: bool,
+    backfill_authorized: bool = False,
 ) -> dict[str, object] | None:
     if phase.get("status") != "completed":
         return None
@@ -2463,6 +2464,15 @@ def completed_phase_runtime_check(
     }
     if not apply_backfill:
         return check
+    if not backfill_authorized:
+        return {
+            "id": "phase.attempt_manifest.backfill_lock_required",
+            "severity": "error",
+            "phase": phase_number,
+            "attempt": attempts,
+            "message": "Backfill requires an active codex-harness repo execution lock.",
+            "operator_action": "Run backfill through run-phases --doctor-runtime --backfill-attempt-manifests.",
+        }
 
     terminalize_recovered_attempt_commit(
         task_path,
@@ -2589,7 +2599,12 @@ def doctor_runtime_proof(
     for phase in task_index.get("phases") or []:
         if not isinstance(phase, dict) or "phase" not in phase:
             continue
-        check = completed_phase_runtime_check(task_path, phase, apply_backfill=apply_backfill)
+        check = completed_phase_runtime_check(
+            task_path,
+            phase,
+            apply_backfill=apply_backfill,
+            backfill_authorized=repo_execution_lock_held,
+        )
         if check is not None:
             checks.append(check)
     checks.extend(runtime_projection_drift_checks(root, task_path))
