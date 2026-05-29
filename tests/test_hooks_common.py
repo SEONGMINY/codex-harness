@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / ".codex" / "hooks"))
 
 import harness_pre_tool_use  # noqa: E402
 import harness_post_tool_use  # noqa: E402
+import harness_user_prompt_submit  # noqa: E402
 from harness_common import (  # noqa: E402
     HarnessContext,
     HOOK_WRITE_TOOL_MATCHER,
@@ -268,6 +269,36 @@ class HookContextTest(unittest.TestCase):
         for path in runner_paths:
             with self.subTest(path=path):
                 self.assertTrue(runner_owned(path))
+
+    def test_user_prompt_hook_accepts_project_local_skill_matching_project_version(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp).resolve()
+            skill_path = root / ".agents" / "skills" / "codex-harness" / "SKILL.md"
+            skill_path.parent.mkdir(parents=True)
+            (root / "codex-harness.json").write_text(
+                json.dumps({"name": "codex-harness", "version": "0.1.5"}) + "\n",
+                encoding="utf-8",
+            )
+            skill_path.write_text("---\nname: codex-harness\nversion: 0.1.5\n---\n", encoding="utf-8")
+
+            warning = harness_user_prompt_submit.local_skill_warning({"cwd": str(root)})
+
+            self.assertEqual(warning, "")
+
+    def test_user_prompt_hook_warns_for_project_local_skill_mismatching_project_version(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp).resolve()
+            skill_path = root / ".agents" / "skills" / "codex-harness" / "SKILL.md"
+            skill_path.parent.mkdir(parents=True)
+            (root / "codex-harness.json").write_text(
+                json.dumps({"name": "codex-harness", "version": "0.1.5"}) + "\n",
+                encoding="utf-8",
+            )
+            skill_path.write_text("---\nname: codex-harness\nversion: 0.1.4\n---\n", encoding="utf-8")
+
+            warning = harness_user_prompt_submit.local_skill_warning({"cwd": str(root)})
+
+            self.assertIn("stale", warning)
 
 
 if __name__ == "__main__":

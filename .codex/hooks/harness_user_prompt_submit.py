@@ -3,13 +3,32 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 from harness_common import read_event, repo_root, write_json
 
 
-HARNESS_VERSION = "0.1.0"
+def skill_version(skill_path: Path) -> str | None:
+    try:
+        text = skill_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"(?m)^version:\s*['\"]?([^'\"\n]+)", text)
+    return match.group(1).strip() if match else None
+
+
+def expected_harness_version(root: Path) -> str | None:
+    config_path = root / "codex-harness.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        config = None
+    if isinstance(config, dict) and isinstance(config.get("version"), str) and config["version"].strip():
+        return config["version"].strip()
+    runtime_skill = root / ".codex" / "harness" / "scripts" / "skill" / "SKILL.md"
+    return skill_version(runtime_skill)
 
 
 def local_skill_warning(event: dict) -> str:
@@ -18,13 +37,11 @@ def local_skill_warning(event: dict) -> str:
     skill_path = root / ".agents" / "skills" / "codex-harness" / "SKILL.md"
     if not skill_path.exists():
         return ""
-    try:
-        text = skill_path.read_text(encoding="utf-8")
-    except OSError:
+    expected_version = expected_harness_version(root)
+    if expected_version is None:
         return ""
-    match = re.search(r"(?m)^version:\s*['\"]?([^'\"\n]+)", text)
-    version = match.group(1).strip() if match else "(missing)"
-    if version == HARNESS_VERSION:
+    version = skill_version(skill_path) or "(missing)"
+    if version == expected_version:
         return ""
     return (
         " Project-local .agents/skills/codex-harness is stale and can shadow "
