@@ -83,6 +83,18 @@ class EnvPolicyTest(unittest.TestCase):
         self.assertNotIn("CODEX_HARNESS_ENV_ALLOW", env)
         self.assertEqual(env["PYTHONPATH"], "/tmp/needed")
 
+    def test_child_yolo_control_is_not_forwarded_as_context_env(self) -> None:
+        env = sanitized_env(
+            base={
+                "PATH": "/bin",
+                "CODEX_HARNESS_ACTIVE": "1",
+                "CODEX_HARNESS_CHILD_CODEX_YOLO": "1",
+            }
+        )
+
+        self.assertEqual(env["CODEX_HARNESS_ACTIVE"], "1")
+        self.assertNotIn("CODEX_HARNESS_CHILD_CODEX_YOLO", env)
+
 
 if __name__ == "__main__":
     unittest.main()

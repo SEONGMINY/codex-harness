@@ -199,7 +199,11 @@ def env_flag(name: str) -> bool:
 
 def apply_inherited_yolo(args: argparse.Namespace) -> None:
     args.yolo_inherited = False
-    if not getattr(args, "yolo", False) and env_flag("CODEX_HARNESS_CHILD_CODEX_YOLO"):
+    if (
+        not getattr(args, "yolo", False)
+        and getattr(args, "allow_inherited_yolo", False)
+        and env_flag("CODEX_HARNESS_CHILD_CODEX_YOLO")
+    ):
         args.yolo = True
         args.yolo_inherited = True
 
@@ -214,8 +218,8 @@ def nested_codex_preflight_errors(args: argparse.Namespace) -> list[str]:
     return [
         "run-phases.py is running inside a launcher Codex session, but phase child "
         "codex exec is not configured with --yolo. Re-run the launcher with --yolo "
-        "or set CODEX_HARNESS_CHILD_CODEX_YOLO=1 so the runner can start fresh phase "
-        "Codex sessions without the parent sandbox blocking ~/.codex state files."
+        "or pass --allow-inherited-yolo with CODEX_HARNESS_CHILD_CODEX_YOLO=1 only "
+        "when that privilege escalation was explicitly approved."
     ]
 
 
@@ -4854,6 +4858,14 @@ def main() -> int:
         "--yolo",
         action="store_true",
         help="Pass --dangerously-bypass-approvals-and-sandbox to codex exec.",
+    )
+    parser.add_argument(
+        "--allow-inherited-yolo",
+        action="store_true",
+        help=(
+            "Allow CODEX_HARNESS_CHILD_CODEX_YOLO=1 to enable --yolo. "
+            "Prefer explicit --yolo from the launcher."
+        ),
     )
     args = parser.parse_args()
     args.failed = False

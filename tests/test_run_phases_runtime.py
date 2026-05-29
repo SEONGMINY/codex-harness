@@ -2739,8 +2739,23 @@ class RunCodexRuntimeTest(unittest.TestCase):
             time.sleep(0.5)
             self.assertEqual(marker.read_text(encoding="utf-8"), before)
 
-    def test_inherited_yolo_env_enables_phase_codex_yolo(self) -> None:
-        args = argparse.Namespace(yolo=False)
+    def test_inherited_yolo_env_requires_explicit_runner_opt_in(self) -> None:
+        args = argparse.Namespace(yolo=False, allow_inherited_yolo=False)
+        old_value = os.environ.get("CODEX_HARNESS_CHILD_CODEX_YOLO")
+        os.environ["CODEX_HARNESS_CHILD_CODEX_YOLO"] = "1"
+        try:
+            RUN_PHASES.apply_inherited_yolo(args)
+        finally:
+            if old_value is None:
+                os.environ.pop("CODEX_HARNESS_CHILD_CODEX_YOLO", None)
+            else:
+                os.environ["CODEX_HARNESS_CHILD_CODEX_YOLO"] = old_value
+
+        self.assertFalse(args.yolo)
+        self.assertFalse(args.yolo_inherited)
+
+    def test_inherited_yolo_env_enables_phase_codex_yolo_when_explicitly_allowed(self) -> None:
+        args = argparse.Namespace(yolo=False, allow_inherited_yolo=True)
         old_value = os.environ.get("CODEX_HARNESS_CHILD_CODEX_YOLO")
         os.environ["CODEX_HARNESS_CHILD_CODEX_YOLO"] = "1"
         try:
@@ -2774,6 +2789,108 @@ class RunCodexRuntimeTest(unittest.TestCase):
 
         self.assertEqual(len(errors), 1)
         self.assertIn("phase child codex exec is not configured with --yolo", errors[0])
+
+    def test_nested_codex_preflight_does_not_treat_ambient_yolo_env_as_approval(self) -> None:
+        args = argparse.Namespace(dry_run=False, yolo=False)
+        old_session = os.environ.get("CODEX_HARNESS_SESSION")
+        old_child_yolo = os.environ.get("CODEX_HARNESS_CHILD_CODEX_YOLO")
+        os.environ["CODEX_HARNESS_SESSION"] = "1"
+        os.environ["CODEX_HARNESS_CHILD_CODEX_YOLO"] = "1"
+        try:
+            errors = RUN_PHASES.nested_codex_preflight_errors(args)
+        finally:
+            if old_session is None:
+                os.environ.pop("CODEX_HARNESS_SESSION", None)
+            else:
+                os.environ["CODEX_HARNESS_SESSION"] = old_session
+            if old_child_yolo is None:
+                os.environ.pop("CODEX_HARNESS_CHILD_CODEX_YOLO", None)
+            else:
+                os.environ["CODEX_HARNESS_CHILD_CODEX_YOLO"] = old_child_yolo
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("--allow-inherited-yolo", errors[0])
+
+    def test_main_argparse_requires_allow_inherited_yolo_for_env_yolo(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (root / "tasks" / "index.json").write_text(
+                json.dumps({"tasks": [{"dir": "demo", "status": "running"}]}) + "\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "pending"}]}) + "\n",
+                encoding="utf-8",
+            )
+            observed: list[bool] = []
+            old_child_yolo = os.environ.get("CODEX_HARNESS_CHILD_CODEX_YOLO")
+            os.environ["CODEX_HARNESS_CHILD_CODEX_YOLO"] = "1"
+
+            def capture_args(_root: Path, _task_path: Path, args: argparse.Namespace, _override=None) -> bool:
+                observed.append(bool(args.yolo))
+                return False
+
+            try:
+                with (
+                    mock.patch.object(sys, "argv", ["run-phases.py", "demo", "--root", str(root), "--dry-run"]),
+                    mock.patch.object(RUN_PHASES, "harness_install_errors", return_value=[]),
+                    mock.patch.object(RUN_PHASES, "reconcile_before_execution", return_value=[]),
+                    mock.patch.object(RUN_PHASES, "execute_phase", side_effect=capture_args),
+                ):
+                    self.assertEqual(RUN_PHASES.main(), 0)
+            finally:
+                if old_child_yolo is None:
+                    os.environ.pop("CODEX_HARNESS_CHILD_CODEX_YOLO", None)
+                else:
+                    os.environ["CODEX_HARNESS_CHILD_CODEX_YOLO"] = old_child_yolo
+
+            self.assertEqual(observed, [False])
+
+    def test_main_argparse_allows_inherited_yolo_only_with_explicit_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (root / "tasks" / "index.json").write_text(
+                json.dumps({"tasks": [{"dir": "demo", "status": "running"}]}) + "\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"phases": [{"phase": 0, "name": "demo", "status": "pending"}]}) + "\n",
+                encoding="utf-8",
+            )
+            observed: list[tuple[bool, bool]] = []
+            old_child_yolo = os.environ.get("CODEX_HARNESS_CHILD_CODEX_YOLO")
+            os.environ["CODEX_HARNESS_CHILD_CODEX_YOLO"] = "1"
+
+            def capture_args(_root: Path, _task_path: Path, args: argparse.Namespace, _override=None) -> bool:
+                observed.append((bool(args.yolo), bool(args.yolo_inherited)))
+                return False
+
+            try:
+                with (
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "run-phases.py",
+                            "demo",
+                            "--root",
+                            str(root),
+                            "--dry-run",
+                            "--allow-inherited-yolo",
+                        ],
+                    ),
+                    mock.patch.object(RUN_PHASES, "harness_install_errors", return_value=[]),
+                    mock.patch.object(RUN_PHASES, "reconcile_before_execution", return_value=[]),
+                    mock.patch.object(RUN_PHASES, "execute_phase", side_effect=capture_args),
+                ):
+                    self.assertEqual(RUN_PHASES.main(), 0)
+            finally:
+                if old_child_yolo is None:
+                    os.environ.pop("CODEX_HARNESS_CHILD_CODEX_YOLO", None)
+                else:
+                    os.environ["CODEX_HARNESS_CHILD_CODEX_YOLO"] = old_child_yolo
+
+            self.assertEqual(observed, [(True, True)])
 
     def test_phase_gate_fails_on_quality_failure(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
