@@ -39,11 +39,11 @@ from phase_contract import (
     DESIGN_REVIEW_DOC,
     DESIGN_REVIEW_WAIVER_DOC,
     IMPLEMENTATION_QUALITY_DOC,
+    classify_handoff_text,
     contract_acceptance_commands,
     contract_allowed_paths,
     contract_required_outputs,
     contract_required_repo_outputs,
-    handoff_block_reasons,
     handoff_change_trace_errors,
     path_allowed,
     parse_phase_contract,
@@ -2557,9 +2557,12 @@ def verify(
             handoff_text, handoff_text_errors = safe_task_text(root, handoff_path, "handoff")
             errors.extend(handoff_text_errors)
             if handoff_text is not None:
-                handoff_reasons = handoff_block_reasons(
-                    handoff_text
-                )
+                handoff_state = classify_handoff_text(handoff_text)
+                handoff_reasons = [
+                    str(item)
+                    for item in handoff_state.get("reasons", [])
+                    if isinstance(item, str) and item.strip()
+                ]
                 if handoff_reasons:
                     errors.append(
                         f"Phase {phase_number} handoff reports blocked/partial status: {handoff_reasons!r}"

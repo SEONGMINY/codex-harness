@@ -44,11 +44,11 @@ from decision_registry import (
 from phase_contract import (
     IMPLEMENTATION_QUALITY_DOC,
     checklist_markdown,
+    classify_handoff_text,
     contract_acceptance_commands,
     contract_allowed_paths,
     contract_required_outputs,
     contract_required_repo_outputs,
-    handoff_block_reasons,
     handoff_change_trace_errors,
     path_allowed,
     parse_phase_contract,
@@ -1593,11 +1593,24 @@ def run_quality_checks(
     return result
 
 
-def handoff_blockers(task_path: Path, phase_number: int) -> list[str]:
+def handoff_state(task_path: Path, phase_number: int) -> dict[str, object]:
     path = phase_handoff_path(task_path, phase_number)
     if not path.exists():
-        return []
-    return handoff_block_reasons(path.read_text(encoding="utf-8", errors="replace"))
+        return {
+            "status": "missing",
+            "blocking": False,
+            "source": "handoff_missing",
+            "path": task_relative(path, task_path),
+            "markers": [],
+            "reasons": [],
+        }
+    state = classify_handoff_text(path.read_text(encoding="utf-8", errors="replace"))
+    return {**state, "path": task_relative(path, task_path)}
+
+
+def handoff_blockers(task_path: Path, phase_number: int) -> list[str]:
+    state = handoff_state(task_path, phase_number)
+    return [str(item) for item in state.get("reasons", []) if isinstance(item, str) and item.strip()]
 
 
 def handoff_change_trace_blockers(
@@ -2920,7 +2933,22 @@ def build_gate(
     handoff_trace_errors: list[str],
     quality_result: dict[str, object] | None = None,
     evidence: dict[str, object] | None = None,
+    handoff_state: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    if handoff_state is None:
+        handoff_state = {
+            "status": "incomplete" if handoff_reasons else "complete",
+            "blocking": bool(handoff_reasons),
+            "source": "legacy_reason_list",
+            "markers": [],
+            "reasons": handoff_reasons,
+        }
+    else:
+        handoff_reasons = [
+            str(item)
+            for item in handoff_state.get("reasons", [])
+            if isinstance(item, str) and item.strip()
+        ]
     if evidence is None:
         evidence = build_evidence(
             root,
@@ -2951,7 +2979,7 @@ def build_gate(
         blocking_reasons.append("One or more required repo outputs are missing.")
     if violations:
         blocking_reasons.append("Changed files include paths outside Contract.scope.allowed_paths.")
-    if handoff_reasons:
+    if bool(handoff_state.get("blocking")):
         blocking_reasons.append("Handoff reports blocked, partial, skipped, or workaround status.")
     if handoff_trace_errors:
         blocking_reasons.append("Handoff change trace is missing or invalid.")
@@ -3003,8 +3031,9 @@ def build_gate(
         },
         {
             "name": "handoff_status",
-            "status": "passed" if not handoff_reasons else "failed",
+            "status": "passed" if not handoff_state.get("blocking") else "failed",
             "reasons": handoff_reasons,
+            "handoff_state": handoff_state,
         },
         {
             "name": "handoff_change_trace",
@@ -3053,8 +3082,9 @@ def build_evidence(
     required_repo_outputs: list[str],
     task_path: Path,
     quality_result: dict[str, object] | None = None,
+    handoff_state: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
+    evidence = {
         "phase": phase_number,
         "attempt": attempt,
         "changed_files": changed_files,
@@ -3063,6 +3093,9 @@ def build_evidence(
         "required_repo_outputs": required_repo_output_results(root, required_repo_outputs),
         "quality": quality_result or {},
     }
+    if handoff_state is not None:
+        evidence["handoff_state"] = handoff_state
+    return evidence
 
 
 def _normalized_evidence_path(raw_path: object) -> str | None:
@@ -3277,6 +3310,16 @@ def failed_instruction_results(reconciliation: dict[str, object] | None) -> list
     ]
 
 
+def handoff_state_from_gate(gate: dict[str, object] | None) -> dict[str, object] | None:
+    if not gate:
+        return None
+    for check in gate.get("checks") or []:
+        if isinstance(check, dict) and check.get("name") == "handoff_status":
+            state = check.get("handoff_state")
+            return state if isinstance(state, dict) else None
+    return None
+
+
 def contract_summary(
     contract: dict | None,
     phase: dict,
@@ -3343,6 +3386,7 @@ def build_repair_packet(
     stderr_tail = ""
     if stderr_path and stderr_path.exists():
         stderr_tail = truncate_text(stderr_path.read_text(encoding="utf-8", errors="replace"), 4_000)
+    handoff_state = handoff_state_from_gate(gate)
     packet = {
         "phase": phase_number,
         "attempt": attempt,
@@ -3380,6 +3424,8 @@ def build_repair_packet(
             "Leave the required handoff for this phase.",
         ],
     }
+    if handoff_state is not None:
+        packet["handoff_state"] = handoff_state
     if runtime_integrity_report_path is not None:
         packet["runtime_integrity_report"] = artifact_ref(
             task_path,
@@ -3443,6 +3489,25 @@ def repair_packet_markdown(packet: dict[str, object]) -> str:
         lines.append("The runner will not auto-retry this phase until they are reviewed or cleaned up.")
         for path in contaminating_changes:
             lines.append(f"- `{path}`")
+    else:
+        lines.append("- none")
+
+    handoff_state = packet.get("handoff_state")
+    lines.extend(["", "## Handoff State", ""])
+    if isinstance(handoff_state, dict):
+        lines.append(f"- Status: `{handoff_state.get('status')}`")
+        lines.append(f"- Blocking: `{handoff_state.get('blocking')}`")
+        markers = handoff_state.get("markers")
+        if isinstance(markers, list) and markers:
+            for marker in markers:
+                if isinstance(marker, dict):
+                    lines.append(
+                        "- Marker: "
+                        f"`{marker.get('kind')}` via `{marker.get('rule_id')}` "
+                        f"matched `{marker.get('matched_text')}`"
+                    )
+        else:
+            lines.append("- Markers: none")
     else:
         lines.append("- none")
 
@@ -4794,6 +4859,7 @@ def execute_phase(
             changed_files = phase_changed_paths(task_path, phase_start_snapshot, final_snapshot)
             quality_result = run_quality_checks(root, task_path, phase_number, changed_files)
             write_json(phase_attempt_quality_path(task_path, phase_number, attempt), quality_result)
+            observed_handoff_state = handoff_state(task_path, phase_number)
             evidence = build_evidence(
                 root,
                 phase_number,
@@ -4804,8 +4870,8 @@ def execute_phase(
                 required_repo_outputs,
                 task_path,
                 quality_result,
+                observed_handoff_state,
             )
-            handoff_reasons = handoff_blockers(task_path, phase_number)
             handoff_trace_errors = handoff_change_trace_blockers(
                 task_path,
                 phase_number,
@@ -4822,9 +4888,10 @@ def execute_phase(
                 command_results,
                 required_outputs,
                 required_repo_outputs,
-                handoff_reasons,
+                [str(item) for item in observed_handoff_state.get("reasons", []) if isinstance(item, str)],
                 handoff_trace_errors,
                 quality_result,
+                handoff_state=observed_handoff_state,
             )
             reconciliation = write_runtime_review_artifacts(task_path, phase_number, attempt, contract, evidence, gate)
             if gate.get("status") != "passed":

@@ -400,6 +400,9 @@ tasks/<task-dir>/context-pack/handoffs/phase<N>.md
 ```
 
 handoff가 `blocked`, `partial`, `skipped`, `workaround`, `우회`, `막힘`, `차단`, `부분 구현`처럼 미완료 상태를 말하면 runner gate가 실패합니다. 파일 존재와 확인 명령이 통과해도 완료로 보지 않습니다.
+runner는 이 텍스트를 parent-owned `handoff_state`로 분류해 gate와 repair packet에
+같은 marker를 남깁니다. phase agent가 작성한 완료 설명은 상태를 만들 수 없고,
+이 marker는 완료 proof가 아니라 재시도와 디버깅을 위한 실패 진단입니다.
 handoff는 `## Change Trace` 섹션에서 필수 task output을 제외한 변경 저장소 파일을 phase instruction id에 연결해야 합니다.
 
 권장 구조:

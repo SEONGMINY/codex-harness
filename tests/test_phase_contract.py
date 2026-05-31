@@ -227,6 +227,36 @@ class PhaseContractValidationTest(unittest.TestCase):
 
         self.assertTrue(reasons)
 
+    def test_handoff_classifier_reports_structured_markers(self) -> None:
+        state = PHASE_CONTRACT.classify_handoff_text(
+            "# Handoff\n\nStatus: partial\n\n일부 구현만 남았습니다."
+        )
+
+        self.assertEqual(state["status"], "incomplete")
+        self.assertTrue(state["blocking"])
+        self.assertIn("partial", {item["kind"] for item in state["markers"]})
+        self.assertTrue(all(item.get("matched_text") for item in state["markers"]))
+        self.assertTrue(state["reasons"])
+
+    def test_handoff_classifier_ignores_negated_workaround_mentions(self) -> None:
+        state = PHASE_CONTRACT.classify_handoff_text(
+            "# Handoff\n\nStatus: completed\n\nNo workaround was used. 우회 없이 완료했습니다."
+        )
+
+        self.assertEqual(state["status"], "complete")
+        self.assertFalse(state["blocking"])
+        self.assertEqual(state["markers"], [])
+
+    def test_handoff_classifier_keeps_clean_handoff_complete(self) -> None:
+        state = PHASE_CONTRACT.classify_handoff_text(
+            "# Handoff\n\n## 변경 파일\n\n- `src/app.py`: updated.\n\n## 남은 위험\n\n- 없음\n"
+        )
+
+        self.assertEqual(state["status"], "complete")
+        self.assertFalse(state["blocking"])
+        self.assertEqual(state["markers"], [])
+        self.assertEqual(state["reasons"], [])
+
     def test_handoff_change_trace_requires_changed_file_mapping(self) -> None:
         errors = PHASE_CONTRACT.handoff_change_trace_errors(
             "# Handoff\n\n## Change Trace\n\n- `src/app.py`: `P0-001`\n",

@@ -42,17 +42,30 @@ GENERIC_FORBIDDEN_RULE_PATTERNS = [
         r"be\s+careful",
     ]
 ]
-HANDOFF_BLOCK_PATTERNS = [
-    re.compile(r"(?im)^\s*(?:status|state)\s*:\s*(blocked|partial|skipped|failed)\b"),
-    re.compile(r"(?im)^\s*##\s*(?:status|state)\s*\n+\s*(blocked|partial|skipped|failed)\b"),
-    re.compile(
-        r"(?i)\b("
-        r"blocked by|could not implement|unable to implement|not implemented|"
-        r"partial implementation|skipped|workaround|rejected paths?"
-        r")\b"
-    ),
-    re.compile(r"(막힘|막혔|차단|우회|구현하지 못|부분 구현|일부 구현)"),
+HANDOFF_BLOCK_RULES = [
+    {
+        "id": "explicit_status_field",
+        "pattern": re.compile(r"(?im)^\s*(?:status|state)\s*:\s*(blocked|partial|skipped|failed|workaround)\b"),
+    },
+    {
+        "id": "explicit_status_heading",
+        "pattern": re.compile(r"(?im)^\s*##\s*(?:status|state)\s*\n+\s*(blocked|partial|skipped|failed|workaround)\b"),
+    },
+    {
+        "id": "english_incomplete_phrase",
+        "pattern": re.compile(
+            r"(?i)\b("
+            r"blocked by|could not implement|unable to implement|not implemented|"
+            r"partial implementation|skipped|workaround|rejected paths?"
+            r")\b"
+        ),
+    },
+    {
+        "id": "korean_incomplete_phrase",
+        "pattern": re.compile(r"(막힘|막혔|차단|우회|구현하지 못|부분 구현|일부 구현)"),
+    },
 ]
+HANDOFF_BLOCK_PATTERNS = [item["pattern"] for item in HANDOFF_BLOCK_RULES]
 CHANGE_TRACE_SECTION_RE = re.compile(
     r"(?ms)^##\s+Change Trace\s*$\n(?P<body>.*?)(?=^##\s+|\Z)"
 )
@@ -699,13 +712,87 @@ def checklist_markdown(contract: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def handoff_block_reasons(text: str) -> list[str]:
-    reasons: list[str] = []
-    for pattern in HANDOFF_BLOCK_PATTERNS:
+def _handoff_marker_kind(matched_text: str) -> str:
+    value = matched_text.lower()
+    if "partial" in value or "부분" in matched_text or "일부" in matched_text:
+        return "partial"
+    if "skipped" in value:
+        return "skipped"
+    if "workaround" in value or "우회" in matched_text:
+        return "workaround"
+    if "failed" in value:
+        return "failed"
+    if (
+        "blocked" in value
+        or "could not" in value
+        or "unable" in value
+        or "not implemented" in value
+        or "rejected path" in value
+        or "막힘" in matched_text
+        or "막혔" in matched_text
+        or "차단" in matched_text
+        or "구현하지 못" in matched_text
+    ):
+        return "blocked"
+    return "unknown"
+
+
+def _handoff_marker_is_negated(text: str, match: re.Match[str]) -> bool:
+    window = text[max(0, match.start() - 24) : match.end() + 24].lower()
+    return any(
+        phrase in window
+        for phrase in [
+            "no workaround",
+            "without workaround",
+            "workaround was not",
+            "workaround was never",
+            "우회 없이",
+            "우회하지 않",
+            "우회 없음",
+        ]
+    )
+
+
+def handoff_block_markers(text: str) -> list[dict[str, str]]:
+    markers: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for rule in HANDOFF_BLOCK_RULES:
+        pattern = rule["pattern"]
         match = pattern.search(text)
-        if match:
-            reasons.append(f"handoff matched blocked/partial marker: {match.group(0).strip()}")
-    return reasons
+        if not match:
+            continue
+        if _handoff_marker_is_negated(text, match):
+            continue
+        matched_text = match.group(0).strip()
+        kind = _handoff_marker_kind(matched_text)
+        key = (str(rule["id"]), kind, matched_text)
+        if key in seen:
+            continue
+        seen.add(key)
+        markers.append(
+            {
+                "kind": kind,
+                "rule_id": str(rule["id"]),
+                "matched_text": matched_text,
+                "message": f"handoff reports {kind} status: {matched_text}",
+            }
+        )
+    return markers
+
+
+def classify_handoff_text(text: str) -> dict[str, Any]:
+    markers = handoff_block_markers(text)
+    return {
+        "status": "incomplete" if markers else "complete",
+        "blocking": bool(markers),
+        "source": "legacy_text_classifier",
+        "markers": markers,
+        "reasons": [marker["message"] for marker in markers],
+    }
+
+
+def handoff_block_reasons(text: str) -> list[str]:
+    return [marker["message"] for marker in handoff_block_markers(text)]
 
 
 def handoff_change_trace(text: str) -> dict[str, list[str]]:

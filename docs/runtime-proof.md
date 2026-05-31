@@ -147,7 +147,10 @@ runner는 이 결과를 gate 판정에 씁니다.
 - 확인 명령
 - 필수 산출물
 - 구현 산출물
-- handoff blocked/partial 상태
+- handoff blocked/partial/skipped/workaround 상태. runner는 handoff 본문을
+  `handoff_state`로 분류하고, 같은 구조화 marker를 evidence, gate,
+  repair packet에 남긴다. 이 값은 완료 proof가 아니라 실패 진단용
+  negative evidence다.
 - handoff 변경 추적(`## Change Trace`)
 - 수정 범위
 - quality check

@@ -4675,6 +4675,21 @@ class RunCodexRuntimeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             root, task_path = self.make_task(tmp)
+            handoff_state = {
+                "status": "incomplete",
+                "blocking": True,
+                "source": "legacy_text_classifier",
+                "path": "context-pack/handoffs/phase0.md",
+                "markers": [
+                    {
+                        "kind": "blocked",
+                        "rule_id": "explicit_status_field",
+                        "matched_text": "Status: blocked",
+                        "message": "handoff reports blocked status: Status: blocked",
+                    }
+                ],
+                "reasons": ["handoff reports blocked status: Status: blocked"],
+            }
             gate = RUN_PHASES.build_gate(
                 root,
                 task_path,
@@ -4684,12 +4699,87 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 [{"command": "true", "exit_code": 0}],
                 [],
                 [],
-                ["handoff matched blocked/partial marker: Status: blocked"],
+                ["handoff reports blocked status: Status: blocked"],
                 [],
+                handoff_state=handoff_state,
             )
 
             self.assertEqual(gate["status"], "failed")
             self.assertIn("Handoff reports blocked, partial, skipped, or workaround status.", gate["blocking_reasons"])
+            handoff_check = next(item for item in gate["checks"] if item["name"] == "handoff_status")
+            self.assertEqual(handoff_check["handoff_state"], handoff_state)
+            self.assertEqual(handoff_check["handoff_state"]["markers"][0]["kind"], "blocked")
+
+    def test_build_evidence_can_record_handoff_state_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            state = {
+                "status": "incomplete",
+                "blocking": True,
+                "source": "legacy_text_classifier",
+                "path": "context-pack/handoffs/phase0.md",
+                "markers": [{"kind": "skipped", "matched_text": "Status: skipped"}],
+                "reasons": ["handoff reports skipped status: Status: skipped"],
+            }
+
+            evidence = RUN_PHASES.build_evidence(
+                root,
+                0,
+                1,
+                [],
+                [{"command": "true", "exit_code": 0}],
+                [],
+                [],
+                task_path,
+                {},
+                state,
+            )
+
+            self.assertEqual(evidence["handoff_state"], state)
+
+    def test_repair_packet_includes_handoff_state_from_failed_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            state = {
+                "status": "incomplete",
+                "blocking": True,
+                "source": "legacy_text_classifier",
+                "path": "context-pack/handoffs/phase0.md",
+                "markers": [{"kind": "workaround", "matched_text": "workaround"}],
+                "reasons": ["handoff reports workaround status: workaround"],
+            }
+            gate = RUN_PHASES.build_gate(
+                root,
+                task_path,
+                0,
+                {"scope": {"allowed_paths": ["src/**"]}, "dependency_policy": {"new_dependencies": "allowed"}},
+                [],
+                [{"command": "true", "exit_code": 0}],
+                [],
+                [],
+                state["reasons"],
+                [],
+                handoff_state=state,
+            )
+
+            packet = RUN_PHASES.build_repair_packet(
+                task_path,
+                0,
+                {"phase": 0, "name": "demo", "status": "running", "attempts": 1},
+                1,
+                "gate",
+                "Phase gate failed.",
+                retryable=True,
+                contract=None,
+                gate=gate,
+            )
+            markdown = RUN_PHASES.repair_packet_markdown(packet)
+
+            self.assertEqual(packet["handoff_state"], state)
+            self.assertIn("## Handoff State", markdown)
+            self.assertIn("workaround", markdown)
 
     def test_resume_repair_resets_from_earliest_repair_packet_without_deleting_packet(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
