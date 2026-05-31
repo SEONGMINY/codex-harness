@@ -136,6 +136,12 @@ runner는 이 결과를 gate 판정에 씁니다.
 - 명령 실행 결과
 - 필수 산출물 존재 여부
 - 구현 산출물(`required_repo_outputs`) 존재 여부
+- handoff 본문에서 관찰한 `handoff_state`
+
+완료된 phase를 검증할 때 verifier는 `evidence.handoff_state`를 그대로
+믿지 않습니다. `phase<N>-handoff-attempt<M>.md`를 다시 읽어
+`handoff_state`를 재계산한 뒤, evidence의 값이 그 결과와 의미적으로
+일치하는지 확인합니다.
 
 ## gate
 
@@ -156,6 +162,12 @@ runner는 이 결과를 gate 판정에 씁니다.
 - quality check
 
 하나라도 실패하면 gate는 failed입니다.
+
+완료된 attempt의 canonical handoff proof는
+`phase<N>-handoff-attempt<M>.md`입니다. verifier는 이 snapshot에서
+`handoff_state`를 재계산하고, `gate.checks[name=handoff_status]`가 정확히
+하나 존재하며 그 상태와 일치하는지 확인합니다. phase-scoped handoff alias는
+사람이 읽는 최신 view일 뿐 completed attempt의 completion proof로 쓰지 않습니다.
 
 ## quality
 

@@ -1392,6 +1392,98 @@ def phase_runtime_artifact_path(
     return runtime_dir / f"phase{phase_number}-{stem}{suffix}"
 
 
+HANDOFF_STATE_SEMANTIC_KEYS = ("status", "blocking", "source", "markers", "reasons")
+
+
+def handoff_state_semantics(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    return {key: value.get(key) for key in HANDOFF_STATE_SEMANTIC_KEYS}
+
+
+def handoff_state_summary(value: object) -> str:
+    semantics = handoff_state_semantics(value)
+    if semantics is None:
+        return repr(value)
+    return json.dumps(semantics, ensure_ascii=False, sort_keys=True)
+
+
+def validate_completed_handoff_proof(
+    root: Path,
+    task_path: Path,
+    phase_number: int,
+    expected_attempt: int | None,
+    evidence: object,
+    gate: object,
+) -> list[str]:
+    if not isinstance(expected_attempt, int) or expected_attempt <= 0:
+        return []
+
+    runtime_dir = task_path / "context-pack" / "runtime"
+    handoff_path = runtime_dir / f"phase{phase_number}-handoff-attempt{expected_attempt}.md"
+    label = f"Phase {phase_number} attempt {expected_attempt} completion proof"
+    errors: list[str] = []
+    if not handoff_path.exists():
+        return [
+            f"{label} missing canonical handoff snapshot: {rel(root, handoff_path)}"
+        ]
+
+    handoff_text, handoff_text_errors = safe_task_text(root, handoff_path, "canonical handoff snapshot")
+    errors.extend(handoff_text_errors)
+    if handoff_text is None:
+        return errors
+
+    recomputed_state = classify_handoff_text(handoff_text)
+    recomputed_summary = handoff_state_summary(recomputed_state)
+    if recomputed_state.get("blocking") is True or recomputed_state.get("status") != "complete":
+        errors.append(
+            f"{label} invalid: canonical handoff snapshot reports blocking or incomplete state. "
+            f"path={rel(root, handoff_path)} state={recomputed_summary}"
+        )
+
+    evidence_state = evidence.get("handoff_state") if isinstance(evidence, dict) else None
+    if not isinstance(evidence_state, dict):
+        errors.append(f"{label} missing evidence.handoff_state.")
+    elif handoff_state_semantics(evidence_state) != handoff_state_semantics(recomputed_state):
+        errors.append(
+            f"{label} mismatch: evidence.handoff_state does not match recomputed canonical "
+            f"handoff_state. path={rel(root, handoff_path)} "
+            f"expected={recomputed_summary} actual={handoff_state_summary(evidence_state)}"
+        )
+
+    gate_checks = gate.get("checks") if isinstance(gate, dict) else None
+    handoff_checks = [
+        check
+        for check in gate_checks or []
+        if isinstance(check, dict) and check.get("name") == "handoff_status"
+    ]
+    if len(handoff_checks) != 1:
+        errors.append(
+            f"{label} must include exactly one gate check named handoff_status; "
+            f"found {len(handoff_checks)}."
+        )
+        return errors
+
+    handoff_check = handoff_checks[0]
+    expected_check_status = "failed" if recomputed_state.get("blocking") else "passed"
+    if handoff_check.get("status") != expected_check_status:
+        errors.append(
+            f"{label} mismatch: gate handoff_status.status must be {expected_check_status!r} "
+            f"for recomputed canonical handoff_state. actual={handoff_check.get('status')!r} "
+            f"path={rel(root, handoff_path)} state={recomputed_summary}"
+        )
+    gate_state = handoff_check.get("handoff_state")
+    if not isinstance(gate_state, dict):
+        errors.append(f"{label} missing gate handoff_status.handoff_state.")
+    elif handoff_state_semantics(gate_state) != handoff_state_semantics(recomputed_state):
+        errors.append(
+            f"{label} mismatch: gate handoff_status.handoff_state does not match recomputed "
+            f"canonical handoff_state. path={rel(root, handoff_path)} "
+            f"expected={recomputed_summary} actual={handoff_state_summary(gate_state)}"
+        )
+    return errors
+
+
 def validate_runtime_contract_bundle(
     root: Path,
     task_path: Path,
@@ -1500,9 +1592,7 @@ def validate_runtime_contract_bundle(
 
     handoff_path = (
         runtime_dir / f"phase{phase_number}-handoff-attempt{expected_attempt}.md"
-        if isinstance(expected_attempt, int)
-        and expected_attempt > 0
-        and (runtime_dir / f"phase{phase_number}-handoff-attempt{expected_attempt}.md").exists()
+        if isinstance(expected_attempt, int) and expected_attempt > 0
         else task_path / "context-pack" / "handoffs" / f"phase{phase_number}.md"
     )
     if handoff_path.exists():
@@ -1544,6 +1634,17 @@ def validate_runtime_contract_bundle(
         errors.append("Gate checks must be a non-empty list.")
     elif any(check.get("status") != "passed" for check in gate_checks if isinstance(check, dict)):
         errors.append("All gate checks must be passed for a completed phase.")
+
+    errors.extend(
+        validate_completed_handoff_proof(
+            root,
+            task_path,
+            phase_number,
+            expected_attempt,
+            evidence,
+            gate,
+        )
+    )
 
     return errors
 
@@ -2554,19 +2655,6 @@ def verify(
             expected_attempt = phase.get("attempts") if isinstance(phase.get("attempts"), int) else None
             handoff_path = handoff_dir / f"phase{phase_number}.md"
             errors.extend(require_file(root, handoff_path, "handoff"))
-            handoff_text, handoff_text_errors = safe_task_text(root, handoff_path, "handoff")
-            errors.extend(handoff_text_errors)
-            if handoff_text is not None:
-                handoff_state = classify_handoff_text(handoff_text)
-                handoff_reasons = [
-                    str(item)
-                    for item in handoff_state.get("reasons", [])
-                    if isinstance(item, str) and item.strip()
-                ]
-                if handoff_reasons:
-                    errors.append(
-                        f"Phase {phase_number} handoff reports blocked/partial status: {handoff_reasons!r}"
-                    )
             errors.extend(
                 validate_phase_result(
                     root,

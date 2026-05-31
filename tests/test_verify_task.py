@@ -445,6 +445,76 @@ class VerifyTaskHelperTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def write_phase_runtime_bundle(
+        self,
+        task_path: Path,
+        *,
+        phase_number: int = 0,
+        attempt: int = 1,
+        handoff_text: str = "Completed.\n",
+        evidence_state: dict[str, object] | None = None,
+        gate_state: dict[str, object] | None = None,
+        gate_checks: list[dict[str, object]] | None = None,
+        gate_check_status: str = "passed",
+    ) -> None:
+        runtime_dir = task_path / "context-pack" / "runtime"
+        handoff_dir = task_path / "context-pack" / "handoffs"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        handoff_dir.mkdir(parents=True, exist_ok=True)
+        contract = {
+            "phase": phase_number,
+            "instructions": [],
+            "scope": {"allowed_paths": []},
+            "acceptance_commands": [],
+            "required_outputs": [],
+            "required_repo_outputs": [],
+        }
+        recomputed_state = VERIFY_TASK.classify_handoff_text(handoff_text)
+        if evidence_state is None:
+            evidence_state = {**recomputed_state, "path": f"context-pack/handoffs/phase{phase_number}.md"}
+        if gate_state is None:
+            gate_state = evidence_state.copy()
+        if gate_checks is None:
+            gate_checks = [
+                {
+                    "name": "handoff_status",
+                    "status": gate_check_status,
+                    "handoff_state": gate_state,
+                }
+            ]
+        files = {
+            f"phase{phase_number}-contract-attempt{attempt}.json": contract,
+            f"phase{phase_number}-evidence-attempt{attempt}.json": {
+                "commands": [],
+                "required_outputs": [],
+                "required_repo_outputs": [],
+                "changed_files": [],
+                "handoff_state": evidence_state,
+            },
+            f"phase{phase_number}-reconciliation-attempt{attempt}.json": {
+                "status": "satisfied",
+                "instruction_results": [],
+            },
+            f"phase{phase_number}-gate-attempt{attempt}.json": {
+                "status": "passed",
+                "checks": gate_checks,
+            },
+            f"phase{phase_number}-quality-attempt{attempt}.json": {
+                "status": "passed",
+                "checks": [],
+            },
+        }
+        for filename, value in files.items():
+            (runtime_dir / filename).write_text(json.dumps(value) + "\n", encoding="utf-8")
+        (runtime_dir / f"phase{phase_number}-handoff-attempt{attempt}.md").write_text(
+            handoff_text,
+            encoding="utf-8",
+        )
+        (handoff_dir / f"phase{phase_number}.md").write_text("Completed alias.\n", encoding="utf-8")
+
+    def validate_phase_runtime_bundle(self, root: Path, task_path: Path) -> list[str]:
+        return VERIFY_TASK.validate_runtime_contract_bundle(root, task_path, 0, [], [], [], expected_attempt=1)
+
     def test_mermaid_validation_accepts_allowed_diagram_types(self) -> None:
         text = """# Implementation Design Review
 
@@ -501,6 +571,96 @@ classDiagram
             errors = VERIFY_TASK.validate_evaluation_final(root, path)
 
             self.assertTrue(any("required_followups" in error for error in errors), errors)
+
+    def test_runtime_bundle_accepts_consistent_completed_handoff_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_phase_runtime_bundle(task_path)
+
+            self.assertEqual(self.validate_phase_runtime_bundle(root, task_path), [])
+
+    def test_runtime_bundle_rejects_blocking_canonical_handoff_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            stale_complete = VERIFY_TASK.classify_handoff_text("Completed.\n")
+            self.write_phase_runtime_bundle(
+                task_path,
+                handoff_text="Status: partial\n\nSome required proof is missing.\n",
+                evidence_state=stale_complete,
+                gate_state=stale_complete,
+            )
+
+            errors = self.validate_phase_runtime_bundle(root, task_path)
+
+            self.assertTrue(any("canonical handoff snapshot reports blocking" in error for error in errors), errors)
+            self.assertTrue(any("evidence.handoff_state does not match" in error for error in errors), errors)
+            self.assertTrue(
+                any("gate handoff_status.handoff_state does not match" in error for error in errors),
+                errors,
+            )
+
+    def test_runtime_bundle_rejects_missing_completed_handoff_evidence_state(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_phase_runtime_bundle(task_path)
+            evidence_path = task_path / "context-pack" / "runtime" / "phase0-evidence-attempt1.json"
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence.pop("handoff_state")
+            evidence_path.write_text(json.dumps(evidence) + "\n", encoding="utf-8")
+
+            errors = self.validate_phase_runtime_bundle(root, task_path)
+
+            self.assertTrue(any("missing evidence.handoff_state" in error for error in errors), errors)
+
+    def test_runtime_bundle_rejects_missing_handoff_status_gate_check(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_phase_runtime_bundle(task_path, gate_checks=[])
+
+            errors = self.validate_phase_runtime_bundle(root, task_path)
+
+            self.assertTrue(any("exactly one gate check named handoff_status" in error for error in errors), errors)
+
+    def test_runtime_bundle_rejects_duplicate_handoff_status_gate_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            state = VERIFY_TASK.classify_handoff_text("Completed.\n")
+            self.write_phase_runtime_bundle(
+                task_path,
+                gate_checks=[
+                    {"name": "handoff_status", "status": "passed", "handoff_state": state},
+                    {"name": "handoff_status", "status": "passed", "handoff_state": state},
+                ],
+            )
+
+            errors = self.validate_phase_runtime_bundle(root, task_path)
+
+            self.assertTrue(any("found 2" in error for error in errors), errors)
+
+    def test_runtime_bundle_rejects_gate_handoff_status_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_phase_runtime_bundle(task_path, gate_check_status="failed")
+
+            errors = self.validate_phase_runtime_bundle(root, task_path)
+
+            self.assertTrue(any("gate handoff_status.status must be 'passed'" in error for error in errors), errors)
+
+    def test_runtime_bundle_uses_snapshot_not_mutable_handoff_alias_for_completion_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_phase_runtime_bundle(task_path, handoff_text="Completed.\n")
+            alias = task_path / "context-pack" / "handoffs" / "phase0.md"
+            alias.write_text("Status: blocked\n\nAlias changed after attempt.\n", encoding="utf-8")
+
+            self.assertEqual(self.validate_phase_runtime_bundle(root, task_path), [])
 
     def test_evaluation_command_results_accepts_policy_lineage_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
