@@ -1,0 +1,49 @@
+{
+  "source": {
+    "type": "actual_session_failure",
+    "session_id": "019e63ab-b0c8-7a60-aff3-2b0053e1fdef",
+    "session_line": 25,
+    "artifact_path": "tasks/3-notification-foundation/context-pack/handoffs/phase0.md",
+    "observed_text": "Completed manually after `run-phases.py` did not produce required phase outputs.",
+    "observed_failure": "Notification foundation phase 0 handoff was manually marked completed after run-phases.py did not produce required phase outputs, so verifier must reject the missing canonical attempt-scoped handoff snapshot.",
+    "failure_characteristic": "completed text without canonical attempt-scoped handoff snapshot"
+  },
+  "phase": 0,
+  "attempt": 1,
+  "runtime": {
+    "handoff_alias_text": "# Phase 0 Handoff\n\n## Status\n\nCompleted manually after `run-phases.py` did not produce required phase outputs.\n",
+    "handoff_snapshot": {
+      "exists": false
+    },
+    "evidence_handoff_state": {
+      "status": "complete",
+      "blocking": false,
+      "source": "legacy_text_classifier",
+      "markers": [],
+      "reasons": [],
+      "path": "context-pack/handoffs/phase0.md"
+    },
+    "gate_checks": [
+      {
+        "name": "handoff_status",
+        "status": "passed",
+        "handoff_state": {
+          "status": "complete",
+          "blocking": false,
+          "source": "legacy_text_classifier",
+          "markers": [],
+          "reasons": [],
+          "path": "context-pack/handoffs/phase0.md"
+        }
+      }
+    ]
+  },
+  "expected": {
+    "errors_contain": [
+      "missing canonical handoff snapshot"
+    ],
+    "failure_kinds": [
+      "missing_handoff_snapshot"
+    ]
+  }
+}

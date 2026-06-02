@@ -1408,6 +1408,184 @@ def handoff_state_summary(value: object) -> str:
     return json.dumps(semantics, ensure_ascii=False, sort_keys=True)
 
 
+def completed_handoff_proof_analysis(
+    root: Path,
+    task_path: Path,
+    phase_number: int,
+    expected_attempt: int | None,
+    evidence: object,
+    gate: object,
+) -> dict[str, Any]:
+    label = f"Phase {phase_number} attempt {expected_attempt} completion proof"
+    runtime_dir = task_path / "context-pack" / "runtime"
+    handoff_path = (
+        runtime_dir / f"phase{phase_number}-handoff-attempt{expected_attempt}.md"
+        if isinstance(expected_attempt, int) and expected_attempt > 0
+        else runtime_dir / f"phase{phase_number}-handoff-attempt.md"
+    )
+    diagnostic: dict[str, Any] = {
+        "phase": phase_number,
+        "attempt": expected_attempt,
+        "source_of_truth": {
+            "handoff_snapshot": rel(root, handoff_path),
+            "exists": handoff_path.exists(),
+        },
+        "evidence": {
+            "handoff_state_present": isinstance(evidence, dict)
+            and isinstance(evidence.get("handoff_state"), dict),
+        },
+        "gate": {
+            "checks": [
+                {"name": check.get("name"), "status": check.get("status")}
+                for check in (gate.get("checks") if isinstance(gate, dict) else []) or []
+                if isinstance(check, dict)
+            ],
+        },
+        "completion_proof": [],
+        "diagnostic_only": [
+            {
+                "name": "handoff_state",
+                "reason": "negative evidence only; non-blocking text is not sufficient completion proof",
+            }
+        ],
+        "consistency": {
+            "handoff_snapshot": "missing" if not handoff_path.exists() else "pending",
+            "handoff_snapshot_vs_evidence": "not_evaluated",
+            "handoff_snapshot_vs_gate": "not_evaluated",
+        },
+        "failures": [],
+    }
+
+    def add_failure(kind: str, message: str) -> None:
+        diagnostic["failures"].append(
+            {
+                "kind": kind,
+                "message": message,
+                "phase": phase_number,
+                "attempt": expected_attempt,
+                "source_artifact": rel(root, handoff_path),
+            }
+        )
+
+    if not isinstance(expected_attempt, int) or expected_attempt <= 0:
+        diagnostic["consistency"]["handoff_snapshot"] = "not_evaluated"
+        add_failure("missing_attempt", f"{label} missing positive attempt number.")
+        return diagnostic
+
+    if not handoff_path.exists():
+        diagnostic["consistency"]["handoff_snapshot"] = "missing"
+        add_failure(
+            "missing_handoff_snapshot",
+            f"{label} missing canonical handoff snapshot: {rel(root, handoff_path)}",
+        )
+        return diagnostic
+
+    handoff_text, handoff_text_errors = safe_task_text(root, handoff_path, "canonical handoff snapshot")
+    for error in handoff_text_errors:
+        add_failure("read_handoff_snapshot", error)
+    if handoff_text is None:
+        diagnostic["consistency"]["handoff_snapshot"] = "failed"
+        return diagnostic
+
+    recomputed_state = classify_handoff_text(handoff_text)
+    recomputed_summary = handoff_state_summary(recomputed_state)
+    diagnostic["consistency"]["handoff_snapshot"] = "readable"
+    diagnostic["source_of_truth"]["handoff_state"] = handoff_state_semantics(recomputed_state)
+    diagnostic["completion_proof"].append(
+        {
+            "name": "canonical_handoff_snapshot_non_blocking",
+            "artifact": rel(root, handoff_path),
+            "status": "failed" if recomputed_state.get("blocking") else "passed",
+        }
+    )
+    if recomputed_state.get("blocking") is True or recomputed_state.get("status") != "complete":
+        add_failure(
+            "blocking_handoff_snapshot",
+            (
+                f"{label} invalid: canonical handoff snapshot reports blocking or incomplete state. "
+                f"path={rel(root, handoff_path)} state={recomputed_summary}"
+            ),
+        )
+
+    evidence_state = evidence.get("handoff_state") if isinstance(evidence, dict) else None
+    diagnostic["evidence"]["handoff_state"] = handoff_state_semantics(evidence_state)
+    if not isinstance(evidence_state, dict):
+        add_failure("missing_evidence_handoff_state", f"{label} missing evidence.handoff_state.")
+    elif handoff_state_semantics(evidence_state) != handoff_state_semantics(recomputed_state):
+        add_failure(
+            "evidence_handoff_state_mismatch",
+            (
+                f"{label} mismatch: evidence.handoff_state does not match recomputed canonical "
+                f"handoff_state. path={rel(root, handoff_path)} "
+                f"expected={recomputed_summary} actual={handoff_state_summary(evidence_state)}"
+            ),
+        )
+    diagnostic["consistency"]["handoff_snapshot_vs_evidence"] = (
+        "passed"
+        if isinstance(evidence_state, dict)
+        and handoff_state_semantics(evidence_state) == handoff_state_semantics(recomputed_state)
+        else "failed"
+    )
+
+    gate_checks = gate.get("checks") if isinstance(gate, dict) else None
+    handoff_checks = [
+        check
+        for check in gate_checks or []
+        if isinstance(check, dict) and check.get("name") == "handoff_status"
+    ]
+    diagnostic["gate"]["handoff_status_check_count"] = len(handoff_checks)
+    if len(handoff_checks) != 1:
+        diagnostic["consistency"]["handoff_snapshot_vs_gate"] = "failed"
+        add_failure(
+            "handoff_status_check_count",
+            (
+                f"{label} must include exactly one gate check named handoff_status; "
+                f"found {len(handoff_checks)}."
+            ),
+        )
+        return diagnostic
+
+    handoff_check = handoff_checks[0]
+    expected_check_status = "failed" if recomputed_state.get("blocking") else "passed"
+    diagnostic["gate"]["handoff_status"] = {
+        "status": handoff_check.get("status"),
+        "expected_status": expected_check_status,
+        "handoff_state": handoff_state_semantics(handoff_check.get("handoff_state")),
+    }
+    if handoff_check.get("status") != expected_check_status:
+        add_failure(
+            "gate_handoff_status_mismatch",
+            (
+                f"{label} mismatch: gate handoff_status.status must be {expected_check_status!r} "
+                f"for recomputed canonical handoff_state. actual={handoff_check.get('status')!r} "
+                f"path={rel(root, handoff_path)} state={recomputed_summary}"
+            ),
+        )
+    gate_state = handoff_check.get("handoff_state")
+    if not isinstance(gate_state, dict):
+        add_failure(
+            "missing_gate_handoff_state",
+            f"{label} missing gate handoff_status.handoff_state.",
+        )
+    elif handoff_state_semantics(gate_state) != handoff_state_semantics(recomputed_state):
+        add_failure(
+            "gate_handoff_state_mismatch",
+            (
+                f"{label} mismatch: gate handoff_status.handoff_state does not match recomputed "
+                f"canonical handoff_state. path={rel(root, handoff_path)} "
+                f"expected={recomputed_summary} actual={handoff_state_summary(gate_state)}"
+            ),
+        )
+    diagnostic["consistency"]["handoff_snapshot_vs_gate"] = (
+        "passed"
+        if isinstance(gate_state, dict)
+        and handoff_state_semantics(gate_state) == handoff_state_semantics(recomputed_state)
+        and handoff_check.get("status") == expected_check_status
+        else "failed"
+    )
+    return diagnostic
+
+
 def validate_completed_handoff_proof(
     root: Path,
     task_path: Path,
@@ -1416,72 +1594,18 @@ def validate_completed_handoff_proof(
     evidence: object,
     gate: object,
 ) -> list[str]:
-    if not isinstance(expected_attempt, int) or expected_attempt <= 0:
-        return []
-
-    runtime_dir = task_path / "context-pack" / "runtime"
-    handoff_path = runtime_dir / f"phase{phase_number}-handoff-attempt{expected_attempt}.md"
-    label = f"Phase {phase_number} attempt {expected_attempt} completion proof"
-    errors: list[str] = []
-    if not handoff_path.exists():
-        return [
-            f"{label} missing canonical handoff snapshot: {rel(root, handoff_path)}"
-        ]
-
-    handoff_text, handoff_text_errors = safe_task_text(root, handoff_path, "canonical handoff snapshot")
-    errors.extend(handoff_text_errors)
-    if handoff_text is None:
-        return errors
-
-    recomputed_state = classify_handoff_text(handoff_text)
-    recomputed_summary = handoff_state_summary(recomputed_state)
-    if recomputed_state.get("blocking") is True or recomputed_state.get("status") != "complete":
-        errors.append(
-            f"{label} invalid: canonical handoff snapshot reports blocking or incomplete state. "
-            f"path={rel(root, handoff_path)} state={recomputed_summary}"
-        )
-
-    evidence_state = evidence.get("handoff_state") if isinstance(evidence, dict) else None
-    if not isinstance(evidence_state, dict):
-        errors.append(f"{label} missing evidence.handoff_state.")
-    elif handoff_state_semantics(evidence_state) != handoff_state_semantics(recomputed_state):
-        errors.append(
-            f"{label} mismatch: evidence.handoff_state does not match recomputed canonical "
-            f"handoff_state. path={rel(root, handoff_path)} "
-            f"expected={recomputed_summary} actual={handoff_state_summary(evidence_state)}"
-        )
-
-    gate_checks = gate.get("checks") if isinstance(gate, dict) else None
-    handoff_checks = [
-        check
-        for check in gate_checks or []
-        if isinstance(check, dict) and check.get("name") == "handoff_status"
+    return [
+        str(item.get("message"))
+        for item in completed_handoff_proof_analysis(
+            root,
+            task_path,
+            phase_number,
+            expected_attempt,
+            evidence,
+            gate,
+        ).get("failures", [])
+        if isinstance(item, dict) and isinstance(item.get("message"), str)
     ]
-    if len(handoff_checks) != 1:
-        errors.append(
-            f"{label} must include exactly one gate check named handoff_status; "
-            f"found {len(handoff_checks)}."
-        )
-        return errors
-
-    handoff_check = handoff_checks[0]
-    expected_check_status = "failed" if recomputed_state.get("blocking") else "passed"
-    if handoff_check.get("status") != expected_check_status:
-        errors.append(
-            f"{label} mismatch: gate handoff_status.status must be {expected_check_status!r} "
-            f"for recomputed canonical handoff_state. actual={handoff_check.get('status')!r} "
-            f"path={rel(root, handoff_path)} state={recomputed_summary}"
-        )
-    gate_state = handoff_check.get("handoff_state")
-    if not isinstance(gate_state, dict):
-        errors.append(f"{label} missing gate handoff_status.handoff_state.")
-    elif handoff_state_semantics(gate_state) != handoff_state_semantics(recomputed_state):
-        errors.append(
-            f"{label} mismatch: gate handoff_status.handoff_state does not match recomputed "
-            f"canonical handoff_state. path={rel(root, handoff_path)} "
-            f"expected={recomputed_summary} actual={handoff_state_summary(gate_state)}"
-        )
-    return errors
 
 
 def validate_runtime_contract_bundle(
@@ -2825,6 +2949,126 @@ def verify(
     return errors
 
 
+def _read_json_if_available(path: Path) -> object | None:
+    try:
+        return read_json(path)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def build_completion_diagnostics(
+    root: Path,
+    task_path: Path,
+    verification_errors: list[str],
+) -> dict[str, Any]:
+    task_index = _read_json_if_available(task_path / "index.json")
+    phases = task_index.get("phases") if isinstance(task_index, dict) else []
+    diagnostics: dict[str, Any] = {
+        "schema_version": 1,
+        "task": task_path.name,
+        "status": "failed" if verification_errors else "passed",
+        "verification_errors": verification_errors,
+        "phases": [],
+    }
+    if not isinstance(phases, list):
+        diagnostics["failures"] = ["task index phases must be a list"]
+        return diagnostics
+
+    runtime_dir = task_path / "context-pack" / "runtime"
+    for phase in phases:
+        if not isinstance(phase, dict) or phase.get("status") != "completed":
+            continue
+        phase_number = phase.get("phase")
+        if not isinstance(phase_number, int):
+            continue
+        expected_attempt = phase.get("attempts") if isinstance(phase.get("attempts"), int) else None
+        evidence = _read_json_if_available(
+            phase_runtime_artifact_path(task_path, phase_number, "evidence", ".json", expected_attempt)
+        )
+        gate = _read_json_if_available(
+            phase_runtime_artifact_path(task_path, phase_number, "gate", ".json", expected_attempt)
+        )
+        result = _read_json_if_available(
+            runtime_dir / f"phase{phase_number}-result-attempt{expected_attempt}.json"
+            if isinstance(expected_attempt, int) and expected_attempt > 0
+            else runtime_dir / f"phase{phase_number}-result.json"
+        )
+        phase_diagnostic = {
+            "phase": phase_number,
+            "attempt": expected_attempt,
+            "result": {
+                "path": rel(
+                    root,
+                    runtime_dir / f"phase{phase_number}-result-attempt{expected_attempt}.json"
+                    if isinstance(expected_attempt, int) and expected_attempt > 0
+                    else runtime_dir / f"phase{phase_number}-result.json",
+                ),
+                "status": result.get("status") if isinstance(result, dict) else None,
+                "codex_exit_code": result.get("codex_exit_code") if isinstance(result, dict) else None,
+            },
+        }
+        if evidence is None or gate is None:
+            phase_diagnostic["completion_proof"] = []
+            phase_diagnostic["diagnostic_only"] = []
+            phase_diagnostic["consistency"] = {
+                "runtime_bundle": "failed",
+                "handoff_snapshot": "not_evaluated",
+                "handoff_snapshot_vs_evidence": "not_evaluated",
+                "handoff_snapshot_vs_gate": "not_evaluated",
+            }
+            phase_diagnostic["failures"] = [
+                {
+                    "kind": "missing_runtime_bundle",
+                    "message": (
+                        f"Phase {phase_number} attempt {expected_attempt} completion proof "
+                        "cannot read evidence or gate artifact."
+                    ),
+                    "phase": phase_number,
+                    "attempt": expected_attempt,
+                }
+            ]
+        else:
+            phase_diagnostic.update(
+                completed_handoff_proof_analysis(
+                    root,
+                    task_path,
+                    phase_number,
+                    expected_attempt,
+                    evidence,
+                    gate,
+                )
+            )
+        result_claims_completed = (
+            isinstance(result, dict)
+            and result.get("status") == "completed"
+            and result.get("codex_exit_code") == 0
+        )
+        phase_failures = phase_diagnostic.get("failures")
+        if isinstance(phase_failures, list):
+            phase_diagnostic.setdefault("consistency", {})
+            phase_diagnostic["consistency"]["result_vs_handoff_snapshot"] = (
+                "failed" if result_claims_completed and phase_failures else "passed"
+                if result_claims_completed
+                else "not_evaluated"
+            )
+        diagnostics["phases"].append(phase_diagnostic)
+    return diagnostics
+
+
+def write_completion_diagnostics(
+    root: Path,
+    task_path: Path,
+    verification_errors: list[str],
+    output_path: Path,
+) -> None:
+    diagnostics = build_completion_diagnostics(root, task_path, verification_errors)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(diagnostics, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("task", help="Task directory name or path.")
@@ -2832,6 +3076,13 @@ def main() -> int:
     parser.add_argument("--require-evaluation", action="store_true")
     parser.add_argument("--require-design-approval", action="store_true")
     parser.add_argument("--strict-current-harness", action="store_true")
+    parser.add_argument(
+        "--diagnostics-out",
+        help=(
+            "Write completion proof diagnostics JSON to this path. "
+            "Relative paths are resolved from --root."
+        ),
+    )
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
@@ -2843,6 +3094,11 @@ def main() -> int:
         args.require_design_approval,
         args.strict_current_harness,
     )
+    if args.diagnostics_out:
+        output_path = Path(args.diagnostics_out)
+        if not output_path.is_absolute():
+            output_path = root / output_path
+        write_completion_diagnostics(root, task_path, errors, output_path)
     if errors:
         print("Task verification failed:", file=sys.stderr)
         for error in errors:

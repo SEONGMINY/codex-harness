@@ -1,0 +1,55 @@
+{
+  "source": {
+    "type": "derived_risk_regression",
+    "session_id": "019e7d78-ea01-7c41-99ed-07586f56127b",
+    "session_line": 19470,
+    "derived_from": "Kent Beck harness reliability review test strategy",
+    "observed_failure": "Review discussion identified stale evidence/gate as a false-green risk when the canonical handoff snapshot reports partial work.",
+    "failure_characteristic": "attempt snapshot is partial, but evidence and gate still record complete"
+  },
+  "phase": 0,
+  "attempt": 1,
+  "runtime": {
+    "handoff_alias_text": "# Phase 0 Handoff\n\nStatus: completed\n",
+    "handoff_snapshot": {
+      "exists": true,
+      "text": "# Phase 0 Handoff\n\nStatus: partial\n\nRequired runtime proof was not produced.\n"
+    },
+    "evidence_handoff_state": {
+      "status": "complete",
+      "blocking": false,
+      "source": "legacy_text_classifier",
+      "markers": [],
+      "reasons": [],
+      "path": "context-pack/handoffs/phase0.md"
+    },
+    "gate_checks": [
+      {
+        "name": "handoff_status",
+        "status": "passed",
+        "handoff_state": {
+          "status": "complete",
+          "blocking": false,
+          "source": "legacy_text_classifier",
+          "markers": [],
+          "reasons": [],
+          "path": "context-pack/handoffs/phase0.md"
+        }
+      }
+    ]
+  },
+  "expected": {
+    "errors_contain": [
+      "canonical handoff snapshot reports blocking",
+      "evidence.handoff_state does not match",
+      "gate handoff_status.status must be 'failed'",
+      "gate handoff_status.handoff_state does not match"
+    ],
+    "failure_kinds": [
+      "blocking_handoff_snapshot",
+      "evidence_handoff_state_mismatch",
+      "gate_handoff_status_mismatch",
+      "gate_handoff_state_mismatch"
+    ]
+  }
+}

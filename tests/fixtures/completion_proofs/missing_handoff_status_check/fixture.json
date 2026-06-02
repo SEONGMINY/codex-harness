@@ -1,0 +1,41 @@
+{
+  "source": {
+    "type": "derived_risk_regression",
+    "session_id": "019e7d78-ea01-7c41-99ed-07586f56127b",
+    "session_line": 19470,
+    "derived_from": "Kent Beck harness reliability review test strategy",
+    "observed_failure": "Review discussion identified gate JSON without an authoritative handoff_status check as a false-green risk.",
+    "failure_characteristic": "snapshot and evidence are complete, but gate has no handoff_status ownership check"
+  },
+  "phase": 0,
+  "attempt": 1,
+  "runtime": {
+    "handoff_alias_text": "# Phase 0 Handoff\n\nStatus: completed\n",
+    "handoff_snapshot": {
+      "exists": true,
+      "text": "# Phase 0 Handoff\n\nStatus: completed\n"
+    },
+    "evidence_handoff_state": {
+      "status": "complete",
+      "blocking": false,
+      "source": "legacy_text_classifier",
+      "markers": [],
+      "reasons": [],
+      "path": "context-pack/handoffs/phase0.md"
+    },
+    "gate_checks": [
+      {
+        "name": "acceptance_commands",
+        "status": "passed"
+      }
+    ]
+  },
+  "expected": {
+    "errors_contain": [
+      "exactly one gate check named handoff_status"
+    ],
+    "failure_kinds": [
+      "handoff_status_check_count"
+    ]
+  }
+}

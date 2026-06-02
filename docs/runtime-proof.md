@@ -96,6 +96,58 @@ relationship-graph-warning.json  # 생성 실패 시
 relationship graph는 읽기 전용 보조 출력입니다.
 생성 실패는 초기에는 non-blocking warning이며, 완료 판정은 계속 phase result, gate, evidence, verify 결과를 기준으로 합니다.
 
+Verifier가 completion 판단 근거를 파일로 남겨야 할 때는 다음 옵션을 씁니다.
+
+```bash
+python3 scripts/harness/verify-task.py <task-dir> \
+  --diagnostics-out tasks/<task-dir>/context-pack/runtime/completion-diagnostics.json
+```
+
+`completion-diagnostics.json`은 verifier가 쓰는 source-of-truth artifact,
+evidence/gate/result 요약, completion proof로 인정된 근거, diagnostic 용도로만
+사용된 근거, consistency 결과, 실패한 mismatch kind를 기록합니다. 이 파일은
+판단 근거를 설명하는 진단 artifact이며, 통과 여부 자체는 verifier exit code와
+runtime proof 검증 결과가 결정합니다.
+
+최소 구조:
+
+- `schema_version`: diagnostics schema version. 현재 값은 `1`.
+- `status`: verifier error 존재 여부 기준 `passed` 또는 `failed`.
+- `verification_errors`: verifier가 사용자에게 출력하는 원래 error 목록.
+- `phases[*].source_of_truth`: verifier가 completion source로 사용한 artifact.
+  완료 phase의 handoff source는 `phase<N>-handoff-attempt<M>.md`입니다.
+- `phases[*].evidence`: evidence artifact에서 수집한 handoff 관련 요약.
+- `phases[*].gate`: gate artifact에서 수집한 `handoff_status` check 요약.
+- `phases[*].result`: phase result status와 `codex_exit_code` 요약.
+- `phases[*].completion_proof`: completion proof로 인정하거나 거부한 근거.
+- `phases[*].diagnostic_only`: 진단에는 쓰지만 completion proof로 승격하지 않는 근거.
+- `phases[*].consistency`: source-of-truth, evidence, gate, result 간 일치 여부.
+- `phases[*].failures`: mismatch kind, message, phase, attempt, source artifact.
+
+`consistency`는 실패 종류와 무관하게 다음 키를 유지해야 합니다.
+
+- `handoff_snapshot`
+- `handoff_snapshot_vs_evidence`
+- `handoff_snapshot_vs_gate`
+- `result_vs_handoff_snapshot`
+
+이 키들은 diagnostics를 읽는 쪽이 missing snapshot, missing gate check, stale evidence
+같은 서로 다른 실패를 같은 형태로 비교할 수 있게 하기 위한 안정 필드입니다.
+
+completion proof 회귀 fixture는 `tests/fixtures/completion_proofs/`에 둡니다.
+fixture의 `source.type`은 다음 중 하나입니다.
+
+- `actual_session_failure`: 실제 세션에서 verifier가 통과시켰지만 이후 실패로
+  확인된 사례입니다. `session_id`, `session_line`, `artifact_path`,
+  `observed_text`, `observed_failure`를 기록해야 합니다.
+- `derived_risk_regression`: 실제 실패 분석이나 리뷰에서 도출한 false-green
+  위험 회귀 fixture입니다. 실제 실패 개수에는 넣지 않고, `derived_from`으로
+  어떤 리뷰 또는 분석에서 도출됐는지 기록해야 합니다.
+
+새 verifier rule은 가능한 한 `actual_session_failure` fixture를 먼저 추가한 뒤
+구현합니다. 파생 리스크 fixture는 같은 종류의 실패가 아직 실제 artifact로 확보되지
+않았지만 회귀 방지 가치가 명확할 때만 추가합니다.
+
 ## 프롬프트
 
 `phase<N>-prompt-attempt<M>.md`는 해당 attempt에서 Codex에게 실제로 전달된 프롬프트입니다.
