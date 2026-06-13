@@ -50,6 +50,7 @@ codex-harness는 대화를 실행 상태로 쓰지 않습니다.
 요청
 → task 문서
 → context-pack
+→ docs review status
 → 구현 설계 리뷰
 → phase contract
 → runner proof
@@ -57,6 +58,7 @@ codex-harness는 대화를 실행 상태로 쓰지 않습니다.
 
 `context-pack`은 phase가 읽을 문서와 전달 메모를 모은 폴더입니다.
 `repair packet`은 실패 이유와 다음 시도에서 고칠 내용을 담은 요약입니다.
+`docs-review-status.json`은 task 문서와 정적 컨텍스트가 fresh review를 통과했는지 기록합니다.
 
 각 phase는 새 Codex 세션에서 실행됩니다.
 
@@ -75,6 +77,7 @@ codex-harness는 대화를 실행 상태로 쓰지 않습니다.
 codex-harness는 구현 요청을 다음 구조로 바꿉니다.
 
 - 요구사항과 범위를 정리한 task 문서
+- design approval 전에 문서 모순과 승인 누락을 확인하는 docs review gate
 - 레이어, 객체 의존성, 공개 인터페이스, API/DB/상태 흐름을 담은 구현 설계 리뷰
 - 승인된 설계 리뷰 문서, 정적 evidence bundle, policy pack lineage를 봉인한 design approval
 - 승인된 기술 결정과 미결정 항목을 담은 decision registry
@@ -87,6 +90,21 @@ codex-harness는 구현 요청을 다음 구조로 바꿉니다.
 - runner가 실행한 확인 명령
 - 실행 증거, 판정, 대조 기록, 최종 결과
 - 실패 시 다음 시도에 넘기는 repair packet
+
+## 오픈소스 유지관리 목적
+
+이 프로젝트는 Codex를 쓰는 오픈소스 메인테이너가 긴 작업을 더 안전하게 나누어 실행하도록 돕습니다.
+
+특히 다음 유지관리 작업을 목표로 합니다.
+
+- 큰 기능 요청을 승인 가능한 문서와 phase contract로 나누기
+- PR 리뷰, 릴리스 준비, 문서 정리처럼 기준이 흐려지기 쉬운 작업에 검증 기록 남기기
+- Codex 실행 결과를 주장으로 보지 않고 runtime artifact와 acceptance command로 확인하기
+- 실패 원인을 repair packet과 gate 결과로 남겨 다음 시도에서 같은 실수를 줄이기
+- 보안, 의존성, scope 변경처럼 메인테이너가 직접 판단해야 하는 결정을 구조화하기
+
+API credit을 받는다면 우선순위는 maintainer automation입니다.
+구체적으로는 PR 리뷰 보조, release note 초안 작성, docs review loop 고도화, regression test triage, security-oriented phase 검증에 사용할 계획입니다.
 
 ## 빠른 시작
 
@@ -131,10 +149,15 @@ launcher 상태는 항상 하나입니다.
 
 - `questions_needed`
 - `docs_approval_needed`
+- `docs_blocked`
 - `design_approval_needed`
 - `planned`
 - `generated`
 - `blocked`
+
+`docs_blocked`는 design approval 전에 문서 리뷰가 막힌 상태입니다.
+새 사용자 결정이 필요하거나 최대 review/cleanup 반복 뒤에도 blocker가 남으면 launcher는 design approval 요청을 만들지 않습니다.
+이때 `launcher-result.json`과 `docs-blocked.md`에서 필요한 결정을 확인합니다.
 
 task 경로도 위 두 파일에서 확인합니다.
 경로를 확인한 뒤 검증합니다.
@@ -193,19 +216,23 @@ python3 .codex/harness/scripts/gen-relationship-graph.py <task-dir> --format mer
 → 요구사항 검토
 → 문서 생성 승인
 → 컨텍스트 수집
+→ docs review / cleanup gate
 → 구현 설계 리뷰 승인
 → phase 계획
 → phase 실행
 → 검증
-→ 수리 또는 평가
+→ 평가
 ```
 
 요구사항 확인과 검토는 무엇을 만들지 정합니다.
+docs review gate는 문서가 design approval로 넘어가기 전에 blocker와 미승인 결정을 확인합니다.
 구현 설계 리뷰는 어떻게 나눠 만들지 정합니다.
 design approval은 어떤 설계 문서를 승인했는지 고정합니다.
 phase 계획은 phase contract를 만듭니다.
 phase 실행은 launcher가 runner를 호출한 뒤 새 Codex 세션에서 진행합니다.
 검증과 평가는 runner proof를 봅니다.
+평가가 rejected이면 자동 수리를 시작하지 않습니다.
+명시적인 Main/user decision이 있을 때만 bounded follow-up을 실행합니다.
 
 ## 생성되는 파일
 
@@ -317,6 +344,39 @@ hooks 세부 내용은 [docs/hooks.md](./docs/hooks.md)에 있습니다.
 
 작고 명확한 수정은 일반 Codex가 더 빠를 수 있습니다.
 
+## 개발과 테스트
+
+주요 회귀 테스트는 Python unittest로 실행합니다.
+
+```bash
+python3 -m unittest \
+  tests.test_verify_task \
+  tests.test_run_phases_runtime \
+  tests.test_start \
+  tests.test_phase_plan_review \
+  tests.test_metrics \
+  tests.test_orchestration_protocol
+```
+
+하네스 전체 변경 전에는 적어도 다음 검증을 권장합니다.
+
+```bash
+python3 -m unittest discover tests
+```
+
+## 기여
+
+이슈와 PR은 다음 정보를 포함하면 검토하기 쉽습니다.
+
+- 어떤 Codex 작업 흐름에서 문제가 났는지
+- 관련 task 경로와 phase 번호
+- 실패한 command와 exit code
+- `context-pack/runtime`의 result, gate, repair packet 경로
+- 기대한 동작과 실제 동작
+
+보안이나 민감 정보가 포함된 runtime artifact는 공개 이슈에 그대로 붙이지 마세요.
+토큰, API key, 개인 정보는 제거한 뒤 최소 재현 예시를 남겨 주세요.
+
 ## 문서
 
 - [실행 모델](./docs/model.md)
@@ -342,3 +402,8 @@ hooks 세부 내용은 [docs/hooks.md](./docs/hooks.md)에 있습니다.
 - 상태는 runner만 바꾼다.
 - 주장이 아니라 실행 기록을 검증한다.
 - 평가는 새 컨텍스트에서 한다.
+
+## 라이선스
+
+MIT License입니다.
+자세한 내용은 [LICENSE](./LICENSE)를 보세요.
