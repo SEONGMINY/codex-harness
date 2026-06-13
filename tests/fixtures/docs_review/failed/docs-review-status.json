@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "verdict": "failed",
+  "max_iterations": 3,
+  "iterations_completed": 1,
+  "reviewed_at": "2026-06-02T20:15:50+09:00",
+  "reviewed_files": [
+    {
+      "path": "tasks/demo/docs/prd.md",
+      "sha256": "e3e86a727382de9431ce2d5daff04c2d623e4507bb9bc42256a1743b6698f87b"
+    }
+  ],
+  "findings": [
+    {
+      "id": "DR-RUNTIME-001",
+      "severity": "blocker",
+      "category": "review_process_failure",
+      "evidence_file": "tasks/demo/context-pack/runtime",
+      "evidence_summary": "Reviewer returned invalid JSON.",
+      "auto_fixable": false,
+      "requires_user_decision": false,
+      "status": "open"
+    }
+  ],
+  "resolved_blockers": [],
+  "open_blockers": [
+    {
+      "id": "DR-RUNTIME-001",
+      "severity": "blocker",
+      "category": "review_process_failure",
+      "evidence_file": "tasks/demo/context-pack/runtime",
+      "evidence_summary": "Reviewer returned invalid JSON.",
+      "auto_fixable": false,
+      "requires_user_decision": false,
+      "status": "open"
+    }
+  ],
+  "required_decisions": [],
+  "artifact_refs": []
+}

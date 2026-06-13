@@ -99,6 +99,59 @@ persistent artifact 경로는 gitignore로 제외되면 안 됩니다.
 기존 task 호환을 위해 승인 경로의 bare path도 허용하지만 새 task는 `path:` prefix를 사용해야 합니다.
 외부 URL, 절대 경로, `..`, secret/token/password 같은 민감 참조는 허용하지 않습니다.
 
+## docs review status
+
+문서 작성 완료는 task docs 파일 존재만으로 판단하지 않습니다.
+`tasks/<task-dir>/context-pack/runtime/docs-review-status.json`이 있어야 하고, `verdict`가 `clean`이어야 합니다.
+이 status는 fresh reviewer와 제한된 docs cleanup pass가 끝난 뒤 launcher가 기록하는 runtime artifact입니다.
+
+필수 구조:
+
+```json
+{
+  "schema_version": 1,
+  "verdict": "clean",
+  "max_iterations": 3,
+  "iterations_completed": 2,
+  "reviewed_at": "2026-06-02T20:15:50+09:00",
+  "reviewed_files": [
+    {"path": "tasks/<task-dir>/docs/prd.md", "sha256": "hex"}
+  ],
+  "findings": [],
+  "resolved_blockers": [],
+  "open_blockers": [],
+  "required_decisions": [],
+  "artifact_refs": []
+}
+```
+
+`verdict` 값:
+
+- `clean`: blocker가 없고 `reviewed_files`의 SHA-256이 현재 문서와 일치합니다.
+- `blocked`: 새 사용자 결정이 필요하거나 최대 3회 review/cleanup 뒤에도 blocker가 남았습니다.
+- `failed`: reviewer 또는 docs cleanup 실행 실패, output schema 오류, scope violation처럼 runner 또는 operator 판단이 필요한 실패입니다.
+
+각 finding은 다음 필드를 가져야 합니다.
+
+- `id`
+- `severity`: `blocker` 또는 `warning`
+- `category`
+- `evidence_file`
+- `evidence_summary`
+- `auto_fixable`
+- `requires_user_decision`
+- `status`: `open`, `resolved`, `rejected`
+
+`required_decisions` 항목은 launcher가 `docs_blocked`를 반환할 때 사용자에게 보여줄 결정 후보입니다.
+각 항목은 `id`, `question`, `category`, `evidence_file`, `evidence_summary`, `recommended_direction`, `tradeoffs`, `blocking_stage`를 포함해야 합니다.
+`requires_user_decision: true` blocker와 최대 반복 뒤에도 남은 blocker는 이 구조로 옮겨야 하며, agent가 새 product/API/schema/storage/dependency/UX 결정을 추정해 채우면 안 됩니다.
+`docs_blocked`는 구현 성공 상태가 아니며, design approval 요청을 대신 만들 수 없습니다.
+
+clean verdict 이후 `reviewed_files[*].sha256`이 현재 task docs와 달라지면 drift로 봅니다.
+drift가 있으면 docs complete, design approval, phase contract generation, dry-run, phase execution을 통과시킬 수 없고 fresh review/cleanup loop를 다시 실행해 clean status를 갱신해야 합니다.
+`reviewed_files`는 reviewer 입력이 된 task docs와 `context-pack/static` 검토 대상 파일을 빠짐없이 포함해야 하며, docs review 뒤에 생성되는 design approval seal artifact는 이 hash 범위에서 제외합니다.
+기존 task에 이 status가 없으면 새 gate는 실패합니다. 계속하려면 docs review loop를 실행해 clean status를 만들거나 명시적인 migration 문서와 재승인을 받아야 합니다.
+
 구현 설계 승인 뒤에는 다음 파일이 필요합니다.
 
 ```json

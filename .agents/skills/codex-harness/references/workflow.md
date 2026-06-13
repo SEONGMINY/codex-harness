@@ -13,6 +13,7 @@ Every launcher run must produce exactly one next state:
 
 - `questions_needed`
 - `docs_approval_needed`
+- `docs_blocked`
 - `design_approval_needed`
 - `planned`
 - `generated`
@@ -26,10 +27,11 @@ Every launcher run must produce exactly one next state:
 4. Docs and context-pack creation
 5. Context Gathering
 6. Implementation Design Review
-7. User approval for implementation design
-8. Plan
-9. Generate
-10. Evaluate and Improve Loop
+7. Fresh Docs Review and Cleanup Gate
+8. User approval for implementation design
+9. Plan
+10. Generate
+11. Evaluate
 
 ## Clarify
 
@@ -128,10 +130,18 @@ Do not leave placeholders in mandatory docs or context files before Generate.
 Markdown explains decisions for people.
 JSON enforces decisions for the runner.
 
-After docs and context gathering, stop with `design_approval_needed` unless the launcher run already has design approval.
+After docs, context gathering, and implementation design review, stop with `design_approval_needed` only after the fresh docs review gate is clean, unless the launcher run already has design approval.
 The implementation design review must cover scope, layer plan, object/module dependency direction, public interfaces, API contract, DB/storage schema, state and lifecycle, transaction boundaries, files to add/change, Mermaid diagrams, open decisions, and approval checklist.
 Use Mermaid `flowchart`, `sequenceDiagram`, or `stateDiagram-v2` blocks to show object/module dependency direction and layer dependency direction when implementation introduces a phase, new file, public interface, layer boundary, or state flow.
 Do not create final implementation phase contracts until the whole design review is approved.
+
+Before materializing a `design_approval_needed` approval request, the launcher must run a fresh docs review loop over the task docs and static context.
+The reviewer and limited docs cleanup pass run in separate fresh Codex contexts.
+Only findings that are auto-fixable inside already approved decisions may be cleaned up automatically.
+If the fresh review reaches blocker 0 within the max iteration budget, write `tasks/<task-dir>/context-pack/runtime/docs-review-status.json` with `verdict: clean`, reviewed file hashes, findings, resolved blockers, and artifact refs, then show the design approval request.
+If a blocker requires a new user decision, or blockers remain after the max iteration budget, return `docs_blocked`.
+In `docs_blocked`, include `required_decisions` and do not expose the implementation design review as an approval request.
+If reviewer or cleanup output violates schema or changes files outside scope, record a failed docs review status and stop with a non-success state.
 
 After implementation design approval, write `tasks/<task-dir>/context-pack/static/design-approval.json`:
 
@@ -172,6 +182,7 @@ Outcome: phase contracts that translate approved decisions into executable work.
 
 Plan may run only when:
 
+- `docs-review-status.json` exists, has `verdict: clean`, and its reviewed file hashes match the current task docs.
 - `implementation-design-review.md` or `design-review-waiver.md` exists and is approved.
 - `design-approval.json` records the current approved design document hash.
 - `open-decisions.json` has no blocking open decision.
@@ -290,7 +301,7 @@ If runtime proof is absent, the orchestrator must report failure or blocked stat
 It must not manually mark phases complete.
 Use `.codex/harness/scripts/verify-task.py <task-dir>` as the source of truth for artifact validity.
 
-## Evaluate And Improve Loop
+## Evaluate
 
 Evaluate from fresh context.
 
@@ -305,15 +316,15 @@ Minimum checks:
 Evaluation should not trust a phase agent's success claim.
 
 When Generate completes, run `.codex/harness/scripts/evaluate-task.py` with the task's evaluation commands unless the user explicitly asks not to.
-If evaluation returns `rejected`, enter improvement mode:
+If evaluation returns `rejected`, do not enter an automatic repair loop. Only an explicit Main/user decision may authorize a bounded follow-up:
 
-1. Use the evaluation blockers and required follow-ups as the improvement scope.
+1. Use only accepted evaluation blockers and required follow-ups as the follow-up scope.
 2. Edit only paths already allowed by completed phase contracts.
-3. Write `context-pack/handoffs/evaluation-repair<N>.md`.
+3. Write `context-pack/handoffs/evaluation-repair<N>.md` if a bounded follow-up ran.
 4. Re-run evaluation from fresh context.
-5. Repeat review -> improve -> review until evaluation returns `approved`.
+5. If evaluation is still rejected, stop for Main/user decision or re-plan; do not repeat automatically.
 
-The runner caps the loop with `--review-iterations` to prevent infinite repair cycles. Exhausting the limit is a failed evaluation, not a completed task.
+Iteration budgets prevent runaway repair, but they do not authorize automatic repair. Exhausting a budget is a failed evaluation, not a completed task.
 
 Evaluate completion requires runtime proof:
 
@@ -321,6 +332,6 @@ Evaluate completion requires runtime proof:
 - `context-pack/runtime/evaluation-prompt.md`
 - `context-pack/runtime/evaluation-output.jsonl`
 - `context-pack/runtime/evaluation-last-message.json`
-- `context-pack/runtime/evaluation-repair<N>-result.json`, when an improvement iteration ran
+- `context-pack/runtime/evaluation-repair<N>-result.json`, when an approved bounded follow-up ran
 
 Use `.codex/harness/scripts/verify-task.py <task-dir> --require-evaluation` after evaluation.

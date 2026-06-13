@@ -10,7 +10,7 @@ version: 0.1.5
 
 Use this skill to launch a separate codex-harness orchestration session. The parent chat should stay small: save the user's request, run `.codex/harness/scripts/start.py`, and report the launcher result.
 
-The harness session moves a request to exactly one durable state: `questions_needed`, `docs_approval_needed`, `design_approval_needed`, `planned`, `generated`, or `blocked`.
+The harness session moves a request to exactly one durable state: `questions_needed`, `docs_approval_needed`, `docs_blocked`, `design_approval_needed`, `planned`, `generated`, or `blocked`.
 
 Each state must be backed by files. Do not rely on a long final explanation.
 
@@ -140,11 +140,13 @@ Return their Markdown content in the structured final output's `artifact.content
 6. Ask for approval before writing task docs.
 7. After docs approval, create mandatory docs, context-pack files, and task indexes.
 8. Gather only the code and project context needed for the approved task.
-9. Create `tasks/<task-dir>/docs/implementation-design-review.md`, or `design-review-waiver.md` only for tiny non-implementation work, and stop with `design_approval_needed` until the whole design review is approved.
-10. After design approval, Plan work into self-contained task/phase files.
-11. Validate the task with `.codex/harness/scripts/verify-task.py <task-dir> --require-design-approval`, `.codex/harness/scripts/run-phases.py <task-dir> --dry-run`, and `.codex/harness/scripts/review-phase-plan.py <task-dir>`.
-12. Run phases with `.codex/harness/scripts/run-phases.py`.
-13. Evaluate from fresh context.
+9. Create `tasks/<task-dir>/docs/implementation-design-review.md`, or `design-review-waiver.md` only for tiny non-implementation work.
+10. Before materializing `design_approval_needed`, run a fresh docs review/cleanup loop and require `tasks/<task-dir>/context-pack/runtime/docs-review-status.json` to have `verdict: clean` with matching reviewed file hashes.
+11. If the docs review needs user decisions or exhausts its iteration budget with blockers, stop with `docs_blocked` and include `required_decisions` instead of a design approval request.
+12. After design approval, Plan work into self-contained task/phase files.
+13. Validate the task with `.codex/harness/scripts/verify-task.py <task-dir> --require-design-approval`, `.codex/harness/scripts/run-phases.py <task-dir> --dry-run`, and `.codex/harness/scripts/review-phase-plan.py <task-dir>`.
+14. Run phases with `.codex/harness/scripts/run-phases.py`.
+15. Evaluate from fresh context.
 
 ## Hard Rules
 
@@ -177,7 +179,8 @@ Return their Markdown content in the structured final output's `artifact.content
 
 - Stop with `questions_needed` when a blocking decision is missing.
 - Stop with `docs_approval_needed` when Clarify Review passes and task docs are not approved yet.
-- Stop with `design_approval_needed` after docs approval once task docs, context-pack files, and `implementation-design-review.md` or `design-review-waiver.md` exist but implementation design is not approved yet.
+- Stop with `docs_blocked` after docs approval when fresh docs review finds a blocker requiring a user decision, or when blockers remain after the max review/cleanup iteration budget. Do not present a design approval request in this state; present `required_decisions`.
+- Stop with `design_approval_needed` after docs approval once task docs, context-pack files, and `implementation-design-review.md` or `design-review-waiver.md` exist, and `docs-review-status.json` is clean with matching reviewed file hashes, but implementation design is not approved yet.
 - Stop with `planned` only after task docs, context-pack files, indexes, phase files, `verify-task.py`, `run-phases.py --dry-run`, and `review-phase-plan.py` pass.
 - Stop with `generated` only after requested phases run and runtime proof passes verification.
 - Stop with `blocked` only when the next durable state cannot be produced safely.
@@ -206,7 +209,7 @@ Return their Markdown content in the structured final output's `artifact.content
 - After Plan, stop after verification, dry-run, and phase-plan semantic review pass. The launcher will generate `relationship-graph.json` and `.mmd`, or `relationship-graph-warning.json`, after the isolated session exits.
 - After Generate, verify runtime proof before stopping.
 - After Generate, the runner refreshes `relationship-graph.json` and `.mmd`, or records `relationship-graph-warning.json`, after phase execution.
-- After Generate, run evaluation in a review/improve loop unless the user explicitly asks not to: review from fresh context, improve only rejected blockers and required follow-ups, then review again until evaluation returns approved or the runner's `--review-iterations` budget is exhausted.
+- After Generate, run evaluation unless the user explicitly asks not to. If evaluation rejects, do not start an automatic repair loop; only an explicit Main/user decision may authorize a bounded follow-up, and continued rejection stops for Main/user decision or re-plan.
 
 ## Runtime Proof
 

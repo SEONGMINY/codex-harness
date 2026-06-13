@@ -90,6 +90,77 @@ class PhasePlanReviewTest(unittest.TestCase):
             "required_repo_outputs": [],
         }
 
+    def test_docs_review_gate_obligation_requires_same_phase_acceptance_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_design_contract(
+                task_path,
+                [
+                    {
+                        "id": "OB-001",
+                        "class": "acceptance_validity",
+                        "summary": "Non-clean docs review status blocks verifier and runner gates.",
+                        "closure_command_refs": [
+                            "CMD-VERIFY-DOCS-REVIEW-STATUS",
+                            "CMD-RUNNER-PREFLIGHT-DOCS-REVIEW-STATUS",
+                        ],
+                    }
+                ],
+            )
+            contract = self.base_contract()
+            contract["closes_obligations"] = ["OB-001"]
+            contract["command_expectations"] = [
+                {
+                    "id": "CMD-VERIFY-DOCS-REVIEW-STATUS",
+                    "command": "python3 -m unittest tests.test_verify_task",
+                    "role": "acceptance",
+                }
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            errors = PHASE_PLAN_REVIEW.review_phase_plan(root, task_path)
+            self.assertTrue(
+                any("CMD-RUNNER-PREFLIGHT-DOCS-REVIEW-STATUS" in error for error in errors),
+                errors,
+            )
+
+    def test_docs_review_gate_obligation_accepts_verify_and_runner_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            self.write_design_contract(
+                task_path,
+                [
+                    {
+                        "id": "OB-001",
+                        "class": "acceptance_validity",
+                        "summary": "Non-clean docs review status blocks verifier and runner gates.",
+                        "closure_command_refs": [
+                            "CMD-VERIFY-DOCS-REVIEW-STATUS",
+                            "CMD-RUNNER-PREFLIGHT-DOCS-REVIEW-STATUS",
+                        ],
+                    }
+                ],
+            )
+            contract = self.base_contract()
+            contract["closes_obligations"] = ["OB-001"]
+            contract["command_expectations"] = [
+                {
+                    "id": "CMD-VERIFY-DOCS-REVIEW-STATUS",
+                    "command": "python3 -m unittest tests.test_verify_task",
+                    "role": "acceptance",
+                },
+                {
+                    "id": "CMD-RUNNER-PREFLIGHT-DOCS-REVIEW-STATUS",
+                    "command": "python3 -m unittest tests.test_run_phases_runtime",
+                    "role": "acceptance",
+                },
+            ]
+
+            self.write_phase(task_path, 0, contract)
+
+            self.assertEqual(PHASE_PLAN_REVIEW.review_phase_plan(root, task_path), [])
+
     def test_swift_phase_requires_xcodebuild_in_same_phase(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))

@@ -73,6 +73,10 @@ Every task must include `tasks/<task-dir>/docs/implementation-design-review.md`,
 The design review must include approved sections for scope summary, layer plan, object/module dependency, public interfaces, API contract, DB/storage schema, state and lifecycle, transaction boundaries, files to add/change, Mermaid diagrams, open decisions, and approval checklist.
 The Mermaid diagrams section must contain at least one `mermaid` block using `flowchart`, `sequenceDiagram`, or `stateDiagram-v2` when implementation introduces a phase, new file, public interface, layer boundary, or state flow.
 The `Files To Add/Change` section must list repository paths or path patterns. Implementation phase `scope.allowed_paths` and `required_repo_outputs` must be covered by these approved paths. For glob patterns, the verifier accepts the exact approved glob, or a phase glob under an approved directory prefix such as `scripts/harness/`.
+Before design approval can be requested, `tasks/<task-dir>/context-pack/runtime/docs-review-status.json` must exist with `verdict: clean`.
+The clean status must include current `reviewed_files` hashes for the task docs.
+If those hashes drift after review, docs complete, design approval, Plan, dry-run, and Generate must fail until a fresh review/cleanup loop writes a new clean status.
+If review blockers require user decisions or remain after the max iteration budget, launcher status is `docs_blocked` and its artifacts must include `required_decisions`, not a design approval request.
 The orchestrator must treat status JSON as insufficient proof.
 Completed phases also require matching runtime output and handoff files.
 Completed phases also require a schema-valid `phase<N>-result-attempt<M>.json` and matching `phase<N>-attempt<M>-commit.json`.
@@ -80,6 +84,34 @@ Completed phases also require runner-generated contract, checklist, evidence, re
 The runner generates attempt-scoped runtime proof and updates `phase<N>-result.json` as the latest alias; phase agents do not.
 Failed or retried attempts may also have runner-generated `phase<N>-repair-packet.json` and `.md`.
 Use `.codex/harness/scripts/verify-task.py` to enforce this.
+
+## Docs Review Status
+
+`tasks/<task-dir>/context-pack/runtime/docs-review-status.json` schema:
+
+```json
+{
+  "schema_version": 1,
+  "verdict": "clean",
+  "max_iterations": 3,
+  "iterations_completed": 2,
+  "reviewed_at": "2026-06-02T20:15:50+09:00",
+  "reviewed_files": [
+    {"path": "tasks/<task-dir>/docs/prd.md", "sha256": "hex"}
+  ],
+  "findings": [],
+  "resolved_blockers": [],
+  "open_blockers": [],
+  "required_decisions": [],
+  "artifact_refs": []
+}
+```
+
+Allowed verdicts are `clean`, `blocked`, and `failed`.
+Each finding must include `id`, `severity`, `category`, `evidence_file`, `evidence_summary`, `auto_fixable`, `requires_user_decision`, and `status`.
+`severity` is `blocker` or `warning`; `status` is `open`, `resolved`, or `rejected`.
+Each `required_decisions` entry must include `id`, `question`, `category`, `evidence_file`, `evidence_summary`, `recommended_direction`, `tradeoffs`, and `blocking_stage`.
+`required_decisions` represents decisions the user must make before another docs review can become clean.
 
 ## Phase Files
 

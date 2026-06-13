@@ -60,6 +60,7 @@ from design_contract import (
     validate_review_taxonomy,
     validate_traceability_matrix,
 )
+from docs_review import validate_docs_review_status
 from harness_attestation import harness_attestation, attestation_fingerprint
 from reference_resolver import ReferenceUniverse
 from policy_pack import policy_pack_metadata
@@ -175,7 +176,7 @@ KNOWN_ROOT_PATH_TOKENS = {
 PLACEHOLDER_PATTERNS = [
     re.compile(r"^\s*TODO\b", re.MULTILINE),
     re.compile(r"\[TODO", re.IGNORECASE),
-    re.compile(r"PLACEHOLDER", re.IGNORECASE),
+    re.compile(r"\bPLACEHOLDER\b", re.IGNORECASE),
     re.compile(r"Replace this", re.IGNORECASE),
     re.compile(r"Replace with", re.IGNORECASE),
 ]
@@ -2193,8 +2194,8 @@ def validate_evaluation_repair_result(root: Path, task_path: Path, path: Path, d
         errors.append(f"{label} schema_version must be 1.")
     if data.get("runner_version") != HARNESS_VERSION:
         errors.append(f"{label} runner_version must match current harness version {HARNESS_VERSION}.")
-    if data.get("repair_scope") != "evaluation_improvement":
-        errors.append(f'{label} repair_scope must be "evaluation_improvement".')
+    if data.get("repair_scope") != "approved_bounded_followup":
+        errors.append(f'{label} repair_scope must be "approved_bounded_followup".')
     if data.get("status") != "completed":
         errors.append(f'{label} status must be "completed".')
     if data.get("codex_exit_code") != 0:
@@ -2643,6 +2644,7 @@ def verify(
         errors.extend(require_file(root, static_dir / filename, "static context"))
     if has_unsafe_path_errors(errors):
         return errors
+    errors.extend(validate_docs_review_status(root, task_path))
     if require_design_approval:
         errors.extend(validate_design_approval(root, task_path, strict_current_harness=strict_current_harness))
     design_info = design_doc_info(root, task_path)
@@ -2898,7 +2900,13 @@ def verify(
                 approved_policy_packs=approved_evaluation_policy_packs,
             )
         )
-        errors.extend(require_file(root, runtime_dir / "evaluation-prompt.md", "evaluation prompt"))
+        errors.extend(
+            require_file(
+                root,
+                runtime_dir / "evaluation-prompt.md",
+                "evaluation prompt",
+            )
+        )
         errors.extend(require_file(root, runtime_dir / "evaluation-output.jsonl", "evaluation output", False))
         evaluation_final = runtime_dir / "evaluation-last-message.json"
         errors.extend(require_file(root, evaluation_final, "evaluation final output", False))
@@ -2947,6 +2955,23 @@ def verify(
                 )
 
     return errors
+
+
+def validate_task(
+    root: Path,
+    task_path: Path,
+    *,
+    require_design_approval: bool,
+    require_evaluation: bool,
+    strict_current_harness: bool = False,
+) -> list[str]:
+    return verify(
+        root,
+        task_path,
+        require_evaluation=require_evaluation,
+        require_design_approval=require_design_approval,
+        strict_current_harness=strict_current_harness,
+    )
 
 
 def _read_json_if_available(path: Path) -> object | None:

@@ -5,10 +5,12 @@
   "required": ["status", "task_path", "files_to_read_next", "blockers", "artifact"],
   "properties": {
     "status": {
+      "description": "Launcher-visible state. docs_blocked stops before design approval when docs review requires user decisions or leaves blockers after the review/cleanup budget.",
       "type": "string",
       "enum": [
         "questions_needed",
         "docs_approval_needed",
+        "docs_blocked",
         "design_approval_needed",
         "planned",
         "generated",

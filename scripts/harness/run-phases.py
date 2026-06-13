@@ -8,7 +8,9 @@ import hashlib
 import json
 import os
 import re
+import select
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -17,6 +19,7 @@ from pathlib import Path
 from typing import Iterable
 
 HARNESS_VERSION = "0.1.5"
+_CODEX_THREAD_ONCE_SDK_CALLABLE = None
 
 if __name__ == "__main__":
     try:
@@ -41,6 +44,7 @@ from decision_registry import (
     validate_dependency_changes,
     validate_open_decisions,
 )
+from docs_review import validate_docs_review_status
 from phase_contract import (
     IMPLEMENTATION_QUALITY_DOC,
     checklist_markdown,
@@ -136,7 +140,7 @@ MANDATORY_STATIC_FILES = [
 PLACEHOLDER_PATTERNS = [
     re.compile(r"^\s*TODO\b", re.MULTILINE),
     re.compile(r"\[TODO", re.IGNORECASE),
-    re.compile(r"PLACEHOLDER", re.IGNORECASE),
+    re.compile(r"\bPLACEHOLDER\b", re.IGNORECASE),
     re.compile(r"Replace this", re.IGNORECASE),
     re.compile(r"Replace with", re.IGNORECASE),
 ]
@@ -1058,6 +1062,7 @@ def require_real_file(root: Path, path: Path, label: str) -> list[str]:
 def preflight_phase(root: Path, task_path: Path, task_index: dict, phase: dict) -> list[str]:
     errors = []
     phase_number = int(phase["phase"])
+    errors.extend(validate_docs_review_status(root, task_path))
     decision_registry, registry_errors = load_decision_registry(task_path)
     errors.extend(registry_errors)
     if not registry_errors:
@@ -1418,6 +1423,56 @@ def run_codex(
     yolo: bool,
     idle_timeout: int,
     max_runtime: int = 1800,
+    use_codex_thread_once: bool = False,
+    thread_once_cmd: str | None = None,
+    codex_thread_workspace_write_smoke: bool = False,
+) -> int:
+    if use_codex_thread_once:
+        return run_codex_thread_once(
+            root,
+            task_path,
+            phase_number,
+            prompt,
+            output_path,
+            stderr_path,
+            thread_once_cmd,
+            idle_timeout,
+            max_runtime,
+            workspace_write_smoke=codex_thread_workspace_write_smoke,
+        )
+    if thread_once_cmd is not None and thread_once_cmd.strip():
+        print(
+            "[codex-harness] warning: --codex-thread-once-cmd was provided but "
+            "--experimental-codex-thread-phase-attempt is off; using codex exec.",
+            file=sys.stderr,
+        )
+    return run_codex_exec_phase_attempt(
+        root,
+        task_path,
+        phase_number,
+        prompt,
+        output_path,
+        stderr_path,
+        codex_bin,
+        full_auto,
+        yolo,
+        idle_timeout,
+        max_runtime,
+    )
+
+
+def run_codex_exec_phase_attempt(
+    root: Path,
+    task_path: Path,
+    phase_number: int,
+    prompt: str,
+    output_path: Path,
+    stderr_path: Path,
+    codex_bin: str,
+    full_auto: bool,
+    yolo: bool,
+    idle_timeout: int,
+    max_runtime: int = 1800,
 ) -> int:
     command = [codex_bin, "exec", "--json"]
     add_output_schema(command, SCHEMA_DIR / "phase-final.schema.json")
@@ -1452,6 +1507,423 @@ def run_codex(
         max_runtime=max_runtime,
         activity_paths=phase_activity_paths(root, task_path, phase_number),
     )
+
+
+def run_codex_thread_once(
+    root: Path,
+    task_path: Path,
+    phase_number: int,
+    prompt: str,
+    output_path: Path,
+    stderr_path: Path,
+    thread_once_cmd: str | None,
+    idle_timeout: int,
+    max_runtime: int = 1800,
+    *,
+    workspace_write_smoke: bool = False,
+) -> int:
+    command_text = (thread_once_cmd or os.environ.get("CODEX_HARNESS_CODEX_THREAD_ONCE_CMD") or "").strip()
+    try:
+        atomic_write_text(output_path, "")
+        atomic_write_text(stderr_path, "")
+    except Exception as exc:  # noqa: BLE001 - artifact write failures must fail closed.
+        _write_codex_thread_once_error(
+            stderr_path,
+            "codex thread phase attempt could not initialize runtime artifacts",
+            exc,
+        )
+        return CODEX_CLEANUP_FAILED_EXIT_CODE
+    env = _codex_thread_once_env(root, task_path, phase_number)
+    if not command_text:
+        return _run_codex_thread_once_sdk(
+            root,
+            task_path,
+            phase_number,
+            prompt,
+            output_path,
+            stderr_path,
+            env,
+            idle_timeout,
+            max_runtime,
+            workspace_write_smoke=workspace_write_smoke,
+        )
+    try:
+        command = shlex.split(command_text)
+    except ValueError as exc:
+        _write_codex_thread_once_error(stderr_path, "invalid codex thread command", exc)
+        return CODEX_STARTUP_EXIT_CODE
+    if not command:
+        _write_codex_thread_once_error(stderr_path, "codex thread command is empty")
+        return CODEX_STARTUP_EXIT_CODE
+
+    return run_codex_exec(
+        command,
+        cwd=root,
+        prompt=prompt,
+        output_path=output_path,
+        stderr_path=stderr_path,
+        env=env,
+        idle_timeout=idle_timeout,
+        max_runtime=max_runtime,
+        activity_paths=phase_activity_paths(root, task_path, phase_number),
+    )
+
+
+def _codex_thread_once_env(root: Path, task_path: Path, phase_number: int) -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(
+        {
+            "CODEX_HARNESS_ACTIVE": "1",
+            "CODEX_HARNESS_THREAD_PHASE_ATTEMPT": "1",
+            "CODEX_HARNESS_ROOT": str(root),
+            "CODEX_HARNESS_TASK": task_path.name,
+            "CODEX_HARNESS_TASK_PATH": str(task_path.relative_to(root)),
+            "CODEX_HARNESS_PHASE": str(phase_number),
+            "CODEX_HARNESS_CONTRACT_PATH": str(
+                phase_contract_path(task_path, phase_number).relative_to(root)
+            ),
+        }
+    )
+    return env
+
+
+def _write_codex_thread_once_error(
+    stderr_path: Path,
+    message: str,
+    exc: BaseException | None = None,
+) -> None:
+    detail = f": {redact_text(str(exc))}" if exc is not None else ""
+    try:
+        with open_append_text(stderr_path) as handle:
+            handle.write(f"[codex-harness] {message}{detail}\n")
+    except Exception:
+        pass
+
+
+def _normalize_codex_thread_once_sdk_final(result: object) -> tuple[str | None, str | None]:
+    if not isinstance(result, dict):
+        return None, "SDK thread result is invalid: expected an object."
+    completed = result.get("completed") is True or result.get("status") == "completed"
+    if not completed:
+        return None, "SDK thread result is incomplete."
+    raw_final = result.get("final_response")
+    if not isinstance(raw_final, str):
+        return None, "SDK thread result is invalid: final_response must be a string."
+    final_response = raw_final.strip()
+    if not final_response:
+        return None, "SDK thread result is empty."
+    return final_response, None
+
+
+def _run_codex_thread_once_sdk(
+    root: Path,
+    task_path: Path,
+    phase_number: int,
+    prompt: str,
+    output_path: Path,
+    stderr_path: Path,
+    env: dict[str, str],
+    idle_timeout: int,
+    max_runtime: int = 1800,
+    *,
+    workspace_write_smoke: bool = False,
+) -> int:
+    sdk_callable = _CODEX_THREAD_ONCE_SDK_CALLABLE
+    if sdk_callable is None:
+        _write_codex_thread_once_error(
+            stderr_path,
+            "codex thread phase attempt requested, but no SDK one-shot callable or thread-once command was configured",
+        )
+        return CODEX_STARTUP_EXIT_CODE
+    try:
+        result = sdk_callable(
+            root=root,
+            task_path=task_path,
+            phase_number=phase_number,
+            prompt=prompt,
+            env=env,
+            idle_timeout=idle_timeout,
+            max_runtime=max_runtime,
+            workspace_write_smoke=workspace_write_smoke,
+        )
+    except TimeoutError as exc:
+        _write_codex_thread_once_error(stderr_path, "codex thread SDK one-shot timed out", exc)
+        return CODEX_MAX_RUNTIME_EXIT_CODE
+    except (KeyboardInterrupt, InterruptedError) as exc:
+        _write_codex_thread_once_error(stderr_path, "codex thread SDK one-shot was interrupted", exc)
+        return 130
+    except (ImportError, ModuleNotFoundError) as exc:
+        _write_codex_thread_once_error(stderr_path, "codex thread SDK is unavailable", exc)
+        return CODEX_STARTUP_EXIT_CODE
+    except PermissionError as exc:
+        _write_codex_thread_once_error(stderr_path, "codex thread SDK authentication or session failed", exc)
+        return CODEX_STARTUP_EXIT_CODE
+    except Exception as exc:  # noqa: BLE001 - SDK failures must become nonzero codex_thread failures.
+        _write_codex_thread_once_error(stderr_path, "codex thread SDK one-shot failed", exc)
+        return 1
+    final_response, error = _normalize_codex_thread_once_sdk_final(result)
+    if error is not None or final_response is None:
+        _write_codex_thread_once_error(stderr_path, error or "codex thread SDK one-shot did not return final output")
+        return 1
+    try:
+        atomic_write_text(
+            output_path,
+            json.dumps(
+                {
+                    "event": "thread_final",
+                    "phase": phase_number,
+                    "final_response": final_response,
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+        )
+    except Exception as exc:  # noqa: BLE001 - output artifact writes are part of the success contract.
+        _write_codex_thread_once_error(stderr_path, "codex thread SDK output artifact write failed", exc)
+        return CODEX_CLEANUP_FAILED_EXIT_CODE
+    return 0
+
+
+def _codex_app_server_thread_once(
+    *,
+    root: Path,
+    task_path: Path,
+    phase_number: int,
+    prompt: str,
+    env: dict[str, str],
+    idle_timeout: int,
+    max_runtime: int,
+    workspace_write_smoke: bool = False,
+) -> dict[str, object]:
+    del task_path, phase_number
+    codex_bin = shutil.which("codex", path=env.get("PATH"))
+    if codex_bin is None:
+        raise ImportError("codex CLI is not available")
+    process = subprocess.Popen(
+        [codex_bin, "app-server", "--listen", "stdio://"],
+        cwd=root,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    stderr_chunks: list[str] = []
+    try:
+        if process.stdin is None or process.stdout is None or process.stderr is None:
+            raise RuntimeError("codex app-server pipes are unavailable")
+        deadline = time.monotonic() + max_runtime
+        idle_deadline = time.monotonic() + idle_timeout
+        stdout_buffer = b""
+        stderr_buffer = b""
+        pending_messages: list[dict[str, object]] = []
+        request_id = 0
+
+        def send_request(method: str, params: object) -> int:
+            nonlocal request_id
+            request_id += 1
+            payload = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }
+            process.stdin.write(json.dumps(payload).encode("utf-8") + b"\n")
+            process.stdin.flush()
+            return request_id
+
+        def fail_for_error(message: dict[str, object]) -> None:
+            raw_error = message.get("error")
+            if isinstance(raw_error, dict):
+                text = str(raw_error.get("message") or raw_error)
+            else:
+                text = str(raw_error)
+            lowered = text.lower()
+            if "auth" in lowered or "login" in lowered or "session" in lowered or "permission" in lowered:
+                raise PermissionError(text)
+            raise RuntimeError(text)
+
+        def next_message() -> dict[str, object]:
+            nonlocal stdout_buffer, stderr_buffer, idle_deadline
+            if pending_messages:
+                return pending_messages.pop(0)
+            while True:
+                now = time.monotonic()
+                if now >= deadline:
+                    raise TimeoutError("codex app-server one-shot exceeded max runtime")
+                if now >= idle_deadline:
+                    raise TimeoutError("codex app-server one-shot exceeded idle timeout")
+                if process.poll() is not None:
+                    raise RuntimeError("codex app-server exited before final response")
+                wait_for = max(0.0, min(deadline - now, idle_deadline - now, 0.25))
+                readable, _, _ = select.select([process.stdout, process.stderr], [], [], wait_for)
+                if not readable:
+                    continue
+                for stream in readable:
+                    chunk = os.read(stream.fileno(), 4096)
+                    if not chunk:
+                        continue
+                    idle_deadline = time.monotonic() + idle_timeout
+                    if stream is process.stderr:
+                        stderr_buffer += chunk
+                        while b"\n" in stderr_buffer:
+                            raw_line, stderr_buffer = stderr_buffer.split(b"\n", 1)
+                            line = raw_line.decode("utf-8", "replace").strip()
+                            if line:
+                                stderr_chunks.append(line)
+                                del stderr_chunks[:-20]
+                        continue
+                    stdout_buffer += chunk
+                    while b"\n" in stdout_buffer:
+                        raw_line, stdout_buffer = stdout_buffer.split(b"\n", 1)
+                        line = raw_line.decode("utf-8", "replace").strip()
+                        if not line:
+                            continue
+                        try:
+                            message = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            raise RuntimeError(f"codex app-server emitted invalid JSON: {line[:200]}") from exc
+                        if not isinstance(message, dict):
+                            raise RuntimeError("codex app-server emitted a non-object message")
+                        pending_messages.append(message)
+                    if pending_messages:
+                        return pending_messages.pop(0)
+
+        def wait_for_response(expected_id: int) -> dict[str, object]:
+            while True:
+                message = next_message()
+                if message.get("method") == "error":
+                    fail_for_error({"error": message.get("params")})
+                if message.get("id") != expected_id:
+                    continue
+                if "error" in message:
+                    fail_for_error(message)
+                result = message.get("result")
+                if not isinstance(result, dict):
+                    raise RuntimeError("codex app-server response result is invalid")
+                return result
+
+        init_id = send_request(
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": "codex-harness",
+                    "title": "Codex Harness",
+                    "version": HARNESS_VERSION,
+                },
+                "capabilities": None,
+            },
+        )
+        wait_for_response(init_id)
+        thread_id_request = send_request(
+            "thread/start",
+            {
+                "cwd": str(root),
+                "approvalPolicy": "never",
+                "sandbox": "workspace-write" if workspace_write_smoke else "read-only",
+                "ephemeral": True,
+                "experimentalRawEvents": False,
+                "persistExtendedHistory": False,
+            },
+        )
+        thread_result = wait_for_response(thread_id_request)
+        raw_thread = thread_result.get("thread")
+        thread_id = raw_thread.get("id") if isinstance(raw_thread, dict) else None
+        if not isinstance(thread_id, str) or not thread_id:
+            raise RuntimeError("codex app-server did not return a thread id")
+        turn_id_request = send_request(
+            "turn/start",
+            {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": prompt, "text_elements": []}],
+                "cwd": str(root),
+                "approvalPolicy": "never",
+            },
+        )
+        turn_id: str | None = None
+        final_text_from_item: str | None = None
+        delta_text: list[str] = []
+        turn_start_seen = False
+        while True:
+            message = next_message()
+            if message.get("method") == "error":
+                fail_for_error({"error": message.get("params")})
+            if message.get("id") == turn_id_request:
+                if "error" in message:
+                    fail_for_error(message)
+                result = message.get("result")
+                if isinstance(result, dict):
+                    raw_turn = result.get("turn")
+                    if isinstance(raw_turn, dict) and isinstance(raw_turn.get("id"), str):
+                        turn_id = raw_turn["id"]
+                continue
+            method = message.get("method")
+            params = message.get("params")
+            if not isinstance(params, dict) or params.get("threadId") != thread_id:
+                continue
+            if method == "turn/started":
+                raw_turn = params.get("turn")
+                if isinstance(raw_turn, dict) and isinstance(raw_turn.get("id"), str):
+                    turn_id = raw_turn["id"]
+                    turn_start_seen = True
+                continue
+            if method == "item/agentMessage/delta":
+                if turn_id is None or params.get("turnId") == turn_id:
+                    raw_delta = params.get("delta")
+                    if isinstance(raw_delta, str):
+                        delta_text.append(raw_delta)
+                continue
+            if method == "item/completed":
+                if turn_id is not None and params.get("turnId") != turn_id:
+                    continue
+                item = params.get("item")
+                if isinstance(item, dict) and item.get("type") == "agentMessage":
+                    raw_text = item.get("text")
+                    if isinstance(raw_text, str):
+                        final_text_from_item = raw_text
+                continue
+            if method == "turn/completed":
+                raw_turn = params.get("turn")
+                if not isinstance(raw_turn, dict):
+                    raise RuntimeError("codex app-server turn completion is invalid")
+                if turn_id is not None and raw_turn.get("id") != turn_id:
+                    continue
+                status = raw_turn.get("status")
+                if status == "interrupted":
+                    raise InterruptedError("codex app-server turn was interrupted")
+                if status != "completed":
+                    raw_error = raw_turn.get("error")
+                    if isinstance(raw_error, dict):
+                        message_text = str(raw_error.get("message") or raw_error)
+                    else:
+                        message_text = f"codex app-server turn ended with status {status!r}"
+                    raise RuntimeError(message_text)
+                items = raw_turn.get("items")
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict) and item.get("type") == "agentMessage":
+                            raw_text = item.get("text")
+                            if isinstance(raw_text, str):
+                                final_text_from_item = raw_text
+                final_response = (final_text_from_item or "".join(delta_text)).strip()
+                if not turn_start_seen and turn_id is None:
+                    raise RuntimeError("codex app-server completed without a started turn")
+                return {"status": "completed", "final_response": final_response}
+    except RuntimeError as exc:
+        if stderr_chunks:
+            detail = "\n".join(stderr_chunks[-5:])
+            raise RuntimeError(f"{exc}; app-server stderr: {detail}") from exc
+        raise
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+
+
+_CODEX_THREAD_ONCE_SDK_CALLABLE = _codex_app_server_thread_once
 
 
 def verify_required_outputs(task_path: Path, required_outputs: list[str]) -> list[str]:
@@ -3828,7 +4300,7 @@ def run_evaluation(root: Path, task_path: Path, args: argparse.Namespace) -> int
     return result.returncode
 
 
-def evaluation_improvement_allowed_paths(task_path: Path) -> list[str]:
+def evaluation_followup_contract_paths(task_path: Path) -> list[str]:
     allowed: list[str] = []
     index_path = task_path / "index.json"
     if not index_path.exists():
@@ -3860,12 +4332,52 @@ def evaluation_repair_result_path(task_path: Path, iteration: int) -> Path:
     return task_path / "context-pack" / "runtime" / f"evaluation-repair{iteration}-result.json"
 
 
-def build_evaluation_improvement_prompt(
+def _non_empty_arg_string(args: argparse.Namespace, name: str) -> str:
+    value = getattr(args, name, "")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _non_empty_arg_string_list(args: argparse.Namespace, name: str) -> list[str]:
+    value = getattr(args, name, [])
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def approved_bounded_followup_contract_errors(
+    args: argparse.Namespace,
+    contract_paths: list[str],
+) -> list[str]:
+    errors: list[str] = []
+    if not _non_empty_arg_string(args, "explicit_approval_marker"):
+        errors.append("explicit_approval_marker is required.")
+    if not _non_empty_arg_string(args, "approved_finding"):
+        errors.append("approved_finding is required.")
+    if not _non_empty_arg_string(args, "fixed_scope"):
+        errors.append("fixed_scope is required.")
+    allowed_files = _non_empty_arg_string_list(args, "followup_allowed_files")
+    if not allowed_files:
+        errors.append("followup_allowed_files must list at least one file or path pattern.")
+    else:
+        violations = scope_violations(allowed_files, contract_paths, [])
+        if violations:
+            errors.append("followup_allowed_files must stay within completed phase allowed paths: " + ", ".join(violations))
+    if not _non_empty_arg_string_list(args, "forbidden_changes"):
+        errors.append("forbidden_changes must list at least one forbidden change.")
+    if not _non_empty_arg_string(args, "verifier_command"):
+        errors.append("verifier_command is required.")
+    if getattr(args, "main_review_required", None) is not True:
+        errors.append("main_review_required must be true.")
+    return errors
+
+
+def build_approved_bounded_followup_prompt(
     root: Path,
     task_path: Path,
     iteration: int,
     evaluation_final: dict[str, object],
     allowed_paths: list[str],
+    args: argparse.Namespace,
 ) -> str:
     task_index = read_json(task_path / "index.json")
     context = collect_files(root, [*common_doc_files(root, task_index), *task_doc_files(root, task_index)], 100_000)
@@ -3882,18 +4394,24 @@ def build_evaluation_improvement_prompt(
     )
     handoff_rel = evaluation_repair_handoff_path(task_path, iteration).relative_to(root)
     allowed_lines = "\n".join(f"- `{path}`" for path in allowed_paths) or "- none"
+    forbidden_lines = "\n".join(f"- {item}" for item in _non_empty_arg_string_list(args, "forbidden_changes"))
     evaluation_json = json.dumps(evaluation_final, ensure_ascii=False, indent=2)
-    return f"""# Harness Evaluation Improvement Contract
+    return f"""# Approved Bounded Follow-up Contract
 
-You are improving a generated task after fresh evaluation rejected it.
+You are applying one explicitly approved evaluation follow-up. Evaluation rejection did not authorize this work.
+Main/user approval is the authority for this bounded follow-up.
 
 Task: `{task_index.get("task")}`
 Iteration: `{iteration}`
+Approval marker: `{_non_empty_arg_string(args, "explicit_approval_marker")}`
+Approved finding: `{_non_empty_arg_string(args, "approved_finding")}`
+Fixed scope: `{_non_empty_arg_string(args, "fixed_scope")}`
+Verifier command: `{_non_empty_arg_string(args, "verifier_command")}`
 
 ## Goal
 
-Fix only the concrete blockers and required follow-ups from the latest evaluation result, then stop.
-This is the "review mode -> improve -> review mode" loop. The runner will re-run evaluation after your improvement.
+Apply only the approved finding inside the fixed scope, then stop.
+Do not perform adjacent cleanup or infer additional work from the evaluation result.
 
 ## Evaluation Result
 
@@ -3905,6 +4423,10 @@ This is the "review mode -> improve -> review mode" loop. The runner will re-run
 
 {allowed_lines}
 
+## Forbidden Changes
+
+{forbidden_lines or "- none"}
+
 ## Hard Invariants
 
 - Edit only files covered by Allowed Paths.
@@ -3914,6 +4436,7 @@ This is the "review mode -> improve -> review mode" loop. The runner will re-run
 - Do not spawn subagents.
 - Write `{handoff_rel}` describing what changed and which evaluation blocker or follow-up it addresses.
 - If the evaluation result is wrong and no code change is needed, write that rationale in the handoff and make no implementation changes.
+- Main review is required after this follow-up; do not claim task completion.
 - Return only the structured final output requested by the active output schema.
 
 # Task Context
@@ -3938,20 +4461,25 @@ This is the "review mode -> improve -> review mode" loop. The runner will re-run
 """
 
 
-def run_evaluation_improvement(
+def run_approved_bounded_followup(
     root: Path,
     task_path: Path,
     args: argparse.Namespace,
     iteration: int,
     evaluation_final: dict[str, object],
 ) -> int:
-    allowed_paths = evaluation_improvement_allowed_paths(task_path)
-    if not allowed_paths:
-        print("Evaluation improvement is blocked: no allowed paths are available.", file=sys.stderr)
+    contract_paths = evaluation_followup_contract_paths(task_path)
+    if not contract_paths:
+        print("Approved bounded follow-up is blocked: no completed phase allowed paths are available.", file=sys.stderr)
         return 1
+    contract_errors = approved_bounded_followup_contract_errors(args, contract_paths)
+    if contract_errors:
+        print("Approved bounded follow-up is blocked: " + "; ".join(contract_errors), file=sys.stderr)
+        return 1
+    allowed_paths = _non_empty_arg_string_list(args, "followup_allowed_files")
 
     runtime_dir = task_path / "context-pack" / "runtime"
-    prompt = build_evaluation_improvement_prompt(root, task_path, iteration, evaluation_final, allowed_paths)
+    prompt = build_approved_bounded_followup_prompt(root, task_path, iteration, evaluation_final, allowed_paths, args)
     prompt_path = runtime_dir / f"evaluation-repair{iteration}-prompt.md"
     output_path = runtime_dir / f"evaluation-repair{iteration}-output.jsonl"
     stderr_path = runtime_dir / f"evaluation-repair{iteration}-stderr.txt"
@@ -3985,7 +4513,7 @@ def run_evaluation_improvement(
     result = {
         "schema_version": 1,
         "runner_version": HARNESS_VERSION,
-        "repair_scope": "evaluation_improvement",
+        "repair_scope": "approved_bounded_followup",
         "iteration": iteration,
         "status": "completed" if returncode == 0 and not violations and handoff_exists else "failed",
         "codex_exit_code": returncode,
@@ -4013,18 +4541,18 @@ def run_evaluation_improvement(
     }
     write_json(evaluation_repair_result_path(task_path, iteration), result)
     if returncode != 0:
-        print(f"Evaluation improvement failed. See {stderr_path}.", file=sys.stderr)
+        print(f"Approved bounded follow-up failed. See {stderr_path}.", file=sys.stderr)
         return returncode
     if violations:
         print(
-            "Evaluation improvement changed files outside allowed paths: "
+            "Approved bounded follow-up changed files outside allowed paths: "
             + ", ".join(violations),
             file=sys.stderr,
         )
         return 1
     if not handoff_exists:
         print(
-            f"Evaluation improvement did not write required handoff: {evaluation_repair_handoff_path(task_path, iteration)}",
+            f"Approved bounded follow-up did not write required handoff: {evaluation_repair_handoff_path(task_path, iteration)}",
             file=sys.stderr,
         )
         return 1
@@ -4032,39 +4560,23 @@ def run_evaluation_improvement(
 
 
 def run_evaluation_review_loop(root: Path, task_path: Path, args: argparse.Namespace) -> int:
-    max_iterations = getattr(args, "review_iterations", 5)
-    for iteration in range(0, max_iterations + 1):
-        append_progress(task_path, f"evaluation review iteration {iteration}: started")
-        eval_returncode = run_evaluation(root, task_path, args)
-        evaluation_final = read_evaluation_final(task_path)
-        if evaluation_final and evaluation_final.get("verdict") == "approved" and eval_returncode == 0:
-            append_progress(task_path, f"evaluation review iteration {iteration}: approved")
-            return 0
-        if evaluation_final and evaluation_final.get("verdict") == "rejected" and iteration < max_iterations:
-            append_progress(task_path, f"evaluation review iteration {iteration}: rejected; improvement started")
-            improvement_returncode = run_evaluation_improvement(
-                root,
-                task_path,
-                args,
-                iteration + 1,
-                evaluation_final,
-            )
-            if improvement_returncode != 0:
-                args.failed = True
-                return improvement_returncode
-            continue
-        if eval_returncode != 0:
-            args.failed = True
-            return eval_returncode
-        if evaluation_final and evaluation_final.get("verdict") == "rejected":
-            print(
-                f"Evaluation still rejected after {max_iterations} improvement iteration(s).",
-                file=sys.stderr,
-            )
-        else:
-            print("Evaluation final output is missing or invalid.", file=sys.stderr)
+    append_progress(task_path, "evaluation review: started")
+    eval_returncode = run_evaluation(root, task_path, args)
+    evaluation_final = read_evaluation_final(task_path)
+    if evaluation_final and evaluation_final.get("verdict") == "approved" and eval_returncode == 0:
+        append_progress(task_path, "evaluation review: approved")
+        return 0
+    if eval_returncode != 0:
         args.failed = True
-        return 1
+        return eval_returncode
+    if evaluation_final and evaluation_final.get("verdict") == "rejected":
+        append_progress(task_path, "evaluation review: rejected; explicit follow-up decision required")
+        print(
+            "Evaluation rejected. No automatic repair was started; Main or the user must decide the next action.",
+            file=sys.stderr,
+        )
+    else:
+        print("Evaluation final output is missing or invalid.", file=sys.stderr)
     args.failed = True
     return 1
 
@@ -4398,6 +4910,9 @@ def execute_phase(
             args.yolo,
             args.codex_idle_timeout,
             getattr(args, "codex_max_runtime", 1800),
+            getattr(args, "experimental_codex_thread_phase_attempt", False),
+            getattr(args, "codex_thread_once_cmd", None),
+            getattr(args, "experimental_codex_thread_workspace_write_smoke", False),
         )
         codex_runtime_allowed_paths = [
             task_relative(output_path, task_path),
@@ -4466,8 +4981,11 @@ def execute_phase(
             args.failed = True
             return False
         if returncode != 0:
-            message = f"codex exec failed with exit code {returncode}. See {stderr_path}."
-            append_progress(task_path, f"phase {phase_number}: attempt {attempt} codex failed")
+            used_codex_thread = getattr(args, "experimental_codex_thread_phase_attempt", False)
+            codex_failure_label = "codex_thread" if used_codex_thread else "codex_exec"
+            codex_failure_text = "codex thread" if used_codex_thread else "codex exec"
+            message = f"{codex_failure_text} failed with exit code {returncode}. See {stderr_path}."
+            append_progress(task_path, f"phase {phase_number}: attempt {attempt} {codex_failure_text} failed")
             try:
                 contract = runtime_phase_contract(task_path, phase_number, attempt)
                 required_outputs = contract_outputs(phase, contract)
@@ -4486,6 +5004,7 @@ def execute_phase(
             )
             retryable = (
                 attempt < max_attempts
+                and not used_codex_thread
                 and not contaminating_changes
                 and returncode not in {CODEX_STARTUP_EXIT_CODE, CODEX_CLEANUP_FAILED_EXIT_CODE}
             )
@@ -4531,7 +5050,7 @@ def execute_phase(
                     phase_number,
                     phase,
                     attempt,
-                    "codex_exec",
+                    codex_failure_label,
                     message,
                     retryable=retryable,
                     contract=contract,
@@ -5046,7 +5565,7 @@ def main() -> int:
         "--review-iterations",
         type=non_negative_int,
         default=5,
-        help="Maximum evaluation improvement iterations when --evaluate returns rejected.",
+        help="Deprecated compatibility option; rejected evaluation no longer starts automatic repair.",
     )
     parser.add_argument("--skip-install", action="store_true", help="Skip package-manager install preflight.")
     parser.add_argument("--install-timeout", type=non_negative_int, default=600)
@@ -5063,6 +5582,27 @@ def main() -> int:
         help="Wait up to this many seconds for another run-phases repo execution to finish.",
     )
     parser.add_argument("--full-auto", action="store_true", help="Pass --full-auto to codex exec.")
+    parser.add_argument(
+        "--experimental-codex-thread-phase-attempt",
+        action="store_true",
+        help="Experimental: run phase attempts through the configured one-shot Codex thread command.",
+    )
+    parser.add_argument(
+        "--experimental-codex-thread-workspace-write-smoke",
+        action="store_true",
+        help=(
+            "Experimental smoke only: use workspace-write for app-server thread phase attempts. "
+            "Requires --experimental-codex-thread-phase-attempt."
+        ),
+    )
+    parser.add_argument(
+        "--codex-thread-once-cmd",
+        default=None,
+        help=(
+            "Command used only with --experimental-codex-thread-phase-attempt. "
+            "The command receives the existing phase prompt on stdin and must write compatible output."
+        ),
+    )
     parser.add_argument("--strict-current-harness", action="store_true", help="Require current harness runtime metadata.")
     parser.add_argument(
         "--doctor-runtime",

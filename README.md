@@ -151,11 +151,25 @@ phase를 실행합니다.
 python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto
 ```
 
+기본 실행 경로는 `codex exec`입니다. Codex app-server thread phase execution은
+아직 experimental입니다. 현재 검증된 범위는 one-shot read-only path와
+`workspace-write` + `approvalPolicy=never` smoke path의 작은 fixture phase입니다.
+Thread completion이나 thread output은 완료 증거가 아니며, phase completion은 계속
+runtime artifact, changed-file evidence, handoff, acceptance command, gate,
+verifier/preflight 결과가 결정합니다. 더 넓은 migration은 별도 design review가 필요합니다.
+
+Thread-backed phase 실패는 두 종류로 나눕니다. Thread invocation 자체가 실패하면
+`failure.type = codex_thread`, `retryable = false`로 fail-closed 처리하며 자동
+fallback/retry/repair를 하지 않습니다. Thread invocation은 성공했지만 gate 또는
+acceptance command가 실패하면 thread transport failure가 아니므로 기존 Harness
+retry policy가 적용됩니다. verifier-triggered repair loop와 thread-owned
+retry/repair는 계속 금지됩니다.
+
 현재 설치된 하네스와 runtime proof가 정확히 일치해야 하는 CI/fresh-run 검증에서는 `--strict-current-harness`를 붙입니다.
 
-평가까지 반복하려면 `--evaluate`를 붙입니다.
-평가가 `rejected`이면 runner가 평가의 blocker와 follow-up만 대상으로 개선 세션을 실행하고 다시 평가합니다.
-이 과정은 평가가 `approved`가 되거나 `--review-iterations` 한도에 도달할 때까지 반복됩니다.
+평가를 실행하려면 `--evaluate`를 붙입니다.
+평가가 `rejected`이면 runner는 rejection을 기록하고 멈춥니다.
+다음 action은 명시적인 Main/user decision이 있을 때만 진행할 수 있습니다.
 
 ```bash
 python3 .codex/harness/scripts/run-phases.py <task-dir> --full-auto --evaluate

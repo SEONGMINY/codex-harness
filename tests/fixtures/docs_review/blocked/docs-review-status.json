@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "verdict": "blocked",
+  "max_iterations": 3,
+  "iterations_completed": 1,
+  "reviewed_at": "2026-06-02T20:15:50+09:00",
+  "reviewed_files": [
+    {
+      "path": "tasks/demo/docs/prd.md",
+      "sha256": "e3e86a727382de9431ce2d5daff04c2d623e4507bb9bc42256a1743b6698f87b"
+    }
+  ],
+  "findings": [
+    {
+      "id": "DR-002",
+      "severity": "blocker",
+      "category": "decision_approval_leakage",
+      "evidence_file": "tasks/demo/docs/prd.md",
+      "evidence_summary": "An implementation decision is missing.",
+      "auto_fixable": false,
+      "requires_user_decision": true,
+      "status": "open"
+    }
+  ],
+  "resolved_blockers": [],
+  "open_blockers": [
+    {
+      "id": "DR-002",
+      "severity": "blocker",
+      "category": "decision_approval_leakage",
+      "evidence_file": "tasks/demo/docs/prd.md",
+      "evidence_summary": "An implementation decision is missing.",
+      "auto_fixable": false,
+      "requires_user_decision": true,
+      "status": "open"
+    }
+  ],
+  "required_decisions": [
+    {
+      "id": "RD-001",
+      "question": "Which approved interface owns the docs review gate?",
+      "category": "module_boundary",
+      "evidence_file": "tasks/demo/docs/prd.md",
+      "evidence_summary": "The docs imply a missing implementation boundary.",
+      "recommended_direction": "Approve a concrete owner before improving docs.",
+      "tradeoffs": [
+        "Without a decision, design approval remains blocked."
+      ],
+      "blocking_stage": "docs_review"
+    },
+    {
+      "id": "DR-002-decision",
+      "question": "What approved decision resolves docs review blocker DR-002?",
+      "category": "decision_approval_leakage",
+      "evidence_file": "tasks/demo/docs/prd.md",
+      "evidence_summary": "An implementation decision is missing.",
+      "recommended_direction": "Provide an explicit approved decision or revise the approved scope; do not let the cleanup pass invent it.",
+      "tradeoffs": [
+        "Keeping the blocker unresolved prevents design approval and phase execution.",
+        "Approving a concrete decision lets the next docs review attempt verify the updated artifact."
+      ],
+      "blocking_stage": "docs_review"
+    }
+  ],
+  "artifact_refs": []
+}

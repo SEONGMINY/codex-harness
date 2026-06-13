@@ -14,6 +14,7 @@ launcher는 매번 하나의 상태만 만듭니다.
 
 - `questions_needed`
 - `docs_approval_needed`
+- `docs_blocked`
 - `design_approval_needed`
 - `planned`
 - `generated`
@@ -58,10 +59,18 @@ codex-harness는 에이전트 사이의 대화를 넘기지 않습니다.
 요청
 → task 문서
 → context-pack
+→ docs review status
 → 구현 설계 리뷰
 → phase contract
 → runner proof
 ```
+
+`docs_blocked`는 문서 초안 review가 clean verdict에 도달하지 못해 design approval 전에 멈추는 상태입니다.
+새 사용자 결정이 필요한 blocker가 있거나 최대 review/cleanup 반복 뒤에도 blocker가 남으면 launcher는 승인 요청을 만들지 않고 `required_decisions`를 보여줘야 합니다.
+이 상태는 일반 구현 실패나 완료 상태가 아니라, 문서를 다시 clean review로 만들기 위한 사용자 결정을 기다리는 stop state입니다.
+
+문서 작성 완료는 `tasks/<task-dir>/context-pack/runtime/docs-review-status.json`의 `verdict`가 `clean`이고, status에 기록된 reviewed file hash가 현재 task docs와 일치할 때만 성립합니다.
+해시가 달라지면 문서가 review 뒤 바뀐 것이므로 docs complete, design approval, phase contract generation, dry-run, phase execution은 다시 review clean 상태가 될 때까지 통과하지 않습니다.
 
 `design_approval_needed`는 문서 생성 승인 뒤, phase 계획 전에 멈추는 상태입니다.
 이 상태에서는 `tasks/<task-dir>/docs/implementation-design-review.md`를 만들고 레이어 구조, 객체/모듈 의존 방향, 공개 인터페이스, API 계약, DB/스토리지 스키마, 상태와 라이프사이클, 트랜잭션 경계를 승인받습니다.

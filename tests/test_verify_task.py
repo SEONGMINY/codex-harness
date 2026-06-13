@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import argparse
 import json
 import subprocess
 import sys
@@ -25,10 +26,79 @@ assert START_SPEC is not None
 HARNESS_START = importlib.util.module_from_spec(START_SPEC)
 assert START_SPEC.loader is not None
 START_SPEC.loader.exec_module(HARNESS_START)
+DOCS_REVIEW_SPEC = importlib.util.spec_from_file_location("docs_review", HARNESS_DIR / "docs_review.py")
+assert DOCS_REVIEW_SPEC is not None
+DOCS_REVIEW = importlib.util.module_from_spec(DOCS_REVIEW_SPEC)
+assert DOCS_REVIEW_SPEC.loader is not None
+DOCS_REVIEW_SPEC.loader.exec_module(DOCS_REVIEW)
 from design_contract import DEFAULT_REVIEW_TAXONOMY_IDS, validate_review_coverage, validate_review_findings  # noqa: E402
 
 
 class VerifyTaskHelperTest(unittest.TestCase):
+    def test_placeholder_detection_matches_placeholder_token_not_explanatory_plural(self) -> None:
+        self.assertTrue(VERIFY_TASK.has_placeholder("Replace PLACEHOLDER before approval."))
+        self.assertFalse(VERIFY_TASK.has_placeholder("Do not leave placeholders in mandatory docs."))
+
+    def write_docs_review_fixture_task(
+        self,
+        root: Path,
+        fixture_name: str,
+        *,
+        prd_text: str = "# PRD\n\nApproved docs.\n",
+    ) -> Path:
+        task_path = root / "tasks" / "demo"
+        (task_path / "docs").mkdir(parents=True)
+        (task_path / "context-pack" / "static").mkdir(parents=True)
+        (task_path / "context-pack" / "runtime").mkdir(parents=True)
+        (task_path / "docs" / "prd.md").write_text(prd_text, encoding="utf-8")
+        (task_path / "context-pack" / "static" / "decisions.md").write_text(
+            "# Decision\n\nApproved static context.\n",
+            encoding="utf-8",
+        )
+        fixture = ROOT / "tests" / "fixtures" / "docs_review" / fixture_name / "docs-review-status.json"
+        (task_path / "context-pack" / "runtime" / "docs-review-status.json").write_text(
+            fixture.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        if fixture_name == "clean":
+            self.write_clean_docs_review_status(root, task_path)
+        return task_path
+
+    def write_clean_docs_review_status(self, root: Path, task_path: Path) -> None:
+        status_path = task_path / "context-pack" / "runtime" / "docs-review-status.json"
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime_dir = task_path / "context-pack" / "runtime"
+        proof_paths = {
+            "docs-review-attempt1-prompt": runtime_dir / "docs-review-attempt1-prompt.md",
+            "docs-review-attempt1-output": runtime_dir / "docs-review-attempt1-output.jsonl",
+            "docs-review-attempt1-last-message": runtime_dir / "docs-review-attempt1-last-message.json",
+            "docs-review-findings-attempt1": runtime_dir / "docs-review-findings-attempt1.json",
+        }
+        for name, path in proof_paths.items():
+            path.write_text(f"{name}\n", encoding="utf-8")
+        status_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "verdict": "clean",
+                    "max_iterations": 3,
+                    "iterations_completed": 1,
+                    "reviewed_at": "2026-06-02T20:15:50+09:00",
+                    "reviewed_files": DOCS_REVIEW.reviewed_file_entries(root, task_path),
+                    "findings": [],
+                    "resolved_blockers": [],
+                    "open_blockers": [],
+                    "required_decisions": [],
+                    "artifact_refs": [
+                        DOCS_REVIEW.artifact_ref(task_path, path, name)
+                        for name, path in proof_paths.items()
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
     def write_minimal_task(self, root: Path, task_path: Path) -> None:
         (root / "docs" / "harness").mkdir(parents=True)
         (root / "docs" / "harness" / "implementation-quality.md").write_text(
@@ -249,6 +319,7 @@ class VerifyTaskHelperTest(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
+        self.write_clean_docs_review_status(root, task_path)
 
     def write_design_approval(self, root: Path, task_path: Path, *, approved_doc_sha256: str | None = None) -> None:
         info = VERIFY_TASK.design_doc_info(root, task_path)
@@ -288,6 +359,7 @@ class VerifyTaskHelperTest(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
+        self.write_clean_docs_review_status(root, task_path)
 
     def write_evaluation_artifacts(self, task_path: Path) -> None:
         runtime_dir = task_path / "context-pack" / "runtime"
@@ -422,7 +494,7 @@ class VerifyTaskHelperTest(unittest.TestCase):
                 {
                     "schema_version": 1,
                     "runner_version": VERIFY_TASK.HARNESS_VERSION,
-                    "repair_scope": "evaluation_improvement",
+                    "repair_scope": "approved_bounded_followup",
                     "iteration": 1,
                     "status": status,
                     "codex_exit_code": codex_exit_code,
@@ -514,6 +586,624 @@ class VerifyTaskHelperTest(unittest.TestCase):
 
     def validate_phase_runtime_bundle(self, root: Path, task_path: Path) -> list[str]:
         return VERIFY_TASK.validate_runtime_contract_bundle(root, task_path, 0, [], [], [], expected_attempt=1)
+
+    def test_docs_review_status_path_uses_runtime_status_file(self) -> None:
+        task_path = Path("tasks/demo")
+        self.assertEqual(
+            DOCS_REVIEW.docs_review_status_path(task_path),
+            Path("tasks/demo/context-pack/runtime/docs-review-status.json"),
+        )
+
+    def test_docs_review_status_accepts_clean_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = self.write_docs_review_fixture_task(root, "clean")
+            self.assertEqual(DOCS_REVIEW.validate_docs_review_status(root, task_path), [])
+
+    def test_docs_review_status_allows_post_review_design_approval_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = self.write_docs_review_fixture_task(root, "clean")
+            (task_path / "context-pack" / "static" / "design-approval.json").write_text(
+                '{"schema_version":3,"approved":true}\n',
+                encoding="utf-8",
+            )
+
+            self.assertEqual(DOCS_REVIEW.validate_docs_review_status(root, task_path), [])
+
+    def test_docs_review_status_still_rejects_unreviewed_static_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = self.write_docs_review_fixture_task(root, "clean")
+            (task_path / "context-pack" / "static" / "new-contract.json").write_text(
+                '{"decision":"unreviewed"}\n',
+                encoding="utf-8",
+            )
+
+            errors = DOCS_REVIEW.validate_docs_review_status(root, task_path)
+
+            self.assertTrue(any("reviewed_files is missing current docs/static files" in error for error in errors), errors)
+
+    def test_docs_review_status_rejects_clean_status_without_review_artifact_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = self.write_docs_review_fixture_task(root, "clean")
+            status_path = task_path / "context-pack" / "runtime" / "docs-review-status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["artifact_refs"] = []
+            status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+
+            errors = DOCS_REVIEW.validate_docs_review_status(root, task_path)
+
+            self.assertTrue(any("must include non-empty artifact_refs" in error for error in errors), errors)
+
+    def test_docs_review_status_rejects_clean_status_missing_final_reviewer_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = self.write_docs_review_fixture_task(root, "clean")
+            status_path = task_path / "context-pack" / "runtime" / "docs-review-status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["artifact_refs"] = [
+                item
+                for item in status["artifact_refs"]
+                if item.get("name") != "docs-review-findings-attempt1"
+            ]
+            status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+
+            errors = DOCS_REVIEW.validate_docs_review_status(root, task_path)
+
+            self.assertTrue(any("missing reviewer proof artifacts" in error for error in errors), errors)
+
+    def test_docs_review_status_rejects_clean_status_with_zero_iterations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = self.write_docs_review_fixture_task(root, "clean")
+            status_path = task_path / "context-pack" / "runtime" / "docs-review-status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["iterations_completed"] = 0
+            status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+
+            errors = DOCS_REVIEW.validate_docs_review_status(root, task_path)
+
+            self.assertTrue(any("completed reviewer attempt between 1 and 3" in error for error in errors), errors)
+
+    def test_docs_review_status_rejects_clean_status_with_non_review_artifact_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = self.write_docs_review_fixture_task(root, "clean")
+            status_path = task_path / "context-pack" / "runtime" / "docs-review-status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            prd_path = task_path / "docs" / "prd.md"
+            status["artifact_refs"] = [
+                {
+                    "name": item["name"],
+                    "path": "docs/prd.md",
+                    "exists": True,
+                    "sha256": DOCS_REVIEW.file_sha256(prd_path),
+                }
+                for item in status["artifact_refs"]
+            ]
+            status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+
+            errors = DOCS_REVIEW.validate_docs_review_status(root, task_path)
+
+            self.assertTrue(
+                any("must point to context-pack/runtime/docs-review-attempt1-prompt.md" in error for error in errors),
+                errors,
+            )
+
+    def test_docs_review_status_rejects_clean_status_with_open_blocker_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = self.write_docs_review_fixture_task(root, "clean")
+            status_path = task_path / "context-pack" / "runtime" / "docs-review-status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["findings"] = [
+                {
+                    "id": "DR-OPEN",
+                    "severity": "blocker",
+                    "category": "self_contradiction",
+                    "evidence_file": "tasks/demo/docs/prd.md",
+                    "evidence_summary": "Open blocker must prevent clean status.",
+                    "auto_fixable": True,
+                    "requires_user_decision": False,
+                    "status": "open",
+                }
+            ]
+            status["open_blockers"] = []
+            status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+
+            errors = DOCS_REVIEW.validate_docs_review_status(root, task_path)
+
+            self.assertTrue(any("open_blockers must match open blocker findings" in error for error in errors), errors)
+            self.assertTrue(any("must not include open blocker findings" in error for error in errors), errors)
+
+    def test_docs_review_status_rejects_missing_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = root / "tasks" / "demo"
+            (task_path / "context-pack" / "runtime").mkdir(parents=True)
+            errors = DOCS_REVIEW.validate_docs_review_status(root, task_path)
+            self.assertTrue(any("Missing docs review status" in error for error in errors), errors)
+
+    def test_docs_review_status_rejects_non_clean_malformed_and_drift_fixtures(self) -> None:
+        expectations = {
+            "blocked": "verdict",
+            "failed": "verdict",
+            "malformed": "missing fields",
+            "hash_drift": "sha256 does not match",
+        }
+        for fixture_name, expected_error in expectations.items():
+            with self.subTest(fixture_name=fixture_name):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    task_path = self.write_docs_review_fixture_task(root, fixture_name)
+                    errors = DOCS_REVIEW.validate_docs_review_status(root, task_path)
+                    self.assertTrue(any(expected_error in error for error in errors), errors)
+
+    def test_docs_review_status_rejects_reviewed_file_outside_docs_or_static_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = self.write_docs_review_fixture_task(root, "clean")
+            status_path = task_path / "context-pack" / "runtime" / "docs-review-status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            proof_path = task_path / "context-pack" / "runtime" / "proof.json"
+            proof_path.write_text("proof\n", encoding="utf-8")
+            status["reviewed_files"][0]["path"] = "tasks/demo/context-pack/runtime/proof.json"
+            status["reviewed_files"][0]["sha256"] = DOCS_REVIEW.file_sha256(proof_path)
+            status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+            errors = DOCS_REVIEW.validate_docs_review_status(root, task_path)
+            self.assertTrue(any("task docs or static context" in error for error in errors), errors)
+
+    def test_docs_blocked_payload_uses_concrete_required_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = self.write_docs_review_fixture_task(root, "blocked")
+            status = json.loads(
+                (task_path / "context-pack" / "runtime" / "docs-review-status.json").read_text(encoding="utf-8")
+            )
+            payload = DOCS_REVIEW.docs_blocked_payload(status)
+            self.assertEqual(payload["status"], "docs_blocked")
+            self.assertEqual([item["id"] for item in payload["required_decisions"]], ["RD-001", "DR-002-decision"])
+
+    def test_docs_blocked_payload_requests_decision_without_filling_it_in(self) -> None:
+        status = {
+            "verdict": "blocked",
+            "open_blockers": [
+                {
+                    "id": "DR-004",
+                    "severity": "blocker",
+                    "category": "decision_approval_leakage",
+                    "evidence_file": "tasks/demo/docs/prd.md",
+                    "evidence_summary": "A new implementation-shaping decision is needed.",
+                    "auto_fixable": False,
+                    "requires_user_decision": True,
+                    "status": "open",
+                }
+            ],
+            "required_decisions": [],
+        }
+        payload = DOCS_REVIEW.docs_blocked_payload(status)
+        self.assertEqual(len(payload["required_decisions"]), 1)
+        self.assertIn("do not let docs cleanup invent it", payload["required_decisions"][0]["recommended_direction"])
+
+    def test_docs_blocked_payload_fills_partial_required_decisions_per_blocker(self) -> None:
+        status = {
+            "verdict": "blocked",
+            "open_blockers": [
+                {
+                    "id": "DR-010",
+                    "severity": "blocker",
+                    "category": "api_contract",
+                    "evidence_file": "tasks/demo/docs/prd.md",
+                    "evidence_summary": "API contract is missing.",
+                    "auto_fixable": False,
+                    "requires_user_decision": True,
+                    "status": "open",
+                    "required_decision": {
+                        "id": "RD-010",
+                        "question": "Which API contract is approved?",
+                        "category": "api_contract",
+                        "evidence_file": "tasks/demo/docs/prd.md",
+                        "evidence_summary": "API contract is missing.",
+                        "recommended_direction": "Approve the API shape before docs cleanup.",
+                        "tradeoffs": ["Docs approval remains blocked until this decision is made."],
+                        "blocking_stage": "docs_review",
+                    },
+                },
+                {
+                    "id": "DR-011",
+                    "severity": "blocker",
+                    "category": "storage_contract",
+                    "evidence_file": "tasks/demo/docs/data-schema.md",
+                    "evidence_summary": "Storage contract is missing.",
+                    "auto_fixable": False,
+                    "requires_user_decision": True,
+                    "status": "open",
+                },
+            ],
+            "required_decisions": [
+                {
+                    "id": "RD-010",
+                    "question": "Which API contract is approved?",
+                    "category": "api_contract",
+                    "evidence_file": "tasks/demo/docs/prd.md",
+                    "evidence_summary": "API contract is missing.",
+                    "recommended_direction": "Approve the API shape before docs cleanup.",
+                    "tradeoffs": ["Docs approval remains blocked until this decision is made."],
+                    "blocking_stage": "docs_review",
+                }
+            ],
+        }
+        payload = DOCS_REVIEW.docs_blocked_payload(status)
+        self.assertEqual([item["id"] for item in payload["required_decisions"]], ["RD-010", "DR-011-decision"])
+
+    def test_docs_review_status_rejects_partial_required_decisions_for_blocked_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = self.write_docs_review_fixture_task(root, "blocked")
+            status_path = task_path / "context-pack" / "runtime" / "docs-review-status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["open_blockers"].append(
+                {
+                    "id": "DR-003",
+                    "severity": "blocker",
+                    "category": "storage_contract",
+                    "evidence_file": "tasks/demo/docs/prd.md",
+                    "evidence_summary": "A storage decision is missing.",
+                    "auto_fixable": False,
+                    "requires_user_decision": True,
+                    "status": "open",
+                }
+            )
+            status["findings"].append(dict(status["open_blockers"][-1]))
+            status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+            errors = DOCS_REVIEW.validate_docs_review_status(root, task_path)
+            self.assertTrue(
+                any("required_decisions must include a concrete decision for every open blocker" in error for error in errors),
+                errors,
+            )
+
+    def test_docs_review_loop_records_review_and_improve_attempt_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = root / "tasks" / "demo"
+            (task_path / "docs").mkdir(parents=True)
+            (task_path / "context-pack" / "static").mkdir(parents=True)
+            (task_path / "docs" / "prd.md").write_text("# PRD\n\nApproved docs.\n", encoding="utf-8")
+            (task_path / "context-pack" / "static" / "decisions.md").write_text(
+                "# Decision\n\nApproved static context.\n",
+                encoding="utf-8",
+            )
+            calls: list[str] = []
+            original_run_codex_exec = DOCS_REVIEW.run_codex_exec
+
+            def fake_run_codex_exec(
+                command: list[str],
+                *,
+                cwd: Path,
+                prompt: str,
+                output_path: Path,
+                stderr_path: Path,
+                env: dict[str, str] | None = None,
+                idle_timeout: int = 300,
+                max_runtime: int = 1800,
+                activity_paths: object = (),
+            ) -> int:
+                del cwd, prompt, env, idle_timeout, max_runtime, activity_paths
+                calls.append(output_path.name)
+                output_path.write_text('{"event":"done"}\n', encoding="utf-8")
+                stderr_path.write_text("", encoding="utf-8")
+                last_message_path = Path(command[command.index("--output-last-message") + 1])
+                if output_path.name == "docs-review-attempt1-output.jsonl":
+                    last_message = {
+                        "verdict": "blocked",
+                        "findings": [
+                            {
+                                "id": "DR-001",
+                                "severity": "blocker",
+                                "category": "self_contradiction",
+                                "evidence_file": "tasks/demo/docs/prd.md",
+                                "evidence_summary": "Approved wording contradicts itself.",
+                                "auto_fixable": True,
+                                "requires_user_decision": False,
+                                "status": "open",
+                            }
+                        ],
+                        "required_decisions": [],
+                    }
+                elif output_path.name == "docs-improve-attempt1-output.jsonl":
+                    last_message = {
+                        "status": "completed",
+                        "resolved_finding_ids": ["DR-001"],
+                        "changed_files": ["tasks/demo/docs/prd.md"],
+                        "notes": "Clarified approved wording.",
+                    }
+                else:
+                    last_message = {
+                        "verdict": "clean",
+                        "findings": [],
+                        "required_decisions": [],
+                    }
+                last_message_path.write_text(json.dumps(last_message) + "\n", encoding="utf-8")
+                return 0
+
+            DOCS_REVIEW.run_codex_exec = fake_run_codex_exec
+            try:
+                status = DOCS_REVIEW.run_docs_review_loop(
+                    root,
+                    task_path,
+                    argparse.Namespace(
+                        codex_bin="codex",
+                        model=None,
+                        reasoning_effort=None,
+                        full_auto=False,
+                        yolo=False,
+                        codex_idle_timeout=0,
+                        codex_max_runtime=0,
+                        docs_review_max_iterations=3,
+                    ),
+                )
+            finally:
+                DOCS_REVIEW.run_codex_exec = original_run_codex_exec
+
+            self.assertEqual(status["verdict"], "clean")
+            self.assertEqual([item["id"] for item in status["resolved_blockers"]], ["DR-001"])
+            self.assertEqual(
+                calls,
+                [
+                    "docs-review-attempt1-output.jsonl",
+                    "docs-improve-attempt1-output.jsonl",
+                    "docs-review-attempt2-output.jsonl",
+                ],
+            )
+            runtime_dir = task_path / "context-pack" / "runtime"
+            for filename in [
+                "docs-review-attempt1-prompt.md",
+                "docs-review-findings-attempt1.json",
+                "docs-improve-attempt1-prompt.md",
+                "docs-improvement-attempt1.json",
+                "docs-review-attempt2-last-message.json",
+                "docs-review-status.json",
+            ]:
+                self.assertTrue((runtime_dir / filename).exists(), filename)
+            self.assertEqual(DOCS_REVIEW.validate_docs_review_status(root, task_path), [])
+
+    def test_docs_review_loop_rejects_hidden_cleanup_out_of_scope_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = root / "tasks" / "demo"
+            (task_path / "docs").mkdir(parents=True)
+            (task_path / "context-pack" / "static").mkdir(parents=True)
+            (task_path / "docs" / "prd.md").write_text("# PRD\n\nApproved docs.\n", encoding="utf-8")
+            (task_path / "context-pack" / "static" / "decisions.md").write_text(
+                "# Decision\n\nApproved static context.\n",
+                encoding="utf-8",
+            )
+            original_run_codex_exec = DOCS_REVIEW.run_codex_exec
+
+            def fake_run_codex_exec(
+                command: list[str],
+                *,
+                cwd: Path,
+                prompt: str,
+                output_path: Path,
+                stderr_path: Path,
+                env: dict[str, str] | None = None,
+                idle_timeout: int = 300,
+                max_runtime: int = 1800,
+                activity_paths: object = (),
+            ) -> int:
+                del prompt, env, idle_timeout, max_runtime, activity_paths
+                output_path.write_text('{"event":"done"}\n', encoding="utf-8")
+                stderr_path.write_text("", encoding="utf-8")
+                last_message_path = Path(command[command.index("--output-last-message") + 1])
+                if output_path.name == "docs-review-attempt1-output.jsonl":
+                    last_message = {
+                        "verdict": "blocked",
+                        "findings": [
+                            {
+                                "id": "DR-001",
+                                "severity": "blocker",
+                                "category": "self_contradiction",
+                                "evidence_file": "tasks/demo/docs/prd.md",
+                                "evidence_summary": "Approved wording contradicts itself.",
+                                "auto_fixable": True,
+                                "requires_user_decision": False,
+                                "status": "open",
+                            }
+                        ],
+                        "required_decisions": [],
+                    }
+                else:
+                    (cwd / "outside.txt").write_text("hidden out-of-scope write\n", encoding="utf-8")
+                    last_message = {
+                        "status": "completed",
+                        "resolved_finding_ids": ["DR-001"],
+                        "changed_files": ["tasks/demo/docs/prd.md"],
+                        "notes": "Claimed only an allowed docs edit.",
+                    }
+                last_message_path.write_text(json.dumps(last_message) + "\n", encoding="utf-8")
+                return 0
+
+            DOCS_REVIEW.run_codex_exec = fake_run_codex_exec
+            try:
+                status = DOCS_REVIEW.run_docs_review_loop(
+                    root,
+                    task_path,
+                    argparse.Namespace(
+                        codex_bin="codex",
+                        model=None,
+                        reasoning_effort=None,
+                        full_auto=False,
+                        yolo=False,
+                        codex_idle_timeout=0,
+                        codex_max_runtime=0,
+                        docs_review_max_iterations=3,
+                    ),
+                )
+            finally:
+                DOCS_REVIEW.run_codex_exec = original_run_codex_exec
+
+            self.assertEqual(status["verdict"], "failed")
+            self.assertTrue(
+                any("outside.txt" in item["evidence_summary"] for item in status["open_blockers"]),
+                status["open_blockers"],
+            )
+            cleanup = json.loads(
+                (task_path / "context-pack" / "runtime" / "docs-improvement-attempt1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertIn("outside.txt", cleanup["actual_changed_files"])
+            self.assertTrue(any("outside.txt" in error for error in cleanup["scope_errors"]))
+
+    def test_docs_review_loop_rejects_reviewer_side_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = root / "tasks" / "demo"
+            (task_path / "docs").mkdir(parents=True)
+            (task_path / "context-pack" / "static").mkdir(parents=True)
+            prd_path = task_path / "docs" / "prd.md"
+            prd_path.write_text("# PRD\n\nApproved docs.\n", encoding="utf-8")
+            (task_path / "context-pack" / "static" / "decisions.md").write_text(
+                "# Decision\n\nApproved static context.\n",
+                encoding="utf-8",
+            )
+            original_run_codex_exec = DOCS_REVIEW.run_codex_exec
+
+            def fake_run_codex_exec(
+                command: list[str],
+                *,
+                cwd: Path,
+                prompt: str,
+                output_path: Path,
+                stderr_path: Path,
+                env: dict[str, str] | None = None,
+                idle_timeout: int = 300,
+                max_runtime: int = 1800,
+                activity_paths: object = (),
+            ) -> int:
+                del cwd, prompt, env, idle_timeout, max_runtime, activity_paths
+                output_path.write_text('{"event":"done"}\n', encoding="utf-8")
+                stderr_path.write_text("", encoding="utf-8")
+                prd_path.write_text("# PRD\n\nReviewer mutated this file.\n", encoding="utf-8")
+                last_message_path = Path(command[command.index("--output-last-message") + 1])
+                last_message_path.write_text(
+                    json.dumps({"verdict": "clean", "findings": [], "required_decisions": []}) + "\n",
+                    encoding="utf-8",
+                )
+                return 0
+
+            DOCS_REVIEW.run_codex_exec = fake_run_codex_exec
+            try:
+                status = DOCS_REVIEW.run_docs_review_loop(
+                    root,
+                    task_path,
+                    argparse.Namespace(
+                        codex_bin="codex",
+                        model=None,
+                        reasoning_effort=None,
+                        full_auto=False,
+                        yolo=False,
+                        codex_idle_timeout=0,
+                        codex_max_runtime=0,
+                        docs_review_max_iterations=3,
+                    ),
+                )
+            finally:
+                DOCS_REVIEW.run_codex_exec = original_run_codex_exec
+
+            self.assertEqual(status["verdict"], "failed")
+            self.assertTrue(
+                any("reviewer attempted file changes" in item["evidence_summary"] for item in status["open_blockers"]),
+                status["open_blockers"],
+            )
+            findings = json.loads(
+                (task_path / "context-pack" / "runtime" / "docs-review-findings-attempt1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertIn("tasks/demo/docs/prd.md", findings["actual_changed_files"])
+            self.assertTrue(any("tasks/demo/docs/prd.md" in error for error in findings["scope_errors"]))
+
+    def test_docs_review_loop_rejects_malformed_reviewer_required_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = root / "tasks" / "demo"
+            (task_path / "docs").mkdir(parents=True)
+            (task_path / "context-pack" / "static").mkdir(parents=True)
+            (task_path / "docs" / "prd.md").write_text("# PRD\n\nApproved docs.\n", encoding="utf-8")
+            (task_path / "context-pack" / "static" / "decisions.md").write_text(
+                "# Decision\n\nApproved static context.\n",
+                encoding="utf-8",
+            )
+            original_run_codex_exec = DOCS_REVIEW.run_codex_exec
+
+            def fake_run_codex_exec(
+                command: list[str],
+                *,
+                cwd: Path,
+                prompt: str,
+                output_path: Path,
+                stderr_path: Path,
+                env: dict[str, str] | None = None,
+                idle_timeout: int = 300,
+                max_runtime: int = 1800,
+                activity_paths: object = (),
+            ) -> int:
+                del cwd, prompt, env, idle_timeout, max_runtime, activity_paths
+                output_path.write_text('{"event":"done"}\n', encoding="utf-8")
+                stderr_path.write_text("", encoding="utf-8")
+                last_message_path = Path(command[command.index("--output-last-message") + 1])
+                last_message_path.write_text(
+                    json.dumps(
+                        {
+                            "verdict": "blocked",
+                            "findings": [
+                                {
+                                    "id": "DR-001",
+                                    "severity": "blocker",
+                                    "category": "decision_approval_leakage",
+                                    "evidence_file": "tasks/demo/docs/prd.md",
+                                    "evidence_summary": "A decision request is malformed.",
+                                    "auto_fixable": False,
+                                    "requires_user_decision": True,
+                                    "status": "open",
+                                }
+                            ],
+                            "required_decisions": [{"id": "RD-001"}],
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return 0
+
+            DOCS_REVIEW.run_codex_exec = fake_run_codex_exec
+            try:
+                status = DOCS_REVIEW.run_docs_review_loop(
+                    root,
+                    task_path,
+                    argparse.Namespace(
+                        codex_bin="codex",
+                        model=None,
+                        reasoning_effort=None,
+                        full_auto=False,
+                        yolo=False,
+                        codex_idle_timeout=0,
+                        codex_max_runtime=0,
+                        docs_review_max_iterations=3,
+                    ),
+                )
+            finally:
+                DOCS_REVIEW.run_codex_exec = original_run_codex_exec
+
+            self.assertEqual(status["verdict"], "failed")
+            self.assertTrue(
+                any("required_decisions schema validation" in item["evidence_summary"] for item in status["open_blockers"]),
+                status["open_blockers"],
+            )
 
     def test_mermaid_validation_accepts_allowed_diagram_types(self) -> None:
         text = """# Implementation Design Review
@@ -1227,6 +1917,41 @@ classDiagram
 
             self.assertEqual(errors, [])
 
+    def test_verify_without_design_approval_requirement_rejects_missing_docs_review_status(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+            (task_path / "context-pack" / "runtime" / "docs-review-status.json").unlink()
+
+            errors = VERIFY_TASK.verify(
+                root,
+                task_path,
+                require_evaluation=False,
+                require_design_approval=False,
+            )
+
+            self.assertTrue(any("Missing docs review status" in error for error in errors), errors)
+
+    def test_verify_without_design_approval_requirement_rejects_non_clean_docs_review_status(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+            status_path = task_path / "context-pack" / "runtime" / "docs-review-status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["verdict"] = "blocked"
+            status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+
+            errors = VERIFY_TASK.verify(
+                root,
+                task_path,
+                require_evaluation=False,
+                require_design_approval=False,
+            )
+
+            self.assertTrue(any('verdict must be "clean"' in error for error in errors), errors)
+
     def test_verify_with_design_approval_requirement_rejects_missing_approval_file(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp) / "repo"
@@ -1243,6 +1968,43 @@ classDiagram
             self.assertEqual(errors, [
                 "Missing design approval: tasks/demo/context-pack/static/design-approval.json"
             ])
+
+    def test_verify_with_design_approval_requirement_rejects_missing_docs_review_status(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+            self.write_design_approval(root, task_path)
+            (task_path / "context-pack" / "runtime" / "docs-review-status.json").unlink()
+
+            errors = VERIFY_TASK.verify(
+                root,
+                task_path,
+                require_evaluation=False,
+                require_design_approval=True,
+            )
+
+            self.assertTrue(any("Missing docs review status" in error for error in errors), errors)
+
+    def test_verify_with_design_approval_requirement_rejects_non_clean_docs_review_status(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp) / "repo"
+            task_path = root / "tasks" / "demo"
+            self.write_minimal_task(root, task_path)
+            self.write_design_approval(root, task_path)
+            status_path = task_path / "context-pack" / "runtime" / "docs-review-status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["verdict"] = "failed"
+            status_path.write_text(json.dumps(status) + "\n", encoding="utf-8")
+
+            errors = VERIFY_TASK.verify(
+                root,
+                task_path,
+                require_evaluation=False,
+                require_design_approval=True,
+            )
+
+            self.assertTrue(any('verdict must be "clean"' in error for error in errors), errors)
 
     def test_verify_with_evaluation_requirement_accepts_valid_evaluation_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -2254,6 +3016,7 @@ classDiagram
                         "dependency_direction": ["architecture:A-001"],
                     }[item["taxonomy_id"]]
             findings_path.write_text(json.dumps(findings) + "\n", encoding="utf-8")
+            self.write_clean_docs_review_status(root, task_path)
 
             errors = VERIFY_TASK.verify(root, task_path, False, False)
 

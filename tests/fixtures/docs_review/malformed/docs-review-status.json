@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "verdict": "clean",
+  "max_iterations": 3,
+  "iterations_completed": 1,
+  "reviewed_at": "2026-06-02T20:15:50+09:00",
+  "reviewed_files": [
+    {
+      "path": "tasks/demo/docs/prd.md",
+      "sha256": "not-a-sha"
+    }
+  ],
+  "findings": [
+    {
+      "id": "DR-003",
+      "severity": "blocker",
+      "category": "self_contradiction"
+    }
+  ],
+  "resolved_blockers": [],
+  "open_blockers": [],
+  "required_decisions": [],
+  "artifact_refs": []
+}

@@ -75,7 +75,7 @@ Required Evaluate proof:
 - `evaluation-prompt.md`
 - `evaluation-output.jsonl`
 - `evaluation-last-message.json`
-- `evaluation-repair<N>-result.json` when review improvement ran
+- `evaluation-repair<N>-result.json` when an approved bounded follow-up ran
 
 Runner-generated `phase<N>-result-attempt<M>.json` schema:
 

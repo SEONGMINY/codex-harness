@@ -63,6 +63,58 @@ phase-scoped alias는 최신 attempt를 보기 위한 편의 파일이며 commit
 운영자는 `run-phases.py <task> --doctor-runtime`으로 상태를 진단하고, 결과가 backfillable일 때만 `--doctor-runtime --backfill-attempt-manifests`를 명시해 valid commit에서 terminal ledger row를 append-only로 보강합니다.
 invalid manifest, stale commit, missing commit, active repair alias, failed/interrupted terminal conflict는 backfill하지 않고 reset/rerun 또는 수동 조사 대상으로 남깁니다.
 
+## 실행 경로 baseline
+
+기본 phase 실행 경로는 계속 `codex exec`입니다.
+
+Codex app-server thread 실행은 현재 experimental 경로입니다. 검증된 thread
+경로는 one-shot 실행이며, read-only path와 workspace-write smoke path가
+작은 fixture phase에서 확인되었습니다. workspace-write smoke path는
+`approvalPolicy=never`를 유지합니다.
+
+지원되는 실행 모드는 다음과 같습니다.
+
+```text
+default:
+codex exec
+
+experimental read-only thread:
+--experimental-codex-thread-phase-attempt
+
+experimental workspace-write smoke:
+--experimental-codex-thread-phase-attempt
+--experimental-codex-thread-workspace-write-smoke
+```
+
+Thread completion은 phase completion이 아닙니다.
+Thread output은 자동으로 truth가 아닙니다.
+완료 여부는 계속 runner-owned artifact, changed-file evidence, handoff, acceptance
+command, gate, verifier/preflight 결과가 결정합니다.
+
+Thread-backed phase 실패는 두 종류로 구분합니다.
+
+Thread invocation 자체가 실패한 경우는 execution surface failure입니다. 예를 들어
+SDK unavailable, auth/session failure, thread start/run failure, timeout,
+interrupted, empty/invalid/partial final response, output artifact write failure가
+여기에 해당합니다. 이 경우 runner는 `failure.type = codex_thread`,
+`retryable = false`로 기록하고 phase result를 만들지 않습니다. 자동 fallback,
+자동 retry, 자동 repair는 없습니다. Main 또는 사용자의 명시적 결정이 필요합니다.
+
+Thread invocation은 성공했지만 이후 Harness gate나 acceptance command가 실패한
+경우는 thread transport failure가 아닙니다. required output missing, required
+repo output missing, handoff failure, acceptance command failure, scope validation
+failure는 작업 결과가 Harness validation을 통과하지 못한 것입니다. 이 경우에는
+기존 Harness retry policy가 적용됩니다. attempt budget exhausted, scope
+contamination, policy상 non-retryable failure는 terminal failure가 될 수 있습니다.
+
+현재 검증 범위는 작은 fixture phase입니다. 더 넓은 phase execution default,
+multi-phase migration, evaluation/verifier/docs-review migration, execution
+abstraction, adapter/registry, thread lifecycle 모델은 일반화되지 않았습니다.
+Thread invocation failure에 대한 automatic fallback/retry/repair는 금지됩니다.
+Post-thread Harness gate/AC failure는 기존 Harness retry policy를 따릅니다.
+Verifier-triggered repair loop와 thread-owned retry/repair는 계속 금지됩니다. 이
+범위로 확장하려면 별도 design review가 필요합니다.
+
 실패하거나 다시 시도하면 다음 파일도 생깁니다.
 
 ```text
@@ -402,7 +454,9 @@ evaluation-stderr.txt
 evaluation-commit.json
 ```
 
-`run-phases.py --evaluate`에서 평가가 `rejected`이면 runner는 `evaluation-repair<N>-*` 실행 기록을 남기고 다시 평가합니다.
+Evaluation rejected does not authorize repair.
+`run-phases.py --evaluate`는 rejection을 기록하고 멈춥니다.
+다음 action은 명시적인 Main/user decision이 있을 때만 진행할 수 있습니다.
 평가가 `approved`가 되기 전까지는 완료로 보지 않습니다.
 
 `evaluation-commit.json`은 평가가 참조한 completed phase attempt commit과 evaluation artifact 묶음을 sha256으로 봉인합니다.

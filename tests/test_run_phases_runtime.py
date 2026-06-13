@@ -32,12 +32,35 @@ assert VERIFY_SPEC is not None
 VERIFY_TASK = importlib.util.module_from_spec(VERIFY_SPEC)
 assert VERIFY_SPEC.loader is not None
 VERIFY_SPEC.loader.exec_module(VERIFY_TASK)
+DOCS_REVIEW_SPEC = importlib.util.spec_from_file_location("docs_review", HARNESS_DIR / "docs_review.py")
+assert DOCS_REVIEW_SPEC is not None
+DOCS_REVIEW = importlib.util.module_from_spec(DOCS_REVIEW_SPEC)
+assert DOCS_REVIEW_SPEC.loader is not None
+DOCS_REVIEW_SPEC.loader.exec_module(DOCS_REVIEW)
 import env_policy  # noqa: E402
 import file_lock  # noqa: E402
 import runtime_integrity  # noqa: E402
 
 
 class RunCodexRuntimeTest(unittest.TestCase):
+    def test_placeholder_detection_matches_placeholder_token_not_explanatory_plural(self) -> None:
+        self.assertTrue(RUN_PHASES.has_placeholder("Replace PLACEHOLDER before running."))
+        self.assertFalse(RUN_PHASES.has_placeholder("Do not leave placeholders in phase files."))
+
+    def test_thread_experiment_does_not_add_execution_surface_framework_terms(self) -> None:
+        text = (HARNESS_DIR / "run-phases.py").read_text(encoding="utf-8")
+        for forbidden in [
+            "CodexExecExecution",
+            "CodexThreadExecution",
+            "ExecutionSurface",
+            "ExecutionResult",
+            "transport registry",
+            "adapter hierarchy",
+            "thread lifecycle",
+        ]:
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, text)
+
     def test_runtime_integrity_report_is_sorted_bounded_and_schema_stable(self) -> None:
         before: dict[str, str] = {}
         after = {f"context-pack/runtime/generated-{index:03}.json": f"file:digest-{index}" for index in range(105)}
@@ -2880,6 +2903,165 @@ class RunCodexRuntimeTest(unittest.TestCase):
         (task_path / "context-pack" / "runtime").mkdir(parents=True)
         return root, task_path
 
+    class FakeAppServerProcess:
+        def __init__(self, messages: list[dict[str, object]], stderr_lines: list[str] | None = None) -> None:
+            stdout_read, stdout_write = os.pipe()
+            with os.fdopen(stdout_write, "wb", closefd=True) as writer:
+                for message in messages:
+                    writer.write(json.dumps(message).encode("utf-8") + b"\n")
+            stderr_read, stderr_write = os.pipe()
+            with os.fdopen(stderr_write, "wb", closefd=True) as writer:
+                for line in stderr_lines or []:
+                    writer.write(line.encode("utf-8") + b"\n")
+            self.stdin = io.BytesIO()
+            self.stdout = os.fdopen(stdout_read, "rb", buffering=0)
+            self.stderr = os.fdopen(stderr_read, "rb", buffering=0)
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            if self.returncode is None:
+                self.returncode = 0
+            self.stdout.close()
+            self.stderr.close()
+            return self.returncode
+
+    def write_docs_review_status(self, root: Path, task_path: Path, *, verdict: str = "clean") -> None:
+        status_path = task_path / "context-pack" / "runtime" / "docs-review-status.json"
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime_dir = task_path / "context-pack" / "runtime"
+        proof_paths = {
+            "docs-review-attempt1-prompt": runtime_dir / "docs-review-attempt1-prompt.md",
+            "docs-review-attempt1-output": runtime_dir / "docs-review-attempt1-output.jsonl",
+            "docs-review-attempt1-last-message": runtime_dir / "docs-review-attempt1-last-message.json",
+            "docs-review-findings-attempt1": runtime_dir / "docs-review-findings-attempt1.json",
+        }
+        if verdict == "clean":
+            for name, path in proof_paths.items():
+                path.write_text(f"{name}\n", encoding="utf-8")
+        status_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "verdict": verdict,
+                    "max_iterations": 3,
+                    "iterations_completed": 1,
+                    "reviewed_at": "2026-06-02T20:15:50+09:00",
+                    "reviewed_files": DOCS_REVIEW.reviewed_file_entries(root, task_path),
+                    "findings": [],
+                    "resolved_blockers": [],
+                    "open_blockers": [],
+                    "required_decisions": [],
+                    "artifact_refs": [
+                        DOCS_REVIEW.artifact_ref(task_path, path, name)
+                        for name, path in proof_paths.items()
+                    ]
+                    if verdict == "clean"
+                    else [],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def make_preflight_task(self, tmp: Path, *, docs_review_verdict: str = "clean") -> tuple[Path, Path]:
+        root, task_path = self.make_task(tmp)
+        (root / "docs" / "harness").mkdir(parents=True)
+        (root / "docs" / "harness" / "implementation-quality.md").write_text(
+            "Implementation quality rules.\n",
+            encoding="utf-8",
+        )
+        docs_dir = task_path / "docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        for filename in ["prd.md", "flow.md", "data-schema.md", "code-architecture.md", "adr.md"]:
+            (docs_dir / filename).write_text(f"# {filename}\n\nApproved content.\n", encoding="utf-8")
+        static_dir = task_path / "context-pack" / "static"
+        static_dir.mkdir(parents=True, exist_ok=True)
+        static_values = {
+            "decisions.json": {"decisions": [{"id": "D-001", "status": "approved", "summary": "Approved."}]},
+            "open-decisions.json": {"decisions": []},
+            "architecture.json": {
+                "nodes": [{"id": "N-001", "name": "runner", "responsibility": "preflight"}],
+                "allowed_edges": [],
+                "decisions": [{"id": "A-001", "summary": "Approved architecture."}],
+                "forbid_cycles": True,
+            },
+            "dependency-policy.json": {
+                "new_dependencies": "forbidden",
+                "approved_new_dependencies": [],
+                "approved_dependency_manifest_changes": [],
+            },
+            "context-gathering-budget.json": {
+                "search_batches": 1,
+                "max_files_to_read": 1,
+                "stop_when": ["done"],
+                "escalate_when": ["blocked"],
+            },
+        }
+        for filename in RUN_PHASES.MANDATORY_STATIC_FILES:
+            value = static_values.get(filename)
+            path = static_dir / filename
+            if value is None:
+                path.write_text("Approved content.\n", encoding="utf-8")
+            else:
+                path.write_text(json.dumps(value) + "\n", encoding="utf-8")
+
+        contract = {
+            "phase": 0,
+            "name": "demo",
+            "read_first": {"docs": ["docs/harness/implementation-quality.md"], "previous_outputs": []},
+            "scope": {"layer": "docs", "allowed_paths": ["tasks/demo/context-pack/handoffs/phase0.md"]},
+            "interfaces": [],
+            "decision_refs": ["D-001"],
+            "architecture_refs": ["A-001"],
+            "dependency_policy": {
+                "new_dependencies": "forbidden",
+                "approved_new_dependencies": [],
+                "approved_dependency_manifest_changes": [],
+            },
+            "instructions": [
+                {
+                    "id": "P0-001",
+                    "task": "Write the handoff.",
+                    "expected_evidence": ["context-pack/handoffs/phase0.md"],
+                }
+            ],
+            "success_criteria": ["The handoff exists."],
+            "stop_rules": ["Stop on missing context."],
+            "fallback_behavior": {"if_blocked": "Write the blocker.", "if_tests_fail": "Fix the failure."},
+            "validation_budget": {"max_attempts": 1, "command_timeout_seconds": 600},
+            "missing_evidence_behavior": "Treat missing evidence as unresolved.",
+            "acceptance_commands": ["true"],
+            "required_outputs": ["context-pack/handoffs/phase0.md"],
+            "forbidden": [{"rule": "Do not bypass docs review validation.", "reason": "The runner gate must fail closed."}],
+        }
+        (task_path / "phases").mkdir(parents=True, exist_ok=True)
+        (task_path / "phases" / "phase0.md").write_text(
+            "# Phase 0: demo\n\n## Contract\n\n```json\n"
+            + json.dumps(contract, indent=2)
+            + "\n```\n",
+            encoding="utf-8",
+        )
+        task_index = {
+            "project": "demo",
+            "task": "demo",
+            "docs": [f"tasks/demo/docs/{filename}" for filename in ["prd.md", "flow.md", "data-schema.md", "code-architecture.md", "adr.md"]],
+            "common_docs": ["docs/harness/implementation-quality.md"],
+            "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
+        }
+        (task_path / "index.json").write_text(json.dumps(task_index) + "\n", encoding="utf-8")
+        self.write_docs_review_status(root, task_path, verdict=docs_review_verdict)
+        return root, task_path
+
     def read_attempt_manifest(self, task_path: Path, phase: int) -> list[dict[str, object]]:
         return [
             json.loads(line)
@@ -2965,6 +3147,77 @@ class RunCodexRuntimeTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def write_minimal_phase_task(
+        self,
+        root: Path,
+        task_path: Path,
+        *,
+        acceptance_commands: list[str] | None = None,
+        max_attempts: int = 1,
+    ) -> None:
+        (task_path / "phases").mkdir(parents=True, exist_ok=True)
+        (task_path / "context-pack" / "handoffs").mkdir(parents=True, exist_ok=True)
+        contract = {
+            "phase": 0,
+            "name": "demo",
+            "read_first": {"docs": [], "previous_outputs": []},
+            "scope": {"layer": "app", "allowed_paths": ["src/**"]},
+            "interfaces": [],
+            "decision_refs": [],
+            "architecture_refs": [],
+            "dependency_policy": {
+                "new_dependencies": "forbidden",
+                "approved_new_dependencies": [],
+                "approved_dependency_manifest_changes": [],
+            },
+            "instructions": [
+                {
+                    "id": "P0-001",
+                    "task": "Create app output.",
+                    "expected_evidence": ["src/app.py"],
+                }
+            ],
+            "success_criteria": ["The app output exists."],
+            "stop_rules": ["Stop if required context is missing."],
+            "fallback_behavior": {
+                "if_blocked": "Write the blocker to the handoff.",
+                "if_tests_fail": "Fix failures inside allowed_paths.",
+            },
+            "validation_budget": {
+                "max_attempts": max_attempts,
+                "command_timeout_seconds": 600,
+            },
+            "missing_evidence_behavior": "Treat missing evidence as unresolved.",
+            "acceptance_commands": acceptance_commands or ["true"],
+            "required_outputs": ["context-pack/handoffs/phase0.md"],
+            "required_repo_outputs": ["src/app.py"],
+            "forbidden": [
+                {
+                    "rule": "Do not update task status.",
+                    "reason": "The runner owns status.",
+                }
+            ],
+        }
+        (task_path / "phases" / "phase0.md").write_text(
+            "# Phase 0: demo\n\n## Contract\n\n```json\n"
+            + json.dumps(contract, indent=2)
+            + "\n```\n",
+            encoding="utf-8",
+        )
+        (task_path / "index.json").write_text(
+            json.dumps(
+                {
+                    "project": "demo",
+                    "task": "demo",
+                    "docs": [],
+                    "common_docs": [],
+                    "phases": [{"phase": 0, "name": "demo", "status": "pending"}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
     def test_codex_output_symlink_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -2991,6 +3244,458 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 )
 
             self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+
+    def test_run_codex_uses_exec_path_when_thread_flag_is_off(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+            stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+
+            with (
+                mock.patch.object(RUN_PHASES, "run_codex_exec_phase_attempt", return_value=0) as exec_attempt,
+                mock.patch.object(RUN_PHASES, "run_codex_thread_once", return_value=0) as thread_once,
+                mock.patch.object(RUN_PHASES.sys, "stderr", io.StringIO()) as warning_stderr,
+            ):
+                returncode = RUN_PHASES.run_codex(
+                    root,
+                    task_path,
+                    1,
+                    "prompt",
+                    output_path,
+                    stderr_path,
+                    "codex",
+                    False,
+                    False,
+                    10,
+                    use_codex_thread_once=False,
+                    thread_once_cmd="unused",
+                )
+
+            self.assertEqual(returncode, 0)
+            exec_attempt.assert_called_once()
+            thread_once.assert_not_called()
+            self.assertIn("--codex-thread-once-cmd was provided", warning_stderr.getvalue())
+
+    def test_run_codex_uses_thread_once_when_experimental_flag_is_on(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+            stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+
+            with (
+                mock.patch.object(RUN_PHASES, "run_codex_exec_phase_attempt", return_value=0) as exec_attempt,
+                mock.patch.object(RUN_PHASES, "run_codex_thread_once", return_value=0) as thread_once,
+            ):
+                returncode = RUN_PHASES.run_codex(
+                    root,
+                    task_path,
+                    1,
+                    "prompt",
+                    output_path,
+                    stderr_path,
+                    "codex",
+                    False,
+                    False,
+                    10,
+                    use_codex_thread_once=True,
+                    thread_once_cmd="thread-once",
+                )
+
+            self.assertEqual(returncode, 0)
+            exec_attempt.assert_not_called()
+            thread_once.assert_called_once()
+            self.assertFalse(thread_once.call_args.kwargs["workspace_write_smoke"])
+
+    def test_run_codex_passes_workspace_write_smoke_only_with_thread_once(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+            stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+
+            with (
+                mock.patch.object(RUN_PHASES, "run_codex_exec_phase_attempt", return_value=0) as exec_attempt,
+                mock.patch.object(RUN_PHASES, "run_codex_thread_once", return_value=0) as thread_once,
+            ):
+                returncode = RUN_PHASES.run_codex(
+                    root,
+                    task_path,
+                    1,
+                    "prompt",
+                    output_path,
+                    stderr_path,
+                    "codex",
+                    False,
+                    False,
+                    10,
+                    use_codex_thread_once=True,
+                    thread_once_cmd=None,
+                    codex_thread_workspace_write_smoke=True,
+                )
+
+            self.assertEqual(returncode, 0)
+            exec_attempt.assert_not_called()
+            thread_once.assert_called_once()
+            self.assertTrue(thread_once.call_args.kwargs["workspace_write_smoke"])
+
+    def test_run_codex_thread_once_requires_sdk_or_configured_command(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+            stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HARNESS_CODEX_THREAD_ONCE_CMD": ""}, clear=False),
+                mock.patch.object(RUN_PHASES, "_CODEX_THREAD_ONCE_SDK_CALLABLE", None),
+            ):
+                returncode = RUN_PHASES.run_codex_thread_once(
+                    root,
+                    task_path,
+                    1,
+                    "prompt",
+                    output_path,
+                    stderr_path,
+                    None,
+                    10,
+                )
+
+            self.assertEqual(returncode, RUN_PHASES.CODEX_STARTUP_EXIT_CODE)
+            self.assertIn("no SDK one-shot callable or thread-once command", stderr_path.read_text(encoding="utf-8"))
+
+    def test_run_codex_thread_once_uses_sdk_when_no_command_hook_is_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+            stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+            calls: list[dict[str, object]] = []
+
+            def fake_sdk(**kwargs: object) -> dict[str, object]:
+                calls.append(kwargs)
+                return {"completed": True, "final_response": "final answer"}
+
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HARNESS_CODEX_THREAD_ONCE_CMD": ""}, clear=False),
+                mock.patch.object(RUN_PHASES, "_CODEX_THREAD_ONCE_SDK_CALLABLE", fake_sdk),
+            ):
+                returncode = RUN_PHASES.run_codex_thread_once(
+                    root,
+                    task_path,
+                    1,
+                    "phase prompt",
+                    output_path,
+                    stderr_path,
+                    None,
+                    10,
+                )
+
+            self.assertEqual(returncode, 0)
+            self.assertEqual(calls[0]["prompt"], "phase prompt")
+            self.assertEqual(calls[0]["phase_number"], 1)
+            self.assertEqual(calls[0]["env"]["CODEX_HARNESS_THREAD_PHASE_ATTEMPT"], "1")
+            output = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(output["event"], "thread_final")
+            self.assertEqual(output["final_response"], "final answer")
+            self.assertEqual(stderr_path.read_text(encoding="utf-8"), "")
+
+    def test_codex_app_server_thread_once_collects_completed_final_response(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            messages = [
+                {"id": 1, "result": {"userAgent": "fake", "codexHome": str(tmp), "platformFamily": "unix", "platformOs": "macos"}},
+                {"id": 2, "result": {"thread": {"id": "thread-1"}}},
+                {"id": 3, "result": {"turn": {"id": "turn-1", "status": "inProgress"}}},
+                {"method": "turn/started", "params": {"threadId": "thread-1", "turn": {"id": "turn-1"}}},
+                {
+                    "method": "item/agentMessage/delta",
+                    "params": {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1", "delta": "partial "},
+                },
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "item": {"type": "agentMessage", "id": "item-1", "text": "final answer"},
+                    },
+                },
+                {
+                    "method": "turn/completed",
+                    "params": {"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed", "items": []}},
+                },
+            ]
+            processes: list[RunCodexRuntimeTest.FakeAppServerProcess] = []
+
+            def fake_popen(*_args: object, **_kwargs: object) -> RunCodexRuntimeTest.FakeAppServerProcess:
+                process = RunCodexRuntimeTest.FakeAppServerProcess(messages)
+                processes.append(process)
+                return process
+
+            with (
+                mock.patch.object(RUN_PHASES.shutil, "which", return_value="/usr/bin/codex"),
+                mock.patch.object(RUN_PHASES.subprocess, "Popen", side_effect=fake_popen),
+            ):
+                result = RUN_PHASES._codex_app_server_thread_once(
+                    root=root,
+                    task_path=task_path,
+                    phase_number=1,
+                    prompt="phase prompt",
+                    env=os.environ.copy(),
+                    idle_timeout=10,
+                    max_runtime=10,
+                )
+
+            self.assertEqual(result, {"status": "completed", "final_response": "final answer"})
+            requests = [json.loads(line) for line in processes[0].stdin.getvalue().decode("utf-8").splitlines()]
+            self.assertEqual([request["method"] for request in requests], ["initialize", "thread/start", "turn/start"])
+            self.assertEqual(requests[1]["params"]["ephemeral"], True)
+            self.assertEqual(requests[1]["params"]["approvalPolicy"], "never")
+            self.assertEqual(requests[1]["params"]["sandbox"], "read-only")
+            self.assertEqual(requests[2]["params"]["input"][0]["text"], "phase prompt")
+            self.assertNotIn("thread_id", result)
+            self.assertNotIn("threadId", result)
+
+    def test_codex_app_server_thread_once_workspace_write_smoke_uses_never_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            messages = [
+                {"id": 1, "result": {"userAgent": "fake", "codexHome": str(tmp), "platformFamily": "unix", "platformOs": "macos"}},
+                {"id": 2, "result": {"thread": {"id": "thread-1"}}},
+                {"id": 3, "result": {"turn": {"id": "turn-1", "status": "inProgress"}}},
+                {"method": "turn/started", "params": {"threadId": "thread-1", "turn": {"id": "turn-1"}}},
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turn": {
+                            "id": "turn-1",
+                            "status": "completed",
+                            "items": [{"type": "agentMessage", "text": "final answer"}],
+                        },
+                    },
+                },
+            ]
+            processes: list[RunCodexRuntimeTest.FakeAppServerProcess] = []
+
+            def fake_popen(*_args: object, **_kwargs: object) -> RunCodexRuntimeTest.FakeAppServerProcess:
+                process = RunCodexRuntimeTest.FakeAppServerProcess(messages)
+                processes.append(process)
+                return process
+
+            with (
+                mock.patch.object(RUN_PHASES.shutil, "which", return_value="/usr/bin/codex"),
+                mock.patch.object(RUN_PHASES.subprocess, "Popen", side_effect=fake_popen),
+            ):
+                result = RUN_PHASES._codex_app_server_thread_once(
+                    root=root,
+                    task_path=task_path,
+                    phase_number=1,
+                    prompt="phase prompt",
+                    env=os.environ.copy(),
+                    idle_timeout=10,
+                    max_runtime=10,
+                    workspace_write_smoke=True,
+                )
+
+            self.assertEqual(result, {"status": "completed", "final_response": "final answer"})
+            requests = [json.loads(line) for line in processes[0].stdin.getvalue().decode("utf-8").splitlines()]
+            self.assertEqual(requests[1]["params"]["sandbox"], "workspace-write")
+            self.assertEqual(requests[1]["params"]["approvalPolicy"], "never")
+            self.assertNotIn("thread_id", result)
+            self.assertNotIn("threadId", result)
+
+    def test_codex_app_server_thread_once_unavailable_raises_import_error(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+
+            with mock.patch.object(RUN_PHASES.shutil, "which", return_value=None):
+                with self.assertRaises(ImportError):
+                    RUN_PHASES._codex_app_server_thread_once(
+                        root=root,
+                        task_path=task_path,
+                        phase_number=1,
+                        prompt="phase prompt",
+                        env=os.environ.copy(),
+                        idle_timeout=10,
+                        max_runtime=10,
+                    )
+
+    def test_codex_app_server_thread_once_auth_error_raises_permission_error(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            messages = [
+                {"id": 1, "result": {"userAgent": "fake", "codexHome": str(tmp), "platformFamily": "unix", "platformOs": "macos"}},
+                {"id": 2, "error": {"code": -32000, "message": "authentication required"}},
+            ]
+
+            def fake_popen(*_args: object, **_kwargs: object) -> RunCodexRuntimeTest.FakeAppServerProcess:
+                return RunCodexRuntimeTest.FakeAppServerProcess(messages)
+
+            with (
+                mock.patch.object(RUN_PHASES.shutil, "which", return_value="/usr/bin/codex"),
+                mock.patch.object(RUN_PHASES.subprocess, "Popen", side_effect=fake_popen),
+            ):
+                with self.assertRaises(PermissionError):
+                    RUN_PHASES._codex_app_server_thread_once(
+                        root=root,
+                        task_path=task_path,
+                        phase_number=1,
+                        prompt="phase prompt",
+                        env=os.environ.copy(),
+                        idle_timeout=10,
+                        max_runtime=10,
+                    )
+
+    def test_run_codex_thread_once_sdk_failure_cases_fail_closed(self) -> None:
+        cases = [
+            (ImportError("missing sdk"), RUN_PHASES.CODEX_STARTUP_EXIT_CODE, "SDK is unavailable"),
+            (PermissionError("auth denied"), RUN_PHASES.CODEX_STARTUP_EXIT_CODE, "authentication or session failed"),
+            (RuntimeError("thread run failed"), 1, "SDK one-shot failed"),
+            (TimeoutError("too slow"), RUN_PHASES.CODEX_MAX_RUNTIME_EXIT_CODE, "timed out"),
+            (InterruptedError("interrupted"), 130, "was interrupted"),
+            (KeyboardInterrupt(), 130, "was interrupted"),
+        ]
+        for exc, expected_code, expected_stderr in cases:
+            with self.subTest(exc=type(exc).__name__):
+                with tempfile.TemporaryDirectory() as raw_tmp:
+                    tmp = Path(raw_tmp)
+                    root, task_path = self.make_task(tmp)
+                    output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+                    stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+
+                    def fake_sdk(**_kwargs: object) -> dict[str, object]:
+                        raise exc
+
+                    with (
+                        mock.patch.dict(os.environ, {"CODEX_HARNESS_CODEX_THREAD_ONCE_CMD": ""}, clear=False),
+                        mock.patch.object(RUN_PHASES, "_CODEX_THREAD_ONCE_SDK_CALLABLE", fake_sdk),
+                    ):
+                        returncode = RUN_PHASES.run_codex_thread_once(
+                            root,
+                            task_path,
+                            1,
+                            "phase prompt",
+                            output_path,
+                            stderr_path,
+                            None,
+                            10,
+                        )
+
+                    self.assertEqual(returncode, expected_code)
+                    self.assertEqual(output_path.read_text(encoding="utf-8"), "")
+                    self.assertIn(expected_stderr, stderr_path.read_text(encoding="utf-8"))
+
+    def test_run_codex_thread_once_sdk_invalid_empty_and_partial_results_fail_closed(self) -> None:
+        cases: list[object] = [
+            "raw final text",
+            {"completed": False, "final_response": "partial answer"},
+            {"completed": True},
+            {"completed": True, "final_response": ""},
+            {"status": "running", "final_response": "partial answer"},
+        ]
+        for result in cases:
+            with self.subTest(result=result):
+                with tempfile.TemporaryDirectory() as raw_tmp:
+                    tmp = Path(raw_tmp)
+                    root, task_path = self.make_task(tmp)
+                    output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+                    stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+
+                    def fake_sdk(**_kwargs: object) -> object:
+                        return result
+
+                    with (
+                        mock.patch.dict(os.environ, {"CODEX_HARNESS_CODEX_THREAD_ONCE_CMD": ""}, clear=False),
+                        mock.patch.object(RUN_PHASES, "_CODEX_THREAD_ONCE_SDK_CALLABLE", fake_sdk),
+                    ):
+                        returncode = RUN_PHASES.run_codex_thread_once(
+                            root,
+                            task_path,
+                            1,
+                            "phase prompt",
+                            output_path,
+                            stderr_path,
+                            None,
+                            10,
+                        )
+
+                    self.assertEqual(returncode, 1)
+                    self.assertEqual(output_path.read_text(encoding="utf-8"), "")
+                    self.assertIn("SDK thread result", stderr_path.read_text(encoding="utf-8"))
+
+    def test_run_codex_thread_once_sdk_output_artifact_write_failure_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+            stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+            original_atomic_write = RUN_PHASES.atomic_write_text
+
+            def fake_sdk(**_kwargs: object) -> dict[str, object]:
+                return {"completed": True, "final_response": "final answer"}
+
+            def flaky_atomic_write(path: Path, content: str, *args: object, **kwargs: object) -> None:
+                if path == output_path and "thread_final" in content:
+                    raise OSError("disk full")
+                original_atomic_write(path, content, *args, **kwargs)
+
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HARNESS_CODEX_THREAD_ONCE_CMD": ""}, clear=False),
+                mock.patch.object(RUN_PHASES, "_CODEX_THREAD_ONCE_SDK_CALLABLE", fake_sdk),
+                mock.patch.object(RUN_PHASES, "atomic_write_text", side_effect=flaky_atomic_write),
+            ):
+                returncode = RUN_PHASES.run_codex_thread_once(
+                    root,
+                    task_path,
+                    1,
+                    "phase prompt",
+                    output_path,
+                    stderr_path,
+                    None,
+                    10,
+                )
+
+            self.assertEqual(returncode, RUN_PHASES.CODEX_CLEANUP_FAILED_EXIT_CODE)
+            self.assertIn("output artifact write failed", stderr_path.read_text(encoding="utf-8"))
+
+    def test_run_codex_thread_once_runs_configured_command_with_existing_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    prompt = sys.stdin.read()
+                    assert prompt == "phase prompt"
+                    print('{"event":"thread-final"}', flush=True)
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+            output_path = task_path / "context-pack" / "runtime" / "phase1-output-attempt1.jsonl"
+            stderr_path = task_path / "context-pack" / "runtime" / "phase1-stderr-attempt1.txt"
+
+            returncode = RUN_PHASES.run_codex_thread_once(
+                root,
+                task_path,
+                1,
+                "phase prompt",
+                output_path,
+                stderr_path,
+                str(fake),
+                10,
+            )
+
+            self.assertEqual(returncode, 0)
+            self.assertIn('{"event":"thread-final"}', output_path.read_text(encoding="utf-8"))
+            self.assertEqual(stderr_path.read_text(encoding="utf-8"), "")
 
     def test_codex_output_streams_before_process_exits(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -3911,6 +4616,67 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 (task_path / "context-pack" / "runtime" / "phase0-last-error.md").exists()
             )
 
+    def test_execute_phase_dry_run_rejects_non_clean_docs_review_before_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_preflight_task(tmp, docs_review_verdict="failed")
+            args = argparse.Namespace(
+                dry_run=True,
+                max_attempts=1,
+                ac_timeout=600,
+                codex_bin=str(tmp / "unused-codex"),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+                subprocess_timeout=1800,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "current_policy_lineage_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "build_prompt") as build_prompt,
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            build_prompt.assert_not_called()
+            self.assertTrue(args.failed)
+            self.assertIn('docs-review-status.json verdict must be "clean"', stderr.getvalue())
+
+    def test_execute_phase_rejects_non_clean_docs_review_before_prompt_assembly(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_preflight_task(tmp, docs_review_verdict="failed")
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=1,
+                ac_timeout=600,
+                codex_bin=str(tmp / "unused-codex"),
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                failed=False,
+                subprocess_timeout=1800,
+                strict_current_harness=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "current_policy_lineage_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "build_prompt") as build_prompt,
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            build_prompt.assert_not_called()
+            self.assertTrue(args.failed)
+            last_error = (task_path / "context-pack" / "runtime" / "phase0-last-error.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn('docs-review-status.json verdict must be "clean"', last_error)
+
     def test_gate_fails_when_handoff_change_trace_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
@@ -4160,29 +4926,29 @@ class RunCodexRuntimeTest(unittest.TestCase):
             self.assertEqual(changes[0]["to_status"], "error")
             self.assertEqual(changes[0]["reason"], "interrupted_running_phase")
 
-    def test_evaluation_review_loop_improves_until_approved(self) -> None:
+    def test_evaluation_review_loop_stops_when_rejected_without_auto_repair(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
-            finals = [
-                {"verdict": "rejected", "required_followups": ["Fix drift."], "blockers": []},
-                {"verdict": "approved", "required_followups": [], "blockers": []},
-            ]
+            final = {"verdict": "rejected", "required_followups": ["Fix drift."], "blockers": []}
             args = argparse.Namespace(review_iterations=2, failed=False)
 
             def fake_run_evaluation(root_arg: Path, task_arg: Path, args_arg: argparse.Namespace) -> int:
-                RUN_PHASES.write_json(RUN_PHASES.evaluation_final_path(task_arg), finals.pop(0))
+                RUN_PHASES.write_json(RUN_PHASES.evaluation_final_path(task_arg), final)
                 return 0
 
             with (
                 mock.patch.object(RUN_PHASES, "run_evaluation", side_effect=fake_run_evaluation),
-                mock.patch.object(RUN_PHASES, "run_evaluation_improvement", return_value=0) as improve,
+                mock.patch.object(RUN_PHASES, "run_approved_bounded_followup", return_value=0) as followup,
             ):
-                self.assertEqual(RUN_PHASES.run_evaluation_review_loop(root, task_path, args), 0)
+                self.assertEqual(RUN_PHASES.run_evaluation_review_loop(root, task_path, args), 1)
 
-            improve.assert_called_once()
-            self.assertFalse(args.failed)
+            followup.assert_not_called()
+            self.assertTrue(args.failed)
+            progress = (task_path / "context-pack" / "runtime" / "progress.md").read_text(encoding="utf-8")
+            self.assertIn("explicit follow-up decision required", progress)
+            self.assertNotIn("repair started", progress)
 
-    def test_evaluation_review_loop_fails_when_rejected_after_iteration_budget(self) -> None:
+    def test_evaluation_review_loop_ignores_iteration_budget_for_auto_repair(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
             args = argparse.Namespace(review_iterations=1, failed=False)
@@ -4196,11 +4962,11 @@ class RunCodexRuntimeTest(unittest.TestCase):
 
             with (
                 mock.patch.object(RUN_PHASES, "run_evaluation", side_effect=fake_run_evaluation),
-                mock.patch.object(RUN_PHASES, "run_evaluation_improvement", return_value=0) as improve,
+                mock.patch.object(RUN_PHASES, "run_approved_bounded_followup", return_value=0) as followup,
             ):
                 self.assertEqual(RUN_PHASES.run_evaluation_review_loop(root, task_path, args), 1)
 
-            improve.assert_called_once()
+            followup.assert_not_called()
             self.assertTrue(args.failed)
 
     def test_finalize_completed_task_marks_error_when_evaluation_fails(self) -> None:
@@ -4336,7 +5102,52 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 {"require_evaluation": True, "strict_current_harness": True, "timeout": 1800},
             )
 
-    def test_evaluation_improvement_records_repo_content_attestation(self) -> None:
+    def test_approved_bounded_followup_requires_explicit_approval_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root, task_path = self.make_task(Path(raw_tmp))
+            (task_path / "phases").mkdir(parents=True)
+            (task_path / "phases" / "phase0.md").write_text(
+                "# Phase 0\n\n## Contract\n\n```json\n"
+                + json.dumps(
+                    {
+                        "phase": 0,
+                        "scope": {"layer": "app", "allowed_paths": ["src/**"]},
+                        "required_repo_outputs": ["src/app.py"],
+                    }
+                )
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            (task_path / "index.json").write_text(
+                json.dumps({"task": "demo", "phases": [{"phase": 0, "name": "app"}]}) + "\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                codex_bin="codex",
+                yolo=False,
+                full_auto=False,
+                codex_idle_timeout=30,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "run_codex_exec", return_value=0) as run_codex,
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                self.assertEqual(
+                    RUN_PHASES.run_approved_bounded_followup(
+                        root,
+                        task_path,
+                        args,
+                        1,
+                        {"verdict": "rejected", "required_followups": ["Update app."], "blockers": []},
+                    ),
+                    1,
+                )
+
+            run_codex.assert_not_called()
+            self.assertIn("explicit_approval_marker is required", stderr.getvalue())
+
+    def test_approved_bounded_followup_records_repo_content_attestation(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             root, task_path = self.make_task(Path(raw_tmp))
             subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
@@ -4365,6 +5176,14 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 yolo=False,
                 full_auto=False,
                 codex_idle_timeout=30,
+                codex_max_runtime=1800,
+                explicit_approval_marker="approved-by-main",
+                approved_finding="EV-001",
+                fixed_scope="Update app.py only for EV-001.",
+                followup_allowed_files=["src/app.py"],
+                forbidden_changes=["Do not change task artifacts.", "Do not add dependencies."],
+                verifier_command="python3 -m unittest",
+                main_review_required=True,
             )
 
             def fake_run_codex_exec(*_items: object, **_kwargs: object) -> int:
@@ -4379,7 +5198,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
 
             with mock.patch.object(RUN_PHASES, "run_codex_exec", side_effect=fake_run_codex_exec):
                 self.assertEqual(
-                    RUN_PHASES.run_evaluation_improvement(
+                    RUN_PHASES.run_approved_bounded_followup(
                         root,
                         task_path,
                         args,
@@ -4391,12 +5210,19 @@ class RunCodexRuntimeTest(unittest.TestCase):
 
             result = json.loads(RUN_PHASES.evaluation_repair_result_path(task_path, 1).read_text(encoding="utf-8"))
             repo_content = result["repo_content"]
+            self.assertEqual(result["repair_scope"], "approved_bounded_followup")
             self.assertEqual(result["status"], "completed")
             self.assertEqual(repo_content["changed_files"][0]["path"], "src/app.py")
             self.assertEqual(repo_content["changed_files"][0]["after_digest"], RUN_PHASES.file_sha256(source))
             self.assertEqual(repo_content["required_repo_outputs"], [])
             self.assertEqual(result["policy_pack"], RUN_PHASES.runtime_policy_pack())
             self.assertEqual(result["harness_attestation"], RUN_PHASES.RUNTIME_HARNESS_ATTESTATION)
+
+    def test_runtime_proof_does_not_document_rejected_auto_repair_contract(self) -> None:
+        text = (ROOT / "docs" / "runtime-proof.md").read_text(encoding="utf-8")
+
+        self.assertIn("Evaluation rejected does not authorize repair.", text)
+        self.assertNotIn("평가가 `rejected`이면 runner는 `evaluation-repair<N>-*` 실행 기록을 남기고 다시 평가합니다", text)
 
     def test_codex_idle_timeout_covers_blocked_stdin_write(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -5466,6 +6292,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
+            self.write_docs_review_status(root, task_path)
             fake = self.make_fake_codex(
                 tmp,
                 textwrap.dedent(
@@ -5508,6 +6335,354 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 task_path / "context-pack" / "runtime" / "phase0-last-error.md"
             ).read_text(encoding="utf-8")
             self.assertIn("outside.txt", last_error)
+
+    def test_execute_phase_thread_success_does_not_bypass_existing_gates(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            subprocess.run(["git", "init"], cwd=root, text=True, capture_output=True, check=False)
+            self.write_minimal_phase_task(root, task_path, acceptance_commands=["false"], max_attempts=1)
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=3,
+                ac_timeout=600,
+                codex_bin="unused-codex",
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                codex_max_runtime=1800,
+                experimental_codex_thread_phase_attempt=True,
+                codex_thread_once_cmd="thread-once",
+                failed=False,
+            )
+
+            def fake_thread_once(
+                root_arg: Path,
+                task_arg: Path,
+                phase_number: int,
+                prompt: str,
+                output_path: Path,
+                stderr_path: Path,
+                thread_once_cmd: str | None,
+                idle_timeout: int,
+                max_runtime: int = 1800,
+                *,
+                workspace_write_smoke: bool = False,
+            ) -> int:
+                del root_arg, task_arg, phase_number, prompt, thread_once_cmd, idle_timeout, max_runtime
+                del workspace_write_smoke
+                output_path.write_text('{"event":"thread-completed"}\n', encoding="utf-8")
+                stderr_path.write_text("", encoding="utf-8")
+                (root / "src").mkdir(parents=True, exist_ok=True)
+                (root / "src" / "app.py").write_text("ok\n", encoding="utf-8")
+                (task_path / "context-pack" / "handoffs" / "phase0.md").write_text(
+                    "# Handoff\n\n## Change Trace\n\n- `src/app.py`: `P0-001`\n",
+                    encoding="utf-8",
+                )
+                return 0
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "run_install_preflight", return_value=[]),
+                mock.patch.object(RUN_PHASES, "run_codex_thread_once", side_effect=fake_thread_once) as thread_once,
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            thread_once.assert_called_once()
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertFalse(RUN_PHASES.phase_result_path(task_path, 0).exists())
+            last_error = (task_path / "context-pack" / "runtime" / "phase0-last-error.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("AC command failed: false", last_error)
+
+    def test_execute_phase_thread_success_ac_failure_uses_existing_retry_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            subprocess.run(["git", "init"], cwd=root, text=True, capture_output=True, check=False)
+            counter = tmp / "ac-counter.txt"
+            ac_script = tmp / "acceptance.py"
+            ac_script.write_text(
+                "from pathlib import Path\n"
+                f"counter = Path({str(counter)!r})\n"
+                "count = int(counter.read_text(encoding='utf-8')) if counter.exists() else 0\n"
+                "counter.write_text(str(count + 1), encoding='utf-8')\n"
+                "raise SystemExit(1 if count == 0 else 0)\n",
+                encoding="utf-8",
+            )
+            self.write_minimal_phase_task(
+                root,
+                task_path,
+                acceptance_commands=[f"{sys.executable} {ac_script}"],
+                max_attempts=2,
+            )
+            phase_path = task_path / "phases" / "phase0.md"
+            phase_text = phase_path.read_text(encoding="utf-8")
+            prefix, rest = phase_text.split("```json\n", 1)
+            raw_contract, suffix = rest.split("\n```\n", 1)
+            contract = json.loads(raw_contract)
+            contract["scope"]["allowed_paths"].append("tasks/demo/index.json")
+            phase_path.write_text(
+                prefix + "```json\n" + json.dumps(contract, indent=2) + "\n```\n" + suffix,
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=3,
+                ac_timeout=600,
+                codex_bin="unused-codex",
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                codex_max_runtime=1800,
+                experimental_codex_thread_phase_attempt=True,
+                codex_thread_once_cmd="thread-once",
+                failed=False,
+            )
+
+            def fake_thread_once(
+                root_arg: Path,
+                task_arg: Path,
+                phase_number: int,
+                prompt: str,
+                output_path: Path,
+                stderr_path: Path,
+                thread_once_cmd: str | None,
+                idle_timeout: int,
+                max_runtime: int = 1800,
+                *,
+                workspace_write_smoke: bool = False,
+            ) -> int:
+                del root_arg, task_arg, phase_number, prompt, thread_once_cmd, idle_timeout, max_runtime
+                del workspace_write_smoke
+                output_path.write_text('{"event":"thread-completed"}\n', encoding="utf-8")
+                stderr_path.write_text("", encoding="utf-8")
+                (root / "src").mkdir(parents=True, exist_ok=True)
+                (root / "src" / "app.py").write_text("ok\n", encoding="utf-8")
+                (task_path / "context-pack" / "handoffs" / "phase0.md").write_text(
+                    "# Handoff\n\n## Change Trace\n\n"
+                    "- `src/app.py`: `P0-001`\n"
+                    "- `tasks/demo/index.json`: `P0-001`\n",
+                    encoding="utf-8",
+                )
+                return 0
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "run_install_preflight", return_value=[]),
+                mock.patch.object(RUN_PHASES, "run_codex_thread_once", side_effect=fake_thread_once) as thread_once,
+            ):
+                self.assertTrue(RUN_PHASES.execute_phase(root, task_path, args))
+
+            self.assertEqual(thread_once.call_count, 2)
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(task_index["phases"][0]["status"], "completed")
+            self.assertEqual(task_index["phases"][0]["attempts"], 2)
+            repair_packet = json.loads(
+                RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).read_text(encoding="utf-8")
+            )
+            self.assertEqual(repair_packet["failure"]["type"], "acceptance_commands")
+            self.assertTrue(repair_packet["failure"]["retryable"])
+            result = json.loads(RUN_PHASES.phase_result_path(task_path, 0).read_text(encoding="utf-8"))
+            self.assertEqual(result["attempt"], 2)
+
+    def test_execute_phase_thread_failure_is_not_auto_retried_or_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            subprocess.run(["git", "init"], cwd=root, text=True, capture_output=True, check=False)
+            self.write_minimal_phase_task(root, task_path, acceptance_commands=["true"], max_attempts=2)
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=3,
+                ac_timeout=600,
+                codex_bin="unused-codex",
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                codex_max_runtime=1800,
+                experimental_codex_thread_phase_attempt=True,
+                codex_thread_once_cmd="thread-once",
+                failed=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "run_install_preflight", return_value=[]),
+                mock.patch.object(
+                    RUN_PHASES,
+                    "run_codex_thread_once",
+                    return_value=RUN_PHASES.CODEX_STARTUP_EXIT_CODE,
+                ) as thread_once,
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            thread_once.assert_called_once()
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(task_index["phases"][0]["attempts"], 1)
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertFalse(RUN_PHASES.phase_result_path(task_path, 0).exists())
+            repair_packet = json.loads(
+                RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).read_text(encoding="utf-8")
+            )
+            self.assertEqual(repair_packet["failure"]["type"], "codex_thread")
+            self.assertFalse(repair_packet["failure"]["retryable"])
+            self.assertIn("codex thread failed", repair_packet["failure"]["message"])
+
+    def test_execute_phase_sdk_failure_is_not_auto_retried_or_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            subprocess.run(["git", "init"], cwd=root, text=True, capture_output=True, check=False)
+            self.write_minimal_phase_task(root, task_path, acceptance_commands=["true"], max_attempts=2)
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=3,
+                ac_timeout=600,
+                codex_bin="unused-codex",
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                codex_max_runtime=1800,
+                experimental_codex_thread_phase_attempt=True,
+                codex_thread_once_cmd=None,
+                failed=False,
+            )
+
+            def fake_sdk(**_kwargs: object) -> dict[str, object]:
+                raise RuntimeError("SDK run failed")
+
+            with (
+                mock.patch.dict(os.environ, {"CODEX_HARNESS_CODEX_THREAD_ONCE_CMD": ""}, clear=False),
+                mock.patch.object(RUN_PHASES, "_CODEX_THREAD_ONCE_SDK_CALLABLE", fake_sdk),
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "run_install_preflight", return_value=[]),
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(task_index["phases"][0]["attempts"], 1)
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertFalse(RUN_PHASES.phase_result_path(task_path, 0).exists())
+            repair_packet = json.loads(
+                RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).read_text(encoding="utf-8")
+            )
+            self.assertEqual(repair_packet["failure"]["type"], "codex_thread")
+            self.assertFalse(repair_packet["failure"]["retryable"])
+            self.assertIn("codex thread failed", repair_packet["failure"]["message"])
+            self.assertIn("SDK one-shot failed", repair_packet["failure"]["stderr_tail"])
+
+    def test_execute_phase_thread_timeout_is_not_auto_retried_or_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            subprocess.run(["git", "init"], cwd=root, text=True, capture_output=True, check=False)
+            self.write_minimal_phase_task(root, task_path, acceptance_commands=["true"], max_attempts=2)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    sys.stdin.read()
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        print("thread still active", flush=True)
+                        time.sleep(0.1)
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=3,
+                ac_timeout=600,
+                codex_bin="unused-codex",
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=0,
+                codex_max_runtime=1,
+                experimental_codex_thread_phase_attempt=True,
+                codex_thread_once_cmd=str(fake),
+                failed=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "run_install_preflight", return_value=[]),
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(task_index["phases"][0]["attempts"], 1)
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertFalse(RUN_PHASES.phase_result_path(task_path, 0).exists())
+            repair_packet = json.loads(
+                RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).read_text(encoding="utf-8")
+            )
+            self.assertEqual(repair_packet["failure"]["type"], "codex_thread")
+            self.assertEqual(repair_packet["failure"]["codex_exit_code"], RUN_PHASES.CODEX_MAX_RUNTIME_EXIT_CODE)
+            self.assertFalse(repair_packet["failure"]["retryable"])
+            self.assertIn("codex thread failed", repair_packet["failure"]["message"])
+
+    def test_execute_phase_thread_interrupted_exit_is_not_auto_retried_or_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root, task_path = self.make_task(tmp)
+            subprocess.run(["git", "init"], cwd=root, text=True, capture_output=True, check=False)
+            self.write_minimal_phase_task(root, task_path, acceptance_commands=["true"], max_attempts=2)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    sys.stdin.read()
+                    raise SystemExit(130)
+                    """
+                ),
+            )
+            args = argparse.Namespace(
+                dry_run=False,
+                max_attempts=3,
+                ac_timeout=600,
+                codex_bin="unused-codex",
+                full_auto=False,
+                yolo=False,
+                codex_idle_timeout=10,
+                codex_max_runtime=1800,
+                experimental_codex_thread_phase_attempt=True,
+                codex_thread_once_cmd=str(fake),
+                failed=False,
+            )
+
+            with (
+                mock.patch.object(RUN_PHASES, "verify_task", return_value=0),
+                mock.patch.object(RUN_PHASES, "preflight_phase", return_value=[]),
+                mock.patch.object(RUN_PHASES, "nested_codex_preflight_errors", return_value=[]),
+                mock.patch.object(RUN_PHASES, "run_install_preflight", return_value=[]),
+            ):
+                self.assertFalse(RUN_PHASES.execute_phase(root, task_path, args))
+
+            task_index = json.loads((task_path / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(task_index["phases"][0]["attempts"], 1)
+            self.assertEqual(task_index["phases"][0]["status"], "error")
+            self.assertFalse(RUN_PHASES.phase_result_path(task_path, 0).exists())
+            repair_packet = json.loads(
+                RUN_PHASES.phase_attempt_repair_packet_path(task_path, 0, 1).read_text(encoding="utf-8")
+            )
+            self.assertEqual(repair_packet["failure"]["type"], "codex_thread")
+            self.assertEqual(repair_packet["failure"]["codex_exit_code"], 130)
+            self.assertFalse(repair_packet["failure"]["retryable"])
+            self.assertIn("codex thread failed", repair_packet["failure"]["message"])
 
     def test_execute_phase_success_writes_attempt_commit_and_uses_phase_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -6560,6 +7735,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
+            self.write_docs_review_status(root, task_path)
             attempt_counter = tmp / "attempts.txt"
             fake = self.make_fake_codex(
                 tmp,
@@ -6705,6 +7881,7 @@ class RunCodexRuntimeTest(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
+            self.write_docs_review_status(root, task_path)
             args = argparse.Namespace(
                 dry_run=False,
                 max_attempts=3,

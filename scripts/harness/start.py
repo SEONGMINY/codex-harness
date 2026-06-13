@@ -26,6 +26,12 @@ if __name__ == "__main__":
 from codex_exec import add_output_schema, run_codex_exec
 from artifact_io import atomic_write_json
 from design_approval import design_approval_bundle_entries, design_approval_bundle_sha256
+from docs_review import (
+    docs_blocked_payload,
+    run_docs_review_loop,
+    validate_docs_review_status,
+    validate_docs_review_status_file,
+)
 from install_preflight import install_validation_errors
 from policy_pack import policy_pack_metadata
 from policy_lineage import design_approval_scope_sha256, policy_pack_lineage_sha256
@@ -789,6 +795,7 @@ def visible_document_paths(root: Path, run_dir: Path, final: dict[str, object] |
     paths: list[Path] = []
     append_document_path(paths, run_dir / "questions.md")
     append_document_path(paths, run_dir / "docs-approval-request.md")
+    append_document_path(paths, run_dir / "design-approval-request.md")
     if final is None:
         return paths
 
@@ -841,16 +848,359 @@ def visible_documents(root: Path, run_dir: Path, final: dict[str, object] | None
     return documents
 
 
+def _short_json_summaries(value: object, keys: list[str], limit: int = 8) -> list[str]:
+    if isinstance(value, dict):
+        for container_key in ["decisions", "items", "open_decisions", "nodes"]:
+            nested = value.get(container_key)
+            if isinstance(nested, list):
+                return _short_json_summaries(nested, keys, limit)
+        for key in keys:
+            item = value.get(key)
+            if isinstance(item, str) and item.strip():
+                return [item.strip()]
+        return []
+    if not isinstance(value, list):
+        return []
+    summaries: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        text = next((item.get(key) for key in keys if isinstance(item.get(key), str) and item.get(key).strip()), None)
+        if text is None:
+            continue
+        prefix = f"{item_id}: " if isinstance(item_id, str) and item_id.strip() else ""
+        summaries.append(prefix + text.strip())
+        if len(summaries) >= limit:
+            break
+    return summaries
+
+
+def design_approval_request_content(root: Path, task_path: Path, docs_review_status: dict[str, object]) -> str:
+    static_dir = task_path / "context-pack" / "static"
+    decisions = _short_json_summaries(
+        read_json_object(static_dir / "decisions.json"),
+        ["summary", "decision", "title", "name"],
+    )
+    open_decisions = _short_json_summaries(
+        read_json_object(static_dir / "open-decisions.json"),
+        ["question", "summary", "decision", "title"],
+    )
+    resolved_blockers = _short_json_summaries(
+        docs_review_status.get("resolved_blockers"),
+        ["evidence_summary", "summary", "category"],
+    )
+    open_blockers = _short_json_summaries(
+        docs_review_status.get("open_blockers"),
+        ["evidence_summary", "summary", "category"],
+    )
+    required_decisions = _short_json_summaries(
+        docs_review_status.get("required_decisions"),
+        ["question", "evidence_summary", "summary"],
+    )
+    design_doc = task_path / "docs" / DESIGN_REVIEW_DOC
+    waiver_doc = task_path / "docs" / DESIGN_REVIEW_WAIVER_DOC
+    design_source = design_doc if design_doc.exists() else waiver_doc
+    lines = [
+        "# Design Approval Request",
+        "",
+        "문서 초안은 별도 fresh docs review/cleanup loop를 통과했고, `docs-review-status.json` verdict가 `clean`입니다.",
+        "",
+        "## 이번 문서에 고정된 결정",
+    ]
+    lines.extend(f"- {item}" for item in decisions[:8])
+    if not decisions:
+        lines.append("- `context-pack/static/decisions.json`에 기록된 승인 결정 없음")
+    lines.extend(
+        [
+            "",
+            "## 주요 product / scope / non-goal 결정",
+            f"- Product: `{rel(task_path / 'context-pack' / 'static' / 'product.md', root)}` 및 `{rel(task_path / 'docs' / 'prd.md', root)}`",
+            f"- Scope: `{rel(task_path / 'docs' / 'prd.md', root)}`와 `{rel(design_source, root)}`의 Scope Summary",
+            f"- Non-goal: `{rel(task_path / 'context-pack' / 'static' / 'rejected-options.md', root)}`와 `{rel(design_source, root)}`의 Open Decisions/Approval Checklist",
+            "",
+            "## 구현 agent에게 넘길 계약",
+            f"- Data model: `{rel(task_path / 'docs' / 'data-schema.md', root)}`",
+            f"- API: `{rel(design_source, root)}`의 Public Interfaces/API Contract",
+            f"- Storage: `{rel(task_path / 'docs' / 'data-schema.md', root)}`와 `{rel(design_source, root)}`의 DB/Storage Schema",
+            f"- Dependency: `{rel(task_path / 'context-pack' / 'static' / 'dependency-policy.json', root)}`",
+            f"- UX flow: `{rel(task_path / 'docs' / 'flow.md', root)}`",
+            "",
+            "## 리뷰에서 발견되어 해결된 주요 blocker",
+        ]
+    )
+    lines.extend(f"- {item}" for item in resolved_blockers[:8])
+    if not resolved_blockers:
+        lines.append("- 없음")
+    lines.extend(["", "## 남아 있는 open decision"])
+    remaining = open_decisions + open_blockers + required_decisions
+    lines.extend(f"- {item}" for item in remaining[:12])
+    if not remaining:
+        lines.append("- 없음")
+    lines.extend(
+        [
+            "",
+            "## 승인 효과",
+            f"- 승인 후 phase agent는 `{rel(design_source, root)}`와 task docs/context-pack을 단일 진실로 사용합니다.",
+            "- 문서, 구현 계약, docs-review-status가 변경되면 재리뷰와 재승인이 필요합니다.",
+        ]
+    )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_design_approval_request(
+    root: Path,
+    run_dir: Path,
+    task_path: Path,
+    docs_review_status: dict[str, object],
+) -> Path:
+    path = run_dir / "design-approval-request.md"
+    path.write_text(design_approval_request_content(root, task_path, docs_review_status), encoding="utf-8")
+    return path
+
+
+def docs_blocked_document_content(payload: dict[str, object], validation_errors: list[str]) -> str:
+    lines = [
+        "# Docs Review Blocked",
+        "",
+        "문서 리뷰가 clean 상태가 아니므로 implementation design approval 요청을 생성하지 않았습니다.",
+        "",
+        "## Required Decisions",
+    ]
+    decisions = payload.get("required_decisions")
+    if isinstance(decisions, list) and decisions:
+        for decision in decisions:
+            if not isinstance(decision, dict):
+                continue
+            lines.extend(
+                [
+                    "",
+                    f"### {decision.get('id', 'decision')}",
+                    "",
+                    f"- question: {decision.get('question', '')}",
+                    f"- category: {decision.get('category', '')}",
+                    f"- evidence_file: {decision.get('evidence_file', '')}",
+                    f"- evidence_summary: {decision.get('evidence_summary', '')}",
+                    f"- recommended_direction: {decision.get('recommended_direction', '')}",
+                    "- tradeoffs:",
+                ]
+            )
+            tradeoffs = decision.get("tradeoffs")
+            if isinstance(tradeoffs, list):
+                for tradeoff in tradeoffs:
+                    lines.append(f"  - {tradeoff}")
+            lines.append(f"- blocking_stage: {decision.get('blocking_stage', '')}")
+    else:
+        lines.extend(["", "- none recorded"])
+
+    blockers = payload.get("open_blockers")
+    lines.extend(["", "## Open Blockers"])
+    if isinstance(blockers, list) and blockers:
+        for blocker in blockers:
+            if not isinstance(blocker, dict):
+                continue
+            lines.extend(
+                [
+                    "",
+                    f"- id: {blocker.get('id', '')}",
+                    f"  evidence_file: {blocker.get('evidence_file', '')}",
+                    f"  evidence_summary: {blocker.get('evidence_summary', '')}",
+                ]
+            )
+    else:
+        lines.extend(["", "- none recorded"])
+
+    if validation_errors:
+        lines.extend(["", "## Validation Errors"])
+        lines.extend(f"- {error}" for error in validation_errors)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def docs_blocker_summaries(payload: dict[str, object], validation_errors: list[str]) -> list[str]:
+    blockers: list[str] = []
+    open_blockers = payload.get("open_blockers")
+    if isinstance(open_blockers, list):
+        for blocker in open_blockers:
+            if not isinstance(blocker, dict):
+                continue
+            blocker_id = blocker.get("id")
+            summary = blocker.get("evidence_summary") or blocker.get("category") or "docs review blocker"
+            blockers.append(f"{blocker_id}: {summary}" if blocker_id else str(summary))
+    blockers.extend(validation_errors)
+    return blockers or ["docs review status is not clean"]
+
+
+def make_docs_blocked_final(
+    root: Path,
+    run_dir: Path,
+    original: dict[str, object],
+    task_path: Path,
+    payload: dict[str, object],
+    validation_errors: list[str],
+) -> dict[str, object]:
+    docs_blocked_path = run_dir / "docs-blocked.md"
+    docs_blocked_path.write_text(docs_blocked_document_content(payload, validation_errors), encoding="utf-8")
+    return {
+        **original,
+        "status": "docs_blocked",
+        "task_path": rel(task_path, root),
+        "files_to_read_next": [rel(docs_blocked_path, root)],
+        "blockers": docs_blocker_summaries(payload, validation_errors),
+        "artifact": None,
+    }
+
+
+def docs_review_failed_document_content(reason: str, validation_errors: list[str]) -> str:
+    lines = [
+        "# Docs Review Failed",
+        "",
+        reason,
+    ]
+    if validation_errors:
+        lines.extend(["", "## Validation Errors"])
+        lines.extend(f"- {error}" for error in validation_errors)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def make_docs_review_failed_final(
+    root: Path,
+    run_dir: Path,
+    original: dict[str, object] | None,
+    task_path: Path,
+    reason: str,
+    validation_errors: list[str],
+) -> dict[str, object]:
+    failure_path = run_dir / "docs-review-failed.md"
+    failure_path.write_text(docs_review_failed_document_content(reason, validation_errors), encoding="utf-8")
+    blockers = validation_errors or [reason]
+    return {
+        **(original or {}),
+        "status": "blocked",
+        "task_path": rel(task_path, root),
+        "files_to_read_next": [rel(failure_path, root)],
+        "blockers": blockers,
+        "artifact": None,
+    }
+
+
+def make_launcher_blocked_final(
+    root: Path,
+    run_dir: Path,
+    reason: str,
+    blockers: list[str],
+) -> dict[str, object]:
+    failure_path = run_dir / "docs-review-failed.md"
+    failure_path.write_text(docs_review_failed_document_content(reason, blockers), encoding="utf-8")
+    return {
+        "status": "blocked",
+        "task_path": None,
+        "files_to_read_next": [rel(failure_path, root)],
+        "blockers": blockers or [reason],
+        "artifact": None,
+    }
+
+
+def make_pre_codex_blocked_result(
+    root: Path,
+    run_dir: Path,
+    request_path: Path,
+    prompt_path: Path,
+    final_output: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "status": "blocked",
+        "returncode": None,
+        "verifier_returncode": None,
+        "phase_plan_review_returncode": None,
+        "dry_run_returncode": None,
+        "runner_returncode": None,
+        "run_dir": rel(run_dir, root),
+        "request": rel(request_path, root),
+        "prompt": rel(prompt_path, root),
+        "last_message": rel(run_dir / "last-message.md", root),
+        "output": rel(run_dir / "harness-output.jsonl", root),
+        "stderr": rel(run_dir / "harness-stderr.txt", root),
+        "run_phases_output": rel(run_dir / "run-phases-output.txt", root),
+        "run_phases_stderr": rel(run_dir / "run-phases-stderr.txt", root),
+        "run_phases_dry_run_output": rel(run_dir / "run-phases-dry-run-output.txt", root),
+        "run_phases_dry_run_stderr": rel(run_dir / "run-phases-dry-run-stderr.txt", root),
+        "verify_task_output": rel(run_dir / "verify-task-output.txt", root),
+        "verify_task_stderr": rel(run_dir / "verify-task-stderr.txt", root),
+        "phase_plan_review_output": rel(run_dir / "phase-plan-review-output.txt", root),
+        "phase_plan_review_stderr": rel(run_dir / "phase-plan-review-stderr.txt", root),
+        "relationship_graph": None,
+        "docs_blocked": None,
+        "documents": visible_documents(root, run_dir, final_output),
+        "questions": rel(run_dir / "questions.md", root),
+        "docs_approval_request": rel(run_dir / "docs-approval-request.md", root),
+        "orchestration_violation": rel(run_dir / "orchestration-violation.json", root),
+        "protocol_violations": [],
+    }
+
+
+def task_paths_from_text(root: Path, text: str) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for match in re.finditer(r"tasks/[A-Za-z0-9._-]+", text):
+        try:
+            task_path = resolve_harness_task_path(root, match.group(0))
+        except (FileNotFoundError, ValueError):
+            continue
+        if task_path not in seen:
+            seen.add(task_path)
+            paths.append(task_path)
+    return paths
+
+
+def existing_task_paths(root: Path) -> list[Path]:
+    tasks_dir = root / "tasks"
+    if not tasks_dir.exists() or not tasks_dir.is_dir():
+        return []
+    paths: list[Path] = []
+    for path in sorted(tasks_dir.iterdir()):
+        if not path.is_dir():
+            continue
+        if (path / "index.json").exists() or (path / "docs").exists() or (path / "context-pack").exists():
+            paths.append(path.resolve())
+    return paths
+
+
+def infer_design_approved_task_path(root: Path, request: str, answer_paths: list[Path]) -> Path | None:
+    candidates = task_paths_from_text(root, request)
+    for answer_path in answer_paths:
+        try:
+            candidates.extend(task_paths_from_text(root, answer_path.read_text(encoding="utf-8", errors="replace")))
+        except OSError:
+            continue
+    unique_candidates = sorted(set(candidates))
+    if len(unique_candidates) == 1:
+        return unique_candidates[0]
+    existing = existing_task_paths(root)
+    if len(existing) == 1:
+        return existing[0]
+    return None
+
+
 def launcher_status_from_final(root: Path, run_dir: Path, final: dict[str, object] | None) -> str | None:
     if final is None:
         return None
     status = final.get("status")
-    if status not in {"questions_needed", "docs_approval_needed", "design_approval_needed", "planned", "generated", "blocked"}:
+    if status not in {
+        "questions_needed",
+        "docs_approval_needed",
+        "docs_blocked",
+        "design_approval_needed",
+        "planned",
+        "generated",
+        "blocked",
+    }:
         return None
     if status == "questions_needed":
         return "questions_needed" if (run_dir / "questions.md").exists() else "blocked"
     if status == "docs_approval_needed":
         return "docs_approval_needed" if (run_dir / "docs-approval-request.md").exists() else "blocked"
+    if status == "docs_blocked":
+        return "blocked"
     if status == "design_approval_needed":
         task_path = resolve_task_path(root, final)
         if task_path is None:
@@ -973,6 +1323,51 @@ def main() -> int:
     prompt_path = run_dir / "harness-prompt.md"
     write_prompt_artifact(prompt_path, prompt)
 
+    if args.docs_approved and args.design_approved and not args.dry_run:
+        task_path = infer_design_approved_task_path(root, request, answer_paths)
+        if task_path is None:
+            blockers = ["Unable to resolve exactly one task path before design-approved planning."]
+            final_output = make_launcher_blocked_final(
+                root,
+                run_dir,
+                "Clean docs review status is required before phase contract generation.",
+                blockers,
+            )
+            write_json(
+                run_dir / "orchestration-violation.json",
+                {
+                    "status": "orchestration_violation",
+                    "reason": "Design-approved planning requires exactly one resolved task before Codex can run.",
+                    "validation_errors": blockers,
+                },
+            )
+            result = make_pre_codex_blocked_result(root, run_dir, request_path, prompt_path, final_output)
+            write_json(run_dir / "launcher-result.json", result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 1
+        docs_review_errors = validate_docs_review_status(root, task_path)
+        if docs_review_errors:
+            final_output = make_docs_review_failed_final(
+                root,
+                run_dir,
+                None,
+                task_path,
+                "Clean docs review status is required before phase contract generation.",
+                docs_review_errors,
+            )
+            write_json(
+                run_dir / "orchestration-violation.json",
+                {
+                    "status": "orchestration_violation",
+                    "reason": "Clean docs review status is required before the launcher can run design-approved planning.",
+                    "validation_errors": docs_review_errors,
+                },
+            )
+            result = make_pre_codex_blocked_result(root, run_dir, request_path, prompt_path, final_output)
+            write_json(run_dir / "launcher-result.json", result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 1
+
     returncode: int | None = None
     before_snapshot: dict[str, str] | None = None
     protocol_violations: list[str] = []
@@ -1003,6 +1398,15 @@ def main() -> int:
             )
 
     final_status = launcher_status_from_final(root, run_dir, final_output)
+    if args.docs_approved and final_output and final_output.get("status") == "docs_blocked":
+        final_status = "blocked"
+        write_json(
+            run_dir / "orchestration-violation.json",
+            {
+                "status": "orchestration_violation",
+                "reason": "docs_blocked must be materialized by the launcher docs review loop, not self-reported by Codex.",
+            },
+        )
     if args.docs_approved and not args.design_approved and final_output and final_output.get("status") in {"planned", "generated"}:
         final_status = "blocked"
         write_json(
@@ -1021,6 +1425,66 @@ def main() -> int:
                 "reason": "Generate is runner-owned. The launcher Codex session must stop at planned.",
             },
         )
+
+    docs_blocked_info: dict[str, object] | None = None
+    if (
+        args.docs_approved
+        and not args.design_approved
+        and not args.dry_run
+        and not protocol_violations
+        and returncode == 0
+        and final_status == "design_approval_needed"
+        and final_output is not None
+    ):
+        task_path = resolve_task_path(root, final_output)
+        if task_path is None:
+            final_status = "blocked"
+        else:
+            docs_review_status = run_docs_review_loop(root, task_path, args)
+            artifact_errors = validate_docs_review_status_file(root, task_path, require_clean=False)
+            clean_errors = validate_docs_review_status(root, task_path) if docs_review_status.get("verdict") == "clean" else []
+            validation_errors = artifact_errors + clean_errors
+            if docs_review_status.get("verdict") == "blocked" and not validation_errors:
+                docs_blocked_info = docs_blocked_payload(docs_review_status)
+                final_output = make_docs_blocked_final(
+                    root,
+                    run_dir,
+                    final_output,
+                    task_path,
+                    docs_blocked_info,
+                    validation_errors,
+                )
+                final_status = "docs_blocked"
+            elif docs_review_status.get("verdict") != "clean" or validation_errors:
+                reason = "Docs review failed before design approval could be requested."
+                if docs_review_status.get("verdict") == "failed":
+                    reason = "Docs review reviewer/cleanup process failed before design approval could be requested."
+                final_output = make_docs_review_failed_final(
+                    root,
+                    run_dir,
+                    final_output,
+                    task_path,
+                    reason,
+                    validation_errors or docs_blocker_summaries(docs_review_status, []),
+                )
+                final_status = "blocked"
+                write_json(
+                    run_dir / "orchestration-violation.json",
+                    {
+                        "status": "orchestration_violation",
+                        "reason": reason,
+                        "validation_errors": validation_errors,
+                        "docs_review_verdict": docs_review_status.get("verdict"),
+                    },
+                )
+            else:
+                approval_request_path = write_design_approval_request(root, run_dir, task_path, docs_review_status)
+                files_to_read_next = final_output.get("files_to_read_next")
+                if isinstance(files_to_read_next, list):
+                    approval_request = rel(approval_request_path, root)
+                    if approval_request not in files_to_read_next:
+                        final_output["files_to_read_next"] = [approval_request, *files_to_read_next]
+
     verifier_returncode: int | None = None
     if (
         args.docs_approved
@@ -1145,6 +1609,7 @@ def main() -> int:
         "phase_plan_review_output": rel(run_dir / "phase-plan-review-output.txt", root),
         "phase_plan_review_stderr": rel(run_dir / "phase-plan-review-stderr.txt", root),
         "relationship_graph": relationship_graph,
+        "docs_blocked": docs_blocked_info,
         "documents": visible_documents(root, run_dir, final_output),
         "questions": rel(run_dir / "questions.md", root),
         "docs_approval_request": rel(run_dir / "docs-approval-request.md", root),

@@ -74,6 +74,7 @@ launcher가 요청을 파일로 저장하고, 별도 하네스 세션을 실행�
 
 - 확인 질문
 - 문서 생성 승인 요청
+- 문서 review blocker와 필요한 결정
 - task 경로
 - 다음 실행 명령
 
@@ -89,6 +90,8 @@ cat .codex/harness/sessions/<run-id>/last-message.md
 
 `questions.md`가 있으면 답을 추가합니다.
 `docs-approval-request.md`가 있으면 승인한 뒤 다시 실행합니다.
+`docs_blocked`가 나오면 design approval 요청이 아직 만들어지지 않은 상태입니다.
+`launcher-result.json`의 `required_decisions` 내용을 결정한 뒤 문서 review를 다시 통과시켜야 합니다.
 `implementation-design-review.md`가 있으면 설계를 검토하고 승인한 뒤 다시 실행합니다.
 task 경로도 위 파일에서 확인합니다.
 
@@ -110,7 +113,8 @@ list-tasks.py를 만들어줘.
 EOF
 ```
 
-이 단계는 구현 설계 리뷰를 만들고 `design_approval_needed`에서 멈춥니다.
+이 단계는 구현 설계 리뷰를 만들고 fresh docs review/cleanup loop를 통과한 뒤 `design_approval_needed`에서 멈춥니다.
+review blocker에 새 사용자 결정이 필요하거나 최대 반복 뒤에도 blocker가 남으면 `docs_blocked`에서 멈추고 design approval 요청을 보여주지 않습니다.
 구현 설계가 승인된 뒤에는 `--design-approved`를 함께 넘깁니다.
 이때 하네스는 `tasks/<task-dir>/context-pack/static/design-approval.json`을 만들고, 승인된 설계 리뷰 문서, 정적 evidence bundle, 승인된 policy pack lineage, approval scope의 SHA-256 해시를 기록해야 합니다.
 

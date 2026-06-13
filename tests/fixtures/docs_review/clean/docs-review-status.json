@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "verdict": "clean",
+  "max_iterations": 3,
+  "iterations_completed": 1,
+  "reviewed_at": "2026-06-02T22:58:22+09:00",
+  "reviewed_files": [
+    {
+      "path": "tasks/demo/docs/prd.md",
+      "sha256": "e3e86a727382de9431ce2d5daff04c2d623e4507bb9bc42256a1743b6698f87b"
+    },
+    {
+      "path": "tasks/demo/context-pack/static/decisions.md",
+      "sha256": "b6022b8b23edb1c75c70bc75bdb7d4214c9d732faa99942e0637f9bdaeeb74c1"
+    }
+  ],
+  "findings": [
+    {
+      "id": "DR-001",
+      "severity": "warning",
+      "category": "self_contradiction",
+      "evidence_file": "tasks/demo/docs/prd.md",
+      "evidence_summary": "Resolved wording issue.",
+      "auto_fixable": true,
+      "requires_user_decision": false,
+      "status": "resolved"
+    }
+  ],
+  "resolved_blockers": [],
+  "open_blockers": [],
+  "required_decisions": [],
+  "artifact_refs": []
+}

@@ -23,6 +23,7 @@ sys.path.insert(0, str(HARNESS_DIR))
 
 import policy_lineage  # noqa: E402
 import harness_attestation  # noqa: E402
+import docs_review  # noqa: E402
 import start as harness_start  # noqa: E402
 
 
@@ -265,6 +266,96 @@ class StartLauncherTest(unittest.TestCase):
             )
             """
         )
+
+    def write_minimal_task_artifacts(self, repo: Path, *, docs_review_verdict: str | None = "clean") -> Path:
+        task = repo / "tasks" / "demo"
+        common_docs = [
+            "docs/harness/runner-contract.md",
+            "docs/harness/testing.md",
+            "docs/harness/document-scope.md",
+            "docs/harness/implementation-quality.md",
+        ]
+        task_docs = [
+            "tasks/demo/docs/prd.md",
+            "tasks/demo/docs/flow.md",
+            "tasks/demo/docs/data-schema.md",
+            "tasks/demo/docs/code-architecture.md",
+            "tasks/demo/docs/adr.md",
+            "tasks/demo/docs/implementation-design-review.md",
+        ]
+        for raw in common_docs + task_docs:
+            path = repo / raw
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# Doc\n", encoding="utf-8")
+        static_dir = task / "context-pack" / "static"
+        static_dir.mkdir(parents=True, exist_ok=True)
+        for name in [
+            "original-prompt.md",
+            "product.md",
+            "decisions.md",
+            "decisions.json",
+            "open-decisions.json",
+            "architecture.json",
+            "dependency-policy.json",
+            "design-contract.json",
+            "review-taxonomy.json",
+            "review-findings.json",
+            "review-coverage.json",
+            "traceability-matrix.json",
+            "context-gathering-budget.json",
+            "rejected-options.md",
+            "constraints.md",
+            "test-policy.md",
+            "clarify-review.md",
+            "docs-approval.md",
+            "context-gathering.md",
+            "docs-index.md",
+        ]:
+            (static_dir / name).write_text("{}\n" if name.endswith(".json") else "# Static\n", encoding="utf-8")
+        (repo / "tasks").mkdir(parents=True, exist_ok=True)
+        (repo / "tasks" / "index.json").write_text('{"tasks":[{"dir":"demo"}]}\n', encoding="utf-8")
+        (task / "index.json").write_text(
+            '{"project":"demo","task":"demo","common_docs":["docs/harness/runner-contract.md","docs/harness/testing.md","docs/harness/document-scope.md","docs/harness/implementation-quality.md"],"docs":["tasks/demo/docs/prd.md","tasks/demo/docs/flow.md","tasks/demo/docs/data-schema.md","tasks/demo/docs/code-architecture.md","tasks/demo/docs/adr.md","tasks/demo/docs/implementation-design-review.md"],"totalPhases":0,"phases":[]}\n',
+            encoding="utf-8",
+        )
+        if docs_review_verdict is not None:
+            status_path = task / "context-pack" / "runtime" / "docs-review-status.json"
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            runtime_dir = task / "context-pack" / "runtime"
+            proof_paths = {
+                "docs-review-attempt1-prompt": runtime_dir / "docs-review-attempt1-prompt.md",
+                "docs-review-attempt1-output": runtime_dir / "docs-review-attempt1-output.jsonl",
+                "docs-review-attempt1-last-message": runtime_dir / "docs-review-attempt1-last-message.json",
+                "docs-review-findings-attempt1": runtime_dir / "docs-review-findings-attempt1.json",
+            }
+            if docs_review_verdict == "clean":
+                for name, path in proof_paths.items():
+                    path.write_text(f"{name}\n", encoding="utf-8")
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "verdict": docs_review_verdict,
+                        "max_iterations": 3,
+                        "iterations_completed": 1,
+                        "reviewed_at": "2026-06-02T20:15:50+09:00",
+                        "reviewed_files": docs_review.reviewed_file_entries(repo, task),
+                        "findings": [],
+                        "resolved_blockers": [],
+                        "open_blockers": [],
+                        "required_decisions": [],
+                        "artifact_refs": [
+                            docs_review.artifact_ref(task, path, name)
+                            for name, path in proof_paths.items()
+                        ]
+                        if docs_review_verdict == "clean"
+                        else [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        return task
 
     def latest_launcher_result(self, repo: Path) -> dict[str, object]:
         result_paths = sorted((repo / ".codex" / "harness" / "sessions").glob("*/launcher-result.json"))
@@ -732,6 +823,7 @@ class StartLauncherTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             repo = self.make_repo(tmp)
+            self.write_minimal_task_artifacts(repo, docs_review_verdict="clean")
             runner_argv = repo / "runner-argv.json"
             (repo / ".codex" / "harness" / "scripts" / "run-phases.py").write_text(
                 textwrap.dedent(
@@ -868,6 +960,7 @@ class StartLauncherTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             repo = self.make_repo(tmp)
+            self.write_minimal_task_artifacts(repo, docs_review_verdict="clean")
             (repo / ".codex" / "harness" / "scripts" / "verify-task.py").write_text(
                 "import sys\nprint('verify failed')\nraise SystemExit(9)\n",
                 encoding="utf-8",
@@ -925,6 +1018,7 @@ class StartLauncherTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             repo = self.make_repo(tmp)
+            self.write_minimal_task_artifacts(repo, docs_review_verdict="clean")
             marker = tmp / "verify-heartbeat.txt"
             child = tmp / "verify_child.py"
             child.write_text(
@@ -1022,6 +1116,7 @@ class StartLauncherTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             repo = self.make_repo(tmp)
+            self.write_minimal_task_artifacts(repo, docs_review_verdict="clean")
             (repo / ".codex" / "harness" / "scripts" / "review-phase-plan.py").write_text(
                 "import sys\nprint('phase plan failed')\nraise SystemExit(8)\n",
                 encoding="utf-8",
@@ -1080,6 +1175,7 @@ class StartLauncherTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             repo = self.make_repo(tmp)
+            self.write_minimal_task_artifacts(repo, docs_review_verdict="clean")
             (repo / ".codex" / "harness" / "scripts" / "run-phases.py").write_text(
                 "import sys\nprint('dry-run failed')\nraise SystemExit(6)\n",
                 encoding="utf-8",
@@ -1138,6 +1234,7 @@ class StartLauncherTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             repo = self.make_repo(tmp)
+            self.write_minimal_task_artifacts(repo, docs_review_verdict="clean")
             fake = self.make_fake_codex(
                 tmp,
                 textwrap.dedent(
@@ -1190,6 +1287,7 @@ class StartLauncherTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             repo = self.make_repo(tmp)
+            self.write_minimal_task_artifacts(repo, docs_review_verdict="clean")
             fake = self.make_fake_codex(
                 tmp,
                 textwrap.dedent(
@@ -1266,10 +1364,148 @@ class StartLauncherTest(unittest.TestCase):
                 ),
             )
 
+    def test_design_approved_planning_rejects_missing_docs_review_before_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            self.write_minimal_task_artifacts(repo, docs_review_verdict=None)
+            marker = tmp / "codex-invoked.txt"
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    f"""
+                    Path({str(marker)!r}).write_text("invoked\\n", encoding="utf-8")
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "plan tasks/demo",
+                    "--docs-approved",
+                    "--design-approved",
+                    "--full-auto",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+            self.assertFalse(marker.exists())
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "blocked")
+            self.assertIsNone(launcher_result["returncode"])
+            self.assertIsNone(launcher_result["docs_blocked"])
+            self.assertTrue(
+                any("Missing docs review status" in blocker for blocker in launcher_result["documents"][0]["content"].splitlines())
+            )
+
+    def test_design_approved_planning_rejects_non_clean_docs_review_before_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            self.write_minimal_task_artifacts(repo, docs_review_verdict="failed")
+            marker = tmp / "codex-invoked.txt"
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    f"""
+                    Path({str(marker)!r}).write_text("invoked\\n", encoding="utf-8")
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "plan tasks/demo",
+                    "--docs-approved",
+                    "--design-approved",
+                    "--full-auto",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+            self.assertFalse(marker.exists())
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "blocked")
+            self.assertIsNone(launcher_result["returncode"])
+            self.assertIsNone(launcher_result["docs_blocked"])
+            self.assertIn('docs-review-status.json verdict must be "clean"', launcher_result["documents"][0]["content"])
+
+    def test_design_approved_planning_rejects_ambiguous_task_before_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            self.write_minimal_task_artifacts(repo, docs_review_verdict="clean")
+            other_task = repo / "tasks" / "other"
+            other_task.mkdir(parents=True)
+            (other_task / "index.json").write_text('{"project":"other","task":"other","phases":[]}\n', encoding="utf-8")
+            marker = tmp / "codex-invoked.txt"
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    f"""
+                    Path({str(marker)!r}).write_text("invoked\\n", encoding="utf-8")
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "plan the approved task",
+                    "--docs-approved",
+                    "--design-approved",
+                    "--full-auto",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+            self.assertFalse(marker.exists())
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "blocked")
+            self.assertIsNone(launcher_result["returncode"])
+            self.assertIsNone(launcher_result["docs_blocked"])
+            self.assertIn(
+                "Unable to resolve exactly one task path before design-approved planning.",
+                launcher_result["documents"][0]["content"],
+            )
+
     def test_run_phases_failure_blocks_launcher_result(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             repo = self.make_repo(tmp)
+            self.write_minimal_task_artifacts(repo, docs_review_verdict="clean")
             (repo / ".codex" / "harness" / "scripts" / "run-phases.py").write_text(
                 "import sys\n"
                 "if '--dry-run' in sys.argv:\n"
@@ -1386,6 +1622,15 @@ class StartLauncherTest(unittest.TestCase):
                     """
                     args = sys.argv
                     prompt = sys.stdin.read()
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    if prompt.startswith("# Docs Review Attempt"):
+                        last_message.parent.mkdir(parents=True, exist_ok=True)
+                        last_message.write_text(
+                            '{"verdict":"clean","findings":[],"required_decisions":[]}\\n',
+                            encoding="utf-8",
+                        )
+                        print('{"type":"message","message":"fake-review"}')
+                        raise SystemExit(0)
                     assert "design_approval_needed" in prompt
                     assert "Generate is disabled until the launcher is rerun with `--design-approved`." in prompt
                     root = Path.cwd()
@@ -1442,7 +1687,6 @@ class StartLauncherTest(unittest.TestCase):
                     )
                     review = task / "docs" / "implementation-design-review.md"
                     review.write_text("# Implementation Design Review\\n", encoding="utf-8")
-                    last_message = Path(args[args.index("--output-last-message") + 1])
                     last_message.parent.mkdir(parents=True, exist_ok=True)
                     last_message.write_text(
                         '{"status":"design_approval_needed","task_path":"tasks/demo","files_to_read_next":["tasks/demo/docs/implementation-design-review.md"],"blockers":[],"artifact":null}\\n',
@@ -1477,16 +1721,269 @@ class StartLauncherTest(unittest.TestCase):
             launcher_result = self.latest_launcher_result(repo)
             self.assertEqual(launcher_result["status"], "design_approval_needed")
             self.assertIsNone(launcher_result["runner_returncode"])
-            self.assertEqual(
-                launcher_result["documents"],
+            document_paths = [item["path"] for item in launcher_result["documents"]]
+            self.assertEqual(len(document_paths), 2)
+            self.assertTrue(document_paths[0].endswith("design-approval-request.md"))
+            self.assertEqual(document_paths[1], "tasks/demo/docs/implementation-design-review.md")
+            approval_request = launcher_result["documents"][0]["content"]
+            self.assertIn("## 이번 문서에 고정된 결정", approval_request)
+            self.assertIn("## 주요 product / scope / non-goal 결정", approval_request)
+            self.assertIn("## 구현 agent에게 넘길 계약", approval_request)
+            self.assertIn("Data model", approval_request)
+            self.assertIn("API", approval_request)
+            self.assertIn("Storage", approval_request)
+            self.assertIn("Dependency", approval_request)
+            self.assertIn("UX flow", approval_request)
+            self.assertIn("## 리뷰에서 발견되어 해결된 주요 blocker", approval_request)
+            self.assertIn("## 남아 있는 open decision", approval_request)
+            self.assertIn("phase agent", approval_request)
+            self.assertIn("재리뷰와 재승인", approval_request)
+            self.assertEqual(launcher_result["documents"][1]["content"], "# Implementation Design Review\n")
+
+    def test_docs_approved_design_review_is_docs_blocked_when_docs_review_requires_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    import json
+
+                    args = sys.argv
+                    prompt = sys.stdin.read()
+                    root = Path.cwd()
+                    task = root / "tasks" / "demo"
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    if prompt.startswith("# Docs Review Attempt"):
+                        last_message.write_text(
+                            json.dumps(
+                                {
+                                    "verdict": "blocked",
+                                    "findings": [
+                                        {
+                                            "id": "DR-001",
+                                            "severity": "blocker",
+                                            "category": "decision_approval_leakage",
+                                            "evidence_file": "tasks/demo/docs/implementation-design-review.md",
+                                            "evidence_summary": "The draft introduces an unapproved API behavior.",
+                                            "auto_fixable": False,
+                                            "requires_user_decision": True,
+                                            "status": "open",
+                                        }
+                                    ],
+                                    "required_decisions": [
+                                        {
+                                            "id": "RD-001",
+                                            "question": "Should the launcher expose the new API behavior?",
+                                            "category": "api_contract",
+                                            "evidence_file": "tasks/demo/docs/implementation-design-review.md",
+                                            "evidence_summary": "The draft introduces an unapproved API behavior.",
+                                            "recommended_direction": "Approve the API behavior explicitly or remove it from the docs.",
+                                            "tradeoffs": [
+                                                "Approving it expands the public launcher contract.",
+                                                "Removing it keeps this phase limited to the approved docs_blocked flow.",
+                                            ],
+                                            "blocking_stage": "docs_review",
+                                        }
+                                    ],
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\\n",
+                            encoding="utf-8",
+                        )
+                        print('{"type":"message","message":"fake-review"}')
+                        raise SystemExit(0)
+                    """
+                )
+                + self.task_artifact_setup_code()
+                + textwrap.dedent(
+                    """
+                    review = task / "docs" / "implementation-design-review.md"
+                    review.write_text("# Implementation Design Review\\n", encoding="utf-8")
+                    last_message.write_text(
+                        '{"status":"design_approval_needed","task_path":"tasks/demo","files_to_read_next":["tasks/demo/docs/implementation-design-review.md"],"blockers":[],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
                 [
-                    {
-                        "path": "tasks/demo/docs/implementation-design-review.md",
-                        "content": "# Implementation Design Review\n",
-                        "truncated": False,
-                    }
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "needs blocked docs review",
+                    "--docs-approved",
+                    "--full-auto",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "docs_blocked")
+            self.assertIsNone(launcher_result["runner_returncode"])
+            docs_blocked = launcher_result["docs_blocked"]
+            self.assertEqual(docs_blocked["verdict"], "blocked")
+            self.assertEqual(docs_blocked["required_decisions"][0]["id"], "RD-001")
+            self.assertEqual(
+                docs_blocked["required_decisions"][0]["evidence_file"],
+                "tasks/demo/docs/implementation-design-review.md",
+            )
+            self.assertEqual(
+                docs_blocked["required_decisions"][0]["tradeoffs"],
+                [
+                    "Approving it expands the public launcher contract.",
+                    "Removing it keeps this phase limited to the approved docs_blocked flow.",
                 ],
             )
+            document_paths = [item["path"] for item in launcher_result["documents"]]
+            self.assertEqual(len(document_paths), 1)
+            self.assertTrue(document_paths[0].endswith("docs-blocked.md"))
+            self.assertNotIn("tasks/demo/docs/implementation-design-review.md", document_paths)
+            blocked_doc = launcher_result["documents"][0]["content"]
+            self.assertIn("## Required Decisions", blocked_doc)
+            self.assertIn("evidence_summary: The draft introduces an unapproved API behavior.", blocked_doc)
+            self.assertIn("Approving it expands the public launcher contract.", blocked_doc)
+            self.assertIn("Removing it keeps this phase limited to the approved docs_blocked flow.", blocked_doc)
+
+    def test_docs_approved_failed_docs_review_is_blocked_not_docs_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    import json
+
+                    args = sys.argv
+                    prompt = sys.stdin.read()
+                    root = Path.cwd()
+                    task = root / "tasks" / "demo"
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    if prompt.startswith("# Docs Review Attempt"):
+                        last_message.write_text(
+                            json.dumps(
+                                {
+                                    "verdict": "failed",
+                                    "findings": [],
+                                    "required_decisions": [],
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\\n",
+                            encoding="utf-8",
+                        )
+                        print('{"type":"message","message":"fake-review"}')
+                        raise SystemExit(0)
+                    """
+                )
+                + self.task_artifact_setup_code()
+                + textwrap.dedent(
+                    """
+                    review = task / "docs" / "implementation-design-review.md"
+                    review.write_text("# Implementation Design Review\\n", encoding="utf-8")
+                    last_message.write_text(
+                        '{"status":"design_approval_needed","task_path":"tasks/demo","files_to_read_next":["tasks/demo/docs/implementation-design-review.md"],"blockers":[],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "needs failed docs review handling",
+                    "--docs-approved",
+                    "--full-auto",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "blocked")
+            self.assertIsNone(launcher_result["runner_returncode"])
+            self.assertIsNone(launcher_result["docs_blocked"])
+            self.assertTrue(Path(repo, launcher_result["orchestration_violation"]).exists())
+            document_paths = [item["path"] for item in launcher_result["documents"]]
+            self.assertEqual(len(document_paths), 1)
+            self.assertTrue(document_paths[0].endswith("docs-review-failed.md"))
+            self.assertIn("reviewer/cleanup process failed", launcher_result["documents"][0]["content"])
+            self.assertNotIn("tasks/demo/docs/implementation-design-review.md", document_paths)
+
+    def test_docs_blocked_self_report_is_blocked_without_docs_review_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            repo = self.make_repo(tmp)
+            self.write_minimal_task_artifacts(repo, docs_review_verdict=None)
+            fake = self.make_fake_codex(
+                tmp,
+                textwrap.dedent(
+                    """
+                    args = sys.argv
+                    last_message = Path(args[args.index("--output-last-message") + 1])
+                    last_message.parent.mkdir(parents=True, exist_ok=True)
+                    last_message.write_text(
+                        '{"status":"docs_blocked","task_path":"tasks/demo","files_to_read_next":[],"blockers":["self reported"],"artifact":null}\\n',
+                        encoding="utf-8",
+                    )
+                    print('{"type":"message","message":"fake"}')
+                    raise SystemExit(0)
+                    """
+                ),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(START),
+                    "--root",
+                    str(repo),
+                    "--request",
+                    "self reports docs blocked",
+                    "--docs-approved",
+                    "--full-auto",
+                    "--codex-bin",
+                    str(fake),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+            self.assertFalse((repo / "tasks" / "demo" / "context-pack" / "runtime" / "docs-review-status.json").exists())
+            launcher_result = self.latest_launcher_result(repo)
+            self.assertEqual(launcher_result["status"], "blocked")
+            self.assertIsNone(launcher_result["docs_blocked"])
+            violation = json.loads(Path(repo, launcher_result["orchestration_violation"]).read_text(encoding="utf-8"))
+            self.assertIn("docs review loop", violation["reason"])
 
     def test_design_approval_needed_without_task_structure_is_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
